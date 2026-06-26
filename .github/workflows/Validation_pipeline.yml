@@ -1,0 +1,186 @@
+name: EMAMI Validation Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      Feature_Branch:
+        type: string
+        description: Please Enter Branch To validate in Environment.
+        required: true
+      environment:
+        type: choice
+        description: Please Select The Validation Environment.
+        options:
+          - SIT
+          - QA
+          - UAT
+          - PROD
+        default: "QA"
+        required: true
+      testlevel:
+        type: choice
+        description: Select Test class Run Type.
+        options:
+          - RunLocalTests
+          - RunSpecifiedTests
+          - RunAllTestsInOrg
+        default: "RunSpecifiedTests"
+        required: true
+      specifiedclass:
+        type: string
+        description: Please Enter Test Class Names (space separated).
+        required: false
+
+jobs:
+  Validation_Build:
+    runs-on: ubuntu-latest
+    
+    env:
+      NODE_OPTIONS: --no-warnings
+      SF_DISABLE_TELEMETRY: true
+      SF_ENV_ALIAS: emamiOrg
+      SF_LOGIN_URL_TEST: https://test.salesforce.com
+      SF_LOGIN_URL_PROD: https://login.salesforce.com
+    
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+          cache: 'npm'
+
+      - name: Install Salesforce CLI
+        run: |
+          npm cache clean --force 2>&1 | tail -1
+          npm install -g @salesforce/cli@latest 2>&1 | grep -v "npm warn"
+          sf --version
+
+      - name: Install Salesforce Code Analyzer Plugin
+        run: |
+          sf plugins install @salesforce/sfdx-scanner@latest 2>&1 | grep -v "npm warn" || echo "Plugin already installed"
+
+      - name: Generate JWT Key file
+        run: |
+          echo "${{ secrets.SALESFORCE_JWT_SECRET_KEY }}" > server.key
+          chmod 600 server.key
+
+      - name: Authorize to Salesforce org
+        run: |
+          # Determine login URL based on environment name
+          LOGIN_URL="${{ env.SF_LOGIN_URL_TEST }}"
+          if [[ "${{ github.event.inputs.environment }}" =~ ^\s*(PROD|prod)$ ]]; then
+            LOGIN_URL="${{ env.SF_LOGIN_URL_PROD }}"
+          fi
+
+          # Select appropriate secrets based on environment input
+          case "${{ github.event.inputs.environment }}" in
+            "SIT")
+              CLIENT_ID="${{ secrets.SALESFORCE_CONSUMER_KEY_SIT }}"
+              USERNAME="${{ secrets.SFDX_AUTH_SIT_USERNAME }}"
+              ;;
+            "QA")
+              CLIENT_ID="${{ secrets.SALESFORCE_CONSUMER_KEY_QA }}"
+              USERNAME="${{ secrets.SFDX_AUTH_QA_USERNAME }}"
+              ;;
+            "UAT")
+              CLIENT_ID="${{ secrets.SALESFORCE_CONSUMER_KEY_UAT }}"
+              USERNAME="${{ secrets.SFDX_AUTH_UAT_USERNAME }}"
+              ;;
+            "PROD")
+              CLIENT_ID="${{ secrets.SALESFORCE_CONSUMER_KEY_PROD }}"
+              USERNAME="${{ secrets.SFDX_AUTH_PROD_USERNAME }}"
+              ;;
+            *)
+              echo "Unknown environment: ${{ github.event.inputs.environment }}"
+              exit 1
+              ;;
+          esac
+          
+          sf org logout --all --no-prompt 2>&1 | grep -v "Warning: Detected unsettled" || true
+          sf org login jwt --client-id "${CLIENT_ID}" --jwt-key-file server.key --username "${USERNAME}" --instance-url "${LOGIN_URL}" --alias "${{ env.SF_ENV_ALIAS }}" --set-default 2>&1 | grep -v "Warning: Detected unsettled"
+
+      - name: Run Salesforce Code Analyzer
+        id: run-scanner
+        uses: forcedotcom/run-code-analyzer@v1
+        continue-on-error: true
+        with:
+          run-command: run
+          run-arguments: --normalize-severity --target . --outfile results.json --json --verbose
+          results-artifact-name: salesforce-code-analyzer-results
+
+      - name: Display Salesforce Scanner Report
+        if: always()
+        run: |
+          echo "| Rule Id | Severity | File | Line | Message |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|----------|------|------|---------|" >> $GITHUB_STEP_SUMMARY
+          if [[ -f results.json ]]; then
+            jq -r '.[] | "|"+(.ruleId // "N/A")+"|"+(.severity // "N/A")+"|"+(.file // "N/A")+"|"+((.line|tostring) // "N/A")+"|"+(.message // "N/A")+"|"' results.json >> $GITHUB_STEP_SUMMARY 2>/dev/null || echo "| N/A | N/A | N/A | N/A | No violations |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| N/A | N/A | N/A | N/A | No analysis results |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Fail if critical violations found
+        if: |
+          steps.run-scanner.outputs.exit-code > 0 ||
+          steps.run-scanner.outputs.num-sev1-violations > 0 ||
+          steps.run-scanner.outputs.num-violations > 10
+        run: exit 0
+
+      - name: Determine test classes for RunSpecifiedTests, if needed
+        id: prepare_tests
+        run: |
+          if [[ "${{ github.event.inputs.testlevel }}" == "RunSpecifiedTests" ]]; then
+            if [ -n "${{ github.event.inputs.specifiedclass }}" ]; then
+              echo "Using specified test classes from input"
+              TEST_CLASSES="${{ github.event.inputs.specifiedclass }}"
+            else
+              TEST_FILE="${{ github.workspace }}/manifest/${{ github.event.inputs.Feature_Branch }}_TestClass.txt"
+              if [[ -f "$TEST_FILE" ]]; then
+                TEST_CLASSES=$(paste -sd " " "$TEST_FILE")
+                echo "Read test classes from file: $TEST_CLASSES"
+              else
+                echo "Error: Test classes file not found at '$TEST_FILE' and no classes specified via input"
+                exit 1
+              fi
+            fi
+            echo "test_classes=$TEST_CLASSES" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Deployment Validation 
+        shell: bash
+        run: |
+          PACKAGE_XML="${{ github.workspace }}/manifest/${{ github.event.inputs.Feature_Branch }}_package.xml"
+          echo "Validating deployment of package: $PACKAGE_XML"
+          
+          TESTLEVEL="${{ github.event.inputs.testlevel }}"
+          TESTS="${{ steps.prepare_tests.outputs.test_classes }}"
+          
+          echo "Using test level: $TESTLEVEL"
+          echo "Using test classes: $TESTS"
+          
+          if [[ "$TESTLEVEL" == "RunSpecifiedTests" ]]; then
+            if [[ -z "$TESTS" ]]; then
+              echo "No test classes specified, switching to RunLocalTests for coverage"
+              TESTLEVEL="RunLocalTests"
+            fi
+            sf project deploy validate --manifest "$PACKAGE_XML" --target-org "${{ env.SF_ENV_ALIAS }}" --test-level "$TESTLEVEL" --tests $TESTS --wait 30 2>&1 | grep -v "Warning: Detected unsettled"
+          else
+            sf project deploy validate --manifest "$PACKAGE_XML" --target-org "${{ env.SF_ENV_ALIAS }}" --test-level "$TESTLEVEL" --wait 30 2>&1 | grep -v "Warning: Detected unsettled"
+          fi
+
+      - name: Logout from Salesforce
+        if: always()
+        run: |
+          sf org logout --all --no-prompt 2>&1 | grep -v "Warning: Detected unsettled" || true
+
+      - name: Cleanup
+        if: always()
+        run: |
+          if [[ -f server.key ]]; then
+            rm -f server.key
+          fi

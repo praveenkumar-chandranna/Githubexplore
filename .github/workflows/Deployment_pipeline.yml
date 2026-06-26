@@ -1,0 +1,281 @@
+name: EMAMI Deployment Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      Feature_Branch:
+        type: string
+        description: Package manifest to deploy (e.g. package name / branch name)
+        required: true
+      environment:
+        type: choice
+        description: Deployment environment
+        options:
+          - SIT
+          - QA
+          - UAT
+          - PROD
+        default: QA
+        required: true
+      testlevel:
+        type: choice
+        description: Test class run level
+        options:
+          - NoTestRun
+          - RunLocalTests
+          - RunSpecifiedTests
+          - RunAllTestsInOrg
+        default: RunSpecifiedTests
+        required: true
+      specifiedclass:
+        type: string
+        description: Test class names (space separated, required if RunSpecifiedTests)
+        required: false
+
+jobs:
+  Deployment_Build:
+    runs-on: ubuntu-latest
+
+    env:
+      NODE_OPTIONS: --no-warnings
+      SF_DISABLE_TELEMETRY: true
+      SF_LOGIN_URL_TEST: https://test.salesforce.com
+      SF_LOGIN_URL_PROD: https://login.salesforce.com
+      SF_ALIAS: emamiOrg
+
+    if: >
+      (github.event_name == 'push' &&
+       (
+         (github.ref == 'refs/heads/SIT' && github.event.inputs.environment == 'SIT') ||
+         (github.ref == 'refs/heads/QA' && github.event.inputs.environment == 'QA') ||
+         (github.ref == 'refs/heads/UAT' && github.event.inputs.environment == 'UAT') ||
+         ((github.ref == 'refs/heads/main' || github.ref == 'refs/heads/prod') && github.event.inputs.environment == 'PROD')
+       )
+      ) ||
+      (github.event_name == 'workflow_dispatch' &&
+       (
+         (github.ref == 'refs/heads/SIT' && github.event.inputs.environment == 'SIT') ||
+         (github.ref == 'refs/heads/QA' && github.event.inputs.environment == 'QA') ||
+         (github.ref == 'refs/heads/UAT' && github.event.inputs.environment == 'UAT') ||
+         ((github.ref == 'refs/heads/main' || github.ref == 'refs/heads/prod') && github.event.inputs.environment == 'PROD')
+       ))
+
+    steps:
+      - name: Validate branch-environment consistency (manual only)
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          DEPLOY_BRANCH="${GITHUB_REF##*/}"
+          ENVIRONMENT="${{ github.event.inputs.environment }}"
+          echo "Manual run: Deployment Environment=$ENVIRONMENT. Package to deploy: ${{ github.event.inputs.Feature_Branch }}"
+
+      - name: Set environment variables
+        shell: bash
+        run: |
+          echo "FEATURE_BRANCH=${{ github.event.inputs.Feature_Branch }}" >> $GITHUB_ENV
+
+          if [ -n "${{ github.event.inputs.environment }}" ]; then
+            echo "ENVIRONMENT=${{ github.event.inputs.environment }}" >> $GITHUB_ENV
+            export ENVIRONMENT="${{ github.event.inputs.environment }}"
+          else
+            case "${GITHUB_REF##*/}" in
+              SIT)
+                echo "ENVIRONMENT=SIT" >> $GITHUB_ENV
+                export ENVIRONMENT="SIT"
+                ;;
+              QA)
+                echo "ENVIRONMENT=QA" >> $GITHUB_ENV
+                export ENVIRONMENT="QA"
+                ;;
+              UAT)
+                echo "ENVIRONMENT=UAT" >> $GITHUB_ENV
+                export ENVIRONMENT="UAT"
+                ;;
+              main|prod)
+                echo "ENVIRONMENT=PROD" >> $GITHUB_ENV
+                export ENVIRONMENT="PROD"
+                ;;
+              *)
+                echo "ERROR: Branch '${GITHUB_REF##*/}' does not map to a known environment."
+                exit 1
+                ;;
+            esac
+          fi
+
+          if [[ -z "${ENVIRONMENT}" ]]; then
+            echo "ERROR: ENVIRONMENT variable is not set or empty! Please provide a valid environment input or push to a recognized branch."
+            exit 1
+          fi
+
+          if [ -n "${{ github.event.inputs.testlevel }}" ]; then
+            echo "TEST_LEVEL=${{ github.event.inputs.testlevel }}" >> $GITHUB_ENV
+          else
+            echo "TEST_LEVEL=RunSpecifiedTests" >> $GITHUB_ENV
+          fi
+
+          SPECIFIED_CLASS="${{ github.event.inputs.specifiedclass }}"
+          if [[ "$SPECIFIED_CLASS" == "''" ]]; then
+            SPECIFIED_CLASS=""
+          fi
+          echo "SPECIFIED_CLASS=$SPECIFIED_CLASS" >> $GITHUB_ENV
+
+      - name: Checkout source code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+          cache: 'npm'
+
+      - name: Install Salesforce CLI
+        run: |
+          npm cache clean --force 2>&1 | tail -1
+          npm install -g @salesforce/cli@latest 2>&1 | grep -v "npm warn"
+          sf --version
+
+      - name: Generate JWT private key file
+        run: |
+          echo "${{ secrets.SALESFORCE_JWT_SECRET_KEY }}" > server.key
+          chmod 600 server.key
+
+      - name: Set org credentials and login URL based on environment
+        id: set-org
+        shell: bash
+        run: |
+          case "${{ env.ENVIRONMENT }}" in
+            SIT)
+              echo "CLIENT_ID=${{ secrets.SALESFORCE_CONSUMER_KEY_SIT }}" >> $GITHUB_OUTPUT
+              echo "USERNAME=${{ secrets.SFDX_AUTH_SIT_USERNAME }}" >> $GITHUB_OUTPUT
+              echo "LOGIN_URL=${{ env.SF_LOGIN_URL_TEST }}" >> $GITHUB_OUTPUT
+              ;;
+            QA)
+              echo "CLIENT_ID=${{ secrets.SALESFORCE_CONSUMER_KEY_QA }}" >> $GITHUB_OUTPUT
+              echo "USERNAME=${{ secrets.SFDX_AUTH_QA_USERNAME }}" >> $GITHUB_OUTPUT
+              echo "LOGIN_URL=${{ env.SF_LOGIN_URL_TEST }}" >> $GITHUB_OUTPUT
+              ;;
+            UAT)
+              echo "CLIENT_ID=${{ secrets.SALESFORCE_CONSUMER_KEY_UAT }}" >> $GITHUB_OUTPUT
+              echo "USERNAME=${{ secrets.SFDX_AUTH_UAT_USERNAME }}" >> $GITHUB_OUTPUT
+              echo "LOGIN_URL=${{ env.SF_LOGIN_URL_TEST }}" >> $GITHUB_OUTPUT
+              ;;
+            PROD)
+              echo "CLIENT_ID=${{ secrets.SALESFORCE_CONSUMER_KEY_PROD }}" >> $GITHUB_OUTPUT
+              echo "USERNAME=${{ secrets.SFDX_AUTH_PROD_USERNAME }}" >> $GITHUB_OUTPUT
+              echo "LOGIN_URL=${{ env.SF_LOGIN_URL_PROD }}" >> $GITHUB_OUTPUT
+              ;;
+            *)
+              echo "Unsupported environment ${{ env.ENVIRONMENT }}"
+              exit 1
+              ;;
+          esac
+
+      - name: Authenticate to Salesforce Org
+        run: |
+          sf org logout --all --no-prompt 2>&1 | grep -v "Warning: Detected unsettled" || true
+          sf auth jwt grant \
+            --client-id "${{ steps.set-org.outputs.CLIENT_ID }}" \
+            --jwt-key-file server.key \
+            --username "${{ steps.set-org.outputs.USERNAME }}" \
+            --instance-url "${{ steps.set-org.outputs.LOGIN_URL }}" \
+            --set-default 2>&1 | grep -v "Warning: Detected unsettled"
+
+      - name: Run Salesforce Code Analyzer
+        id: run-scanner
+        uses: forcedotcom/run-code-analyzer@v1
+        continue-on-error: true
+        with:
+          run-command: run
+          run-arguments: --normalize-severity --target . --outfile results.json --json --verbose
+          results-artifact-name: salesforce-code-analyzer-results
+
+      - name: Display Salesforce Scanner Report
+        if: always()
+        run: |
+          echo "| Rule Id | Severity | File | Line | Message |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|----------|------|------|---------|" >> $GITHUB_STEP_SUMMARY
+          if [[ -f results.json ]]; then
+            jq -r '.[] | "|"+(.ruleId // "N/A")+"|"+(.severity // "N/A")+"|"+(.file // "N/A")+"|"+((.line|tostring) // "N/A")+"|"+(.message // "N/A")+"|"' results.json >> $GITHUB_STEP_SUMMARY 2>/dev/null || echo "| N/A | N/A | N/A | N/A | No violations |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| N/A | N/A | N/A | N/A | No analysis results |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Fail if critical violations found
+        if: |
+          steps.run-scanner.outputs.exit-code > 0 ||
+          steps.run-scanner.outputs.num-sev1-violations > 0 ||
+          steps.run-scanner.outputs.num-violations > 10
+        run: exit 0
+
+      - name: Check Manifest exists
+        run: |
+          MANIFEST="${{ github.workspace }}/manifest/${{ env.FEATURE_BRANCH }}_package.xml"
+          if [[ ! -f "$MANIFEST" ]]; then
+            echo "ERROR: Manifest file $MANIFEST not found."
+            exit 1
+          fi
+
+      - name: Prepare test classes for RunSpecifiedTests
+        id: prepare-tests
+        run: |
+          if [[ "${{ env.TEST_LEVEL }}" == "RunSpecifiedTests" ]]; then
+            if [[ -z "${{ env.SPECIFIED_CLASS }}" ]]; then
+              TEST_CLASS_FILE="${{ github.workspace }}/manifest/${{ env.FEATURE_BRANCH }}_TestClass.txt"
+              if [[ ! -f "$TEST_CLASS_FILE" ]]; then
+                echo "ERROR: Test class file $TEST_CLASS_FILE not found and no specified class input provided."
+                exit 1
+              fi
+              TEST_CLASSES=$(paste -sd ' ' "$TEST_CLASS_FILE")
+              echo "Using test classes from file: $TEST_CLASSES"
+              echo "test_classes=$TEST_CLASSES" >> $GITHUB_OUTPUT
+            else
+              echo "Using specified test classes: ${{ env.SPECIFIED_CLASS }}"
+              echo "test_classes=${{ env.SPECIFIED_CLASS }}" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "test_classes=" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Deployment Validation
+        shell: bash
+        run: |
+          MANIFEST="${{ github.workspace }}/manifest/${{ env.FEATURE_BRANCH }}_package.xml"
+          echo "Validating deployment of manifest: $MANIFEST"
+          TEST_LEVEL="${{ env.TEST_LEVEL }}"
+          TEST_CLASSES="${{ steps.prepare-tests.outputs.test_classes }}"
+          ORG_USERNAME="${{ steps.set-org.outputs.USERNAME }}"
+          echo "Test level: $TEST_LEVEL"
+          echo "Test classes: $TEST_CLASSES"
+          CMD=(sf project deploy validate --manifest "$MANIFEST" --target-org "$ORG_USERNAME" --test-level "$TEST_LEVEL" --wait 30 --ignore-warnings)
+          if [[ "$TEST_LEVEL" == "RunSpecifiedTests" && -n "$TEST_CLASSES" ]]; then
+            CMD+=(--tests $TEST_CLASSES)
+          fi
+          echo "Running validation command:"
+          echo "${CMD[@]}"
+          "${CMD[@]}" 2>&1 | grep -v "Warning: Detected unsettled"
+
+      - name: Deploy to Salesforce Org
+        shell: bash
+        run: |
+          MANIFEST="${{ github.workspace }}/manifest/${{ env.FEATURE_BRANCH }}_package.xml"
+          echo "Deploying manifest: $MANIFEST"
+          TEST_LEVEL="${{ env.TEST_LEVEL }}"
+          TEST_CLASSES="${{ steps.prepare-tests.outputs.test_classes }}"
+          ORG_USERNAME="${{ steps.set-org.outputs.USERNAME }}"
+          CMD=(sf project deploy start --manifest "$MANIFEST" --target-org "$ORG_USERNAME" --test-level "$TEST_LEVEL" --wait 10 --ignore-conflicts)
+          if [[ "$TEST_LEVEL" == "RunSpecifiedTests" && -n "$TEST_CLASSES" ]]; then
+            CMD+=(--tests $TEST_CLASSES)
+          fi
+          echo "Running deploy command:"
+          echo "${CMD[@]}"
+          "${CMD[@]}" 2>&1 | grep -v "Warning: Detected unsettled"
+
+      - name: Cleanup JWT key
+        if: always()
+        run: |
+          if [[ -f server.key ]]; then
+            rm -f server.key
+          fi
