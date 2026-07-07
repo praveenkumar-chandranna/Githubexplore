@@ -1,0 +1,194 @@
+name: Lodha Hotfix Deployment Pipeline
+
+on:
+  # Auto-trigger when main branch is updated
+  push:
+    branches:
+      - main
+
+  # Manual trigger for retry if auto-deployment fails
+  workflow_dispatch:
+    inputs:
+      Feature_Branch:
+        type: string
+        description: Package manifest name (defaults to hotfix_package.xml if empty)
+        required: false
+      testlevel:
+        type: choice
+        description: Test class run level
+        options:
+          - NoTestRun
+          - RunLocalTests
+          - RunSpecifiedTests
+          - RunAllTestsInOrg
+        default: RunLocalTests
+        required: true
+      specifiedclass:
+        type: string
+        description: Test class names (space separated, required if RunSpecifiedTests)
+        required: false
+
+jobs:
+  Hotfix_Deployment:
+    runs-on: ubuntu-latest
+
+    env:
+      SF_LOGIN_URL_TEST: https://test.salesforce.com
+      SF_ALIAS: hotfixOrg
+
+    steps:
+      - name: Checkout main branch
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Salesforce CLI
+        run: |
+          npm install -g @salesforce/cli@latest
+          sf --version
+
+      - name: Generate JWT private key file
+        run: |
+          echo "${{ secrets.SALESFORCE_JWT_SECRET_KEY }}" > server.key
+          chmod 600 server.key
+
+      - name: Clear Prior Salesforce Sessions
+        shell: bash
+        run: |
+          echo "🧹 Clearing existing Salesforce org sessions..."
+          sf org logout --all --no-prompt || true
+
+      - name: Authenticate to Hotfix Org
+        env:
+          CLIENT_ID: ${{ secrets.SALESFORCE_CONSUMER_KEY_HOTFIX }}
+          USERNAME: ${{ secrets.SFDX_AUTH_HOTFIX_USERNAME }}
+          LOGIN_URL: ${{ env.SF_LOGIN_URL_TEST }}
+        run: |
+          sf org login jwt \
+            --client-id "$CLIENT_ID" \
+            --jwt-key-file server.key \
+            --username "$USERNAME" \
+            --instance-url "$LOGIN_URL" \
+            --alias "${{ env.SF_ALIAS }}" \
+            --set-default
+
+      - name: Determine package manifest
+        id: manifest
+        shell: bash
+        env:
+          INPUT_BRANCH: ${{ github.event.inputs.Feature_Branch }}
+          WORKSPACE: ${{ github.workspace }}
+        run: |
+          if [[ -n "$INPUT_BRANCH" ]]; then
+            MANIFEST="${WORKSPACE}/manifest/${INPUT_BRANCH}_package.xml"
+          else
+            MANIFEST="${WORKSPACE}/manifest/hotfix_package.xml"
+          fi
+
+          if [[ ! -f "$MANIFEST" ]]; then
+            echo "❌ Manifest not found: $MANIFEST"
+            echo "Available manifests:"
+            ls -la "${WORKSPACE}/manifest/" || true
+            exit 1
+          fi
+
+          echo "✅ Using manifest: $MANIFEST"
+          echo "manifest_path=$MANIFEST" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare test classes
+        id: prepare-tests
+        shell: bash
+        env:
+          INPUT_TESTLEVEL: ${{ github.event.inputs.testlevel }}
+          INPUT_SPECIFIEDCLASS: ${{ github.event.inputs.specifiedclass }}
+          INPUT_BRANCH: ${{ github.event.inputs.Feature_Branch }}
+          WORKSPACE: ${{ github.workspace }}
+        run: |
+          # Default to RunLocalTests for push events
+          if [[ -z "$INPUT_TESTLEVEL" ]]; then
+            echo "test_level=RunLocalTests" >> "$GITHUB_OUTPUT"
+            echo "test_classes=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "test_level=$INPUT_TESTLEVEL" >> "$GITHUB_OUTPUT"
+
+          if [[ "$INPUT_TESTLEVEL" == "RunSpecifiedTests" ]]; then
+            if [[ -n "$INPUT_SPECIFIEDCLASS" ]]; then
+              echo "test_classes=$INPUT_SPECIFIEDCLASS" >> "$GITHUB_OUTPUT"
+            else
+              BRANCH_NAME="${INPUT_BRANCH:-hotfix}"
+              TEST_FILE="${WORKSPACE}/manifest/${BRANCH_NAME}_TestClass.txt"
+              if [[ -f "$TEST_FILE" ]]; then
+                TEST_CLASSES=$(paste -sd ' ' "$TEST_FILE")
+                echo "test_classes=$TEST_CLASSES" >> "$GITHUB_OUTPUT"
+              else
+                echo "⚠️ No test class file found, falling back to RunLocalTests"
+                echo "test_level=RunLocalTests" >> "$GITHUB_OUTPUT"
+                echo "test_classes=" >> "$GITHUB_OUTPUT"
+              fi
+            fi
+          else
+            echo "test_classes=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate Deployment to Hotfix Org
+        shell: bash
+        env:
+          MANIFEST: ${{ steps.manifest.outputs.manifest_path }}
+          TEST_LEVEL: ${{ steps.prepare-tests.outputs.test_level }}
+          TEST_CLASSES: ${{ steps.prepare-tests.outputs.test_classes }}
+          SF_ALIAS: ${{ env.SF_ALIAS }}
+        run: |
+          echo "🔍 Validating deployment to Hotfix org..."
+          CMD=(sf project deploy validate --manifest "$MANIFEST" --target-org "$SF_ALIAS" --test-level "$TEST_LEVEL" --wait 30 --ignore-warnings --verbose)
+          if [[ "$TEST_LEVEL" == "RunSpecifiedTests" && -n "$TEST_CLASSES" ]]; then
+            CMD+=(--tests $TEST_CLASSES)
+          fi
+          echo "${CMD[@]}"
+          "${CMD[@]}"
+
+      - name: Deploy to Hotfix Org
+        shell: bash
+        env:
+          MANIFEST: ${{ steps.manifest.outputs.manifest_path }}
+          TEST_LEVEL: ${{ steps.prepare-tests.outputs.test_level }}
+          TEST_CLASSES: ${{ steps.prepare-tests.outputs.test_classes }}
+          SF_ALIAS: ${{ env.SF_ALIAS }}
+        run: |
+          echo "🚀 Deploying to Hotfix org..."
+          CMD=(sf project deploy start --manifest "$MANIFEST" --target-org "$SF_ALIAS" --test-level "$TEST_LEVEL" --wait 10 --ignore-conflicts)
+          if [[ "$TEST_LEVEL" == "RunSpecifiedTests" && -n "$TEST_CLASSES" ]]; then
+            CMD+=(--tests $TEST_CLASSES)
+          fi
+          echo "${CMD[@]}"
+          "${CMD[@]}"
+
+      - name: Deployment Result
+        if: success()
+        run: |
+          echo "=========================================="
+          echo "✅ HOTFIX DEPLOYMENT SUCCESSFUL"
+          echo "=========================================="
+          echo "Main branch changes deployed to Hotfix org"
+          echo "=========================================="
+
+      - name: Deployment Failed Notice
+        if: failure()
+        run: |
+          echo "=========================================="
+          echo "❌ HOTFIX DEPLOYMENT FAILED"
+          echo "=========================================="
+          echo "Please retry manually using workflow_dispatch"
+          echo "Go to: Actions > Lodha Hotfix Deployment Pipeline > Run workflow"
+          echo "=========================================="
+
+      - name: Cleanup JWT key
+        if: always()
+        run: rm -f server.key

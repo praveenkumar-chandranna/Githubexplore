@@ -1,0 +1,86 @@
+[extend]
+useDefault = true
+
+title = "Lodha Gitleaks Configuration"
+
+[allowlist]
+description = "Global allowlist"
+paths = [
+  '''node_modules/''',
+  '''\.git/''',
+  '''package-lock\.json''',
+  '''\.sf/''',
+  '''\.sfdx/''',
+]
+
+[[rules]]
+id = "salesforce-consumer-key"
+description = "Salesforce Connected App Consumer Key"
+regex = '''(?i)(consumer[_\-]?key|client[_\-]?id)\s*[:=]\s*['"]?([A-Za-z0-9._]{50,})['"]?'''
+tags = ["salesforce", "key"]
+
+[[rules]]
+id = "salesforce-consumer-secret"
+description = "Salesforce Connected App Consumer Secret"
+regex = '''(?i)(consumer[_\-]?secret|client[_\-]?secret)\s*[:=]\s*['"]?([A-Za-z0-9]{16,})['"]?'''
+tags = ["salesforce", "secret"]
+
+[[rules]]
+id = "salesforce-refresh-token"
+description = "Salesforce Refresh Token"
+regex = '''(?i)(refresh[_\-]?token)\s*[:=]\s*['"]?([A-Za-z0-9._!]{40,})['"]?'''
+tags = ["salesforce", "token"]
+
+[[rules]]
+id = "salesforce-access-token"
+description = "Salesforce Access Token"
+regex = '''(?i)(access[_\-]?token|session[_\-]?id)\s*[:=]\s*['"]?([A-Za-z0-9!._]{40,})['"]?'''
+tags = ["salesforce", "token"]
+
+[[rules]]
+id = "salesforce-auth-url"
+description = "Salesforce SFDX Auth URL"
+regex = '''force://[A-Za-z0-9._]+:[A-Za-z0-9._]+@[a-zA-Z0-9.\-]+'''
+tags = ["salesforce", "auth"]
+
+[[rules]]
+id = "private-key-block"
+description = "Private Key (PEM)"
+regex = '''-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----'''
+tags = ["key", "private"]
+
+[[rules]]
+id = "generic-password"
+description = "Generic Password Assignment"
+regex = '''(?i)(password|passwd|pwd)\s*[:=]\s*['"]([^'"]{8,})['"]'''
+tags = ["password"]
+
+[[rules]]
+id = "generic-secret"
+description = "Generic Secret Assignment"
+regex = '''(?i)(secret|api[_\-]?key|apikey|token)\s*[:=]\s*['"]([^'"]{8,})['"]'''
+tags = ["secret"]
+
+[[rules]]
+id = "jwt-token"
+description = "JWT Token"
+regex = '''eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}'''
+tags = ["jwt", "token"]
+
+[[rules]]
+id = "aws-access-key"
+description = "AWS Access Key ID"
+regex = '''(?:A3T[A-Z0-9]|AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{16}'''
+tags = ["aws", "key"]
+
+[[rules]]
+id = "aws-secret-key"
+description = "AWS Secret Access Key"
+regex = '''(?i)aws_secret_access_key\s*[:=]\s*['"]?([A-Za-z0-9/+=]{40})['"]?'''
+tags = ["aws", "secret"]
+
+[[rules]]
+id = "hardcoded-connection-string"
+description = "Database Connection String"
+regex = '''(?i)(jdbc|mongodb(\+srv)?|postgres(ql)?|mysql|mssql):\/\/[^\s'"]+:[^\s'"]+@[^\s'"]+'''
+tags = ["database", "connection"]

@@ -11,10 +11,12 @@ on:
         type: choice
         description: Please Select The Validation Environment.
         options:
+          - DEV
           - QA
           - UAT
           - PROD
-        default: "QA"
+          - HOTFIX
+        default: "DEV"
         required: true
       testlevel:
         type: choice
@@ -34,7 +36,6 @@ jobs:
   Validation_Build:
     runs-on: ubuntu-latest
     env:
-      # Map environment based on input choice - add mapping if needed here
       SF_ENV_ALIAS: lodhaOrg
       SF_LOGIN_URL_TEST: https://test.salesforce.com
       SF_LOGIN_URL_PROD: https://login.salesforce.com
@@ -44,7 +45,6 @@ jobs:
         with:
           ref: ${{ github.ref_name }}
 
-      # FIX: Pin to stable Node.js 20 to prevent top-level await loops from hanging on CLI runs
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -61,7 +61,6 @@ jobs:
       - name: Generate JWT Key file
         run: echo "${{ secrets.SALESFORCE_JWT_SECRET_KEY }}" > server.key && chmod 600 server.key
 
-      # FIX: Force clean any lingering container authentication sessions prior to logging in
       - name: Clear Prior Salesforce Sessions
         shell: bash
         run: |
@@ -74,12 +73,16 @@ jobs:
           SF_LOGIN_URL_TEST_VAL: ${{ env.SF_LOGIN_URL_TEST }}
           SF_LOGIN_URL_PROD_VAL: ${{ env.SF_LOGIN_URL_PROD }}
           SF_ALIAS: ${{ env.SF_ENV_ALIAS }}
+          KEY_DEV: ${{ secrets.SALESFORCE_CONSUMER_KEY_DEV }}
           KEY_QA: ${{ secrets.SALESFORCE_CONSUMER_KEY_QA }}
           KEY_UAT: ${{ secrets.SALESFORCE_CONSUMER_KEY_UAT }}
           KEY_PROD: ${{ secrets.SALESFORCE_CONSUMER_KEY_PROD }}
+          KEY_HOTFIX: ${{ secrets.SALESFORCE_CONSUMER_KEY_HOTFIX }}
+          USER_DEV: ${{ secrets.SFDX_AUTH_DEV_USERNAME }}
           USER_QA: ${{ secrets.SFDX_AUTH_QA_USERNAME }}
           USER_UAT: ${{ secrets.SFDX_AUTH_UAT_USERNAME }}
           USER_PROD: ${{ secrets.SFDX_AUTH_PROD_USERNAME }}
+          USER_HOTFIX: ${{ secrets.SFDX_AUTH_HOTFIX_USERNAME }}
         run: |
           LOGIN_URL="$SF_LOGIN_URL_TEST_VAL"
           if [[ "$INPUT_ENV" =~ ^\s*(PROD|prod)$ ]]; then
@@ -87,6 +90,10 @@ jobs:
           fi
 
           case "$INPUT_ENV" in
+            "DEV")
+              CLIENT_ID="$KEY_DEV"
+              USERNAME="$USER_DEV"
+              ;;
             "QA")
               CLIENT_ID="$KEY_QA"
               USERNAME="$USER_QA"
@@ -98,6 +105,10 @@ jobs:
             "PROD")
               CLIENT_ID="$KEY_PROD"
               USERNAME="$USER_PROD"
+              ;;
+            "HOTFIX")
+              CLIENT_ID="$KEY_HOTFIX"
+              USERNAME="$USER_HOTFIX"
               ;;
             *)
               echo "Unknown environment: $INPUT_ENV"

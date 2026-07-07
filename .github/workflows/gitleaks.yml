@@ -3,15 +3,19 @@ name: Gitleaks Security Scan
 on:
   pull_request:
     branches:
+      - DEV
       - QA
       - UAT
       - main
+      - hotfix
 
   push:
     branches:
+      - DEV
       - QA
       - UAT
       - main
+      - hotfix
 
   schedule:
     - cron: "0 6 * * 1"

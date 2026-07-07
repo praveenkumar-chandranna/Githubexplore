@@ -3,9 +3,11 @@ name: PR Validation Against Destination Org
 on:
   pull_request:
     branches:
+      - DEV
       - QA
       - UAT
       - main
+      - hotfix
 
 jobs:
   # Job 1: Check if PR is from main branch
@@ -62,7 +64,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      # Configured Node.js v20 explicitly to avoid telemetry thread hangs on v24+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -91,16 +92,26 @@ jobs:
         shell: bash
         env:
           DEST_BRANCH: ${{ env.DEST_BRANCH }}
+          AUTH_DEV_USERNAME: ${{ secrets.SFDX_AUTH_DEV_USERNAME }}
           AUTH_QA_USERNAME: ${{ secrets.SFDX_AUTH_QA_USERNAME }}
           AUTH_UAT_USERNAME: ${{ secrets.SFDX_AUTH_UAT_USERNAME }}
           AUTH_PROD_USERNAME: ${{ secrets.SFDX_AUTH_PROD_USERNAME }}
+          AUTH_HOTFIX_USERNAME: ${{ secrets.SFDX_AUTH_HOTFIX_USERNAME }}
           SANDBOX_URL: ${{ secrets.SANDBOX_URL }}
           LOGIN_URL: ${{ secrets.LOGIN_URL }}
+          CONSUMER_KEY_DEV: ${{ secrets.SALESFORCE_CONSUMER_KEY_DEV }}
           CONSUMER_KEY_QA: ${{ secrets.SALESFORCE_CONSUMER_KEY_QA }}
           CONSUMER_KEY_UAT: ${{ secrets.SALESFORCE_CONSUMER_KEY_UAT }}
           CONSUMER_KEY_PROD: ${{ secrets.SALESFORCE_CONSUMER_KEY_PROD }}
+          CONSUMER_KEY_HOTFIX: ${{ secrets.SALESFORCE_CONSUMER_KEY_HOTFIX }}
         run: |
           case "$DEST_BRANCH" in
+            DEV)
+              echo "SF_USERNAME=$AUTH_DEV_USERNAME" >> "$GITHUB_ENV"
+              echo "SF_INSTANCE_URL=$SANDBOX_URL" >> "$GITHUB_ENV"
+              echo "SF_CLIENT_ID=$CONSUMER_KEY_DEV" >> "$GITHUB_ENV"
+              echo "🎯 Target Org: DEV"
+              ;;
             QA)
               echo "SF_USERNAME=$AUTH_QA_USERNAME" >> "$GITHUB_ENV"
               echo "SF_INSTANCE_URL=$SANDBOX_URL" >> "$GITHUB_ENV"
@@ -119,13 +130,18 @@ jobs:
               echo "SF_CLIENT_ID=$CONSUMER_KEY_PROD" >> "$GITHUB_ENV"
               echo "🎯 Target Org: PRODUCTION"
               ;;
+            hotfix)
+              echo "SF_USERNAME=$AUTH_HOTFIX_USERNAME" >> "$GITHUB_ENV"
+              echo "SF_INSTANCE_URL=$SANDBOX_URL" >> "$GITHUB_ENV"
+              echo "SF_CLIENT_ID=$CONSUMER_KEY_HOTFIX" >> "$GITHUB_ENV"
+              echo "🎯 Target Org: HOTFIX"
+              ;;
             *)
               echo "❌ Invalid target branch: $DEST_BRANCH"
               exit 1
               ;;
           esac
 
-      # NEW STEP: Force clear any lingering environments before continuing
       - name: Clear Prior Salesforce Sessions
         shell: bash
         run: |
@@ -263,7 +279,6 @@ jobs:
           echo "${CMD[@]}"
           echo ""
           
-          # set +e allows us to record execution status outputs instead of crashing early
           set +e
           "${CMD[@]}" | tee deploy-result.txt
           VALIDATION_EXIT_CODE=${PIPESTATUS[0]}
