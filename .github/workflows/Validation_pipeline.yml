@@ -1,4 +1,4 @@
-name: EMAMI Validation Pipeline
+name: Lodha Validation Pipeline
 
 on:
   workflow_dispatch:
@@ -11,7 +11,6 @@ on:
         type: choice
         description: Please Select The Validation Environment.
         options:
-          - SIT
           - QA
           - UAT
           - PROD
@@ -34,95 +33,93 @@ on:
 jobs:
   Validation_Build:
     runs-on: ubuntu-latest
-    
     env:
-      NODE_OPTIONS: --no-warnings
-      SF_DISABLE_TELEMETRY: true
-      SF_ENV_ALIAS: emamiOrg
+      # Map environment based on input choice - add mapping if needed here
+      SF_ENV_ALIAS: lodhaOrg
       SF_LOGIN_URL_TEST: https://test.salesforce.com
       SF_LOGIN_URL_PROD: https://login.salesforce.com
-    
     steps:
       - name: Checkout branch
         uses: actions/checkout@v4
         with:
           ref: ${{ github.ref_name }}
 
-      - name: Setup Node.js 24
+      # FIX: Pin to stable Node.js 20 to prevent top-level await loops from hanging on CLI runs
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '24.x'
-          cache: 'npm'
+          node-version: 20
 
       - name: Install Salesforce CLI
         run: |
-          npm cache clean --force 2>&1 | tail -1
-          npm install -g @salesforce/cli@latest 2>&1 | grep -v "npm warn"
+          npm install -g @salesforce/cli@latest
           sf --version
 
       - name: Install Salesforce Code Analyzer Plugin
-        run: |
-          sf plugins install @salesforce/sfdx-scanner@latest 2>&1 | grep -v "npm warn" || echo "Plugin already installed"
+        run: sf plugins install @salesforce/sfdx-scanner@latest || echo "Plugin already installed"
 
       - name: Generate JWT Key file
+        run: echo "${{ secrets.SALESFORCE_JWT_SECRET_KEY }}" > server.key && chmod 600 server.key
+
+      # FIX: Force clean any lingering container authentication sessions prior to logging in
+      - name: Clear Prior Salesforce Sessions
+        shell: bash
         run: |
-          echo "${{ secrets.SALESFORCE_JWT_SECRET_KEY }}" > server.key
-          chmod 600 server.key
+          echo "🧹 Clearing existing Salesforce org sessions..."
+          sf org logout --all --no-prompt || true
 
       - name: Authorize to Salesforce org
+        env:
+          INPUT_ENV: ${{ github.event.inputs.environment }}
+          SF_LOGIN_URL_TEST_VAL: ${{ env.SF_LOGIN_URL_TEST }}
+          SF_LOGIN_URL_PROD_VAL: ${{ env.SF_LOGIN_URL_PROD }}
+          SF_ALIAS: ${{ env.SF_ENV_ALIAS }}
+          KEY_QA: ${{ secrets.SALESFORCE_CONSUMER_KEY_QA }}
+          KEY_UAT: ${{ secrets.SALESFORCE_CONSUMER_KEY_UAT }}
+          KEY_PROD: ${{ secrets.SALESFORCE_CONSUMER_KEY_PROD }}
+          USER_QA: ${{ secrets.SFDX_AUTH_QA_USERNAME }}
+          USER_UAT: ${{ secrets.SFDX_AUTH_UAT_USERNAME }}
+          USER_PROD: ${{ secrets.SFDX_AUTH_PROD_USERNAME }}
         run: |
-          # Determine login URL based on environment name
-          LOGIN_URL="${{ env.SF_LOGIN_URL_TEST }}"
-          if [[ "${{ github.event.inputs.environment }}" =~ ^\s*(PROD|prod)$ ]]; then
-            LOGIN_URL="${{ env.SF_LOGIN_URL_PROD }}"
+          LOGIN_URL="$SF_LOGIN_URL_TEST_VAL"
+          if [[ "$INPUT_ENV" =~ ^\s*(PROD|prod)$ ]]; then
+            LOGIN_URL="$SF_LOGIN_URL_PROD_VAL"
           fi
 
-          # Select appropriate secrets based on environment input
-          case "${{ github.event.inputs.environment }}" in
-            "SIT")
-              CLIENT_ID="${{ secrets.SALESFORCE_CONSUMER_KEY_SIT }}"
-              USERNAME="${{ secrets.SFDX_AUTH_SIT_USERNAME }}"
-              ;;
+          case "$INPUT_ENV" in
             "QA")
-              CLIENT_ID="${{ secrets.SALESFORCE_CONSUMER_KEY_QA }}"
-              USERNAME="${{ secrets.SFDX_AUTH_QA_USERNAME }}"
+              CLIENT_ID="$KEY_QA"
+              USERNAME="$USER_QA"
               ;;
             "UAT")
-              CLIENT_ID="${{ secrets.SALESFORCE_CONSUMER_KEY_UAT }}"
-              USERNAME="${{ secrets.SFDX_AUTH_UAT_USERNAME }}"
+              CLIENT_ID="$KEY_UAT"
+              USERNAME="$USER_UAT"
               ;;
             "PROD")
-              CLIENT_ID="${{ secrets.SALESFORCE_CONSUMER_KEY_PROD }}"
-              USERNAME="${{ secrets.SFDX_AUTH_PROD_USERNAME }}"
+              CLIENT_ID="$KEY_PROD"
+              USERNAME="$USER_PROD"
               ;;
             *)
-              echo "Unknown environment: ${{ github.event.inputs.environment }}"
+              echo "Unknown environment: $INPUT_ENV"
               exit 1
               ;;
           esac
           
-          sf org logout --all --no-prompt 2>&1 | grep -v "Warning: Detected unsettled" || true
-          sf org login jwt --client-id "${CLIENT_ID}" --jwt-key-file server.key --username "${USERNAME}" --instance-url "${LOGIN_URL}" --alias "${{ env.SF_ENV_ALIAS }}" --set-default 2>&1 | grep -v "Warning: Detected unsettled"
+          sf org login jwt --client-id "${CLIENT_ID}" --jwt-key-file server.key --username "${USERNAME}" --instance-url "${LOGIN_URL}" --alias "$SF_ALIAS" --set-default
 
       - name: Run Salesforce Code Analyzer
         id: run-scanner
         uses: forcedotcom/run-code-analyzer@v1
-        continue-on-error: true
         with:
           run-command: run
           run-arguments: --normalize-severity --target . --outfile results.json --json --verbose
           results-artifact-name: salesforce-code-analyzer-results
 
       - name: Display Salesforce Scanner Report
-        if: always()
         run: |
           echo "| Rule Id | Severity | File | Line | Message |" >> $GITHUB_STEP_SUMMARY
           echo "|---------|----------|------|------|---------|" >> $GITHUB_STEP_SUMMARY
-          if [[ -f results.json ]]; then
-            jq -r '.[] | "|"+(.ruleId // "N/A")+"|"+(.severity // "N/A")+"|"+(.file // "N/A")+"|"+((.line|tostring) // "N/A")+"|"+(.message // "N/A")+"|"' results.json >> $GITHUB_STEP_SUMMARY 2>/dev/null || echo "| N/A | N/A | N/A | N/A | No violations |" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "| N/A | N/A | N/A | N/A | No analysis results |" >> $GITHUB_STEP_SUMMARY
-          fi
+          jq -r '.[] | "|"+(.ruleId // "N/A")+"|"+(.severity // "N/A")+"|"+(.file // "N/A")+"|"+((.line|tostring) // "N/A")+"|"+(.message // "N/A")+"|"' results.json >> $GITHUB_STEP_SUMMARY
 
       - name: Fail if critical violations found
         if: |
@@ -133,13 +130,18 @@ jobs:
 
       - name: Determine test classes for RunSpecifiedTests, if needed
         id: prepare_tests
+        env:
+          INPUT_TESTLEVEL: ${{ github.event.inputs.testlevel }}
+          INPUT_SPECIFIEDCLASS: ${{ github.event.inputs.specifiedclass }}
+          INPUT_BRANCH: ${{ github.event.inputs.Feature_Branch }}
+          WORKSPACE: ${{ github.workspace }}
         run: |
-          if [[ "${{ github.event.inputs.testlevel }}" == "RunSpecifiedTests" ]]; then
-            if [ -n "${{ github.event.inputs.specifiedclass }}" ]; then
+          if [[ "$INPUT_TESTLEVEL" == "RunSpecifiedTests" ]]; then
+            if [ -n "$INPUT_SPECIFIEDCLASS" ]; then
               echo "Using specified test classes from input"
-              TEST_CLASSES="${{ github.event.inputs.specifiedclass }}"
+              TEST_CLASSES="$INPUT_SPECIFIEDCLASS"
             else
-              TEST_FILE="${{ github.workspace }}/manifest/${{ github.event.inputs.Feature_Branch }}_TestClass.txt"
+              TEST_FILE="${WORKSPACE}/manifest/${INPUT_BRANCH}_TestClass.txt"
               if [[ -f "$TEST_FILE" ]]; then
                 TEST_CLASSES=$(paste -sd " " "$TEST_FILE")
                 echo "Read test classes from file: $TEST_CLASSES"
@@ -153,12 +155,17 @@ jobs:
 
       - name: Deployment Validation 
         shell: bash
+        env:
+          INPUT_BRANCH: ${{ github.event.inputs.Feature_Branch }}
+          INPUT_TESTLEVEL: ${{ github.event.inputs.testlevel }}
+          TESTS: ${{ steps.prepare_tests.outputs.test_classes }}
+          SF_ALIAS: ${{ env.SF_ENV_ALIAS }}
+          WORKSPACE: ${{ github.workspace }}
         run: |
-          PACKAGE_XML="${{ github.workspace }}/manifest/${{ github.event.inputs.Feature_Branch }}_package.xml"
+          PACKAGE_XML="${WORKSPACE}/manifest/${INPUT_BRANCH}_package.xml"
           echo "Validating deployment of package: $PACKAGE_XML"
           
-          TESTLEVEL="${{ github.event.inputs.testlevel }}"
-          TESTS="${{ steps.prepare_tests.outputs.test_classes }}"
+          TESTLEVEL="$INPUT_TESTLEVEL"
           
           echo "Using test level: $TESTLEVEL"
           echo "Using test classes: $TESTS"
@@ -168,19 +175,11 @@ jobs:
               echo "No test classes specified, switching to RunLocalTests for coverage"
               TESTLEVEL="RunLocalTests"
             fi
-            sf project deploy validate --manifest "$PACKAGE_XML" --target-org "${{ env.SF_ENV_ALIAS }}" --test-level "$TESTLEVEL" --tests $TESTS --wait 30 2>&1 | grep -v "Warning: Detected unsettled"
+            sf project deploy validate --manifest "$PACKAGE_XML" --target-org "$SF_ALIAS" --test-level "$TESTLEVEL" --tests $TESTS --wait 30
           else
-            sf project deploy validate --manifest "$PACKAGE_XML" --target-org "${{ env.SF_ENV_ALIAS }}" --test-level "$TESTLEVEL" --wait 30 2>&1 | grep -v "Warning: Detected unsettled"
+            sf project deploy validate --manifest "$PACKAGE_XML" --target-org "$SF_ALIAS" --test-level "$TESTLEVEL" --wait 30
           fi
-
-      - name: Logout from Salesforce
-        if: always()
-        run: |
-          sf org logout --all --no-prompt 2>&1 | grep -v "Warning: Detected unsettled" || true
 
       - name: Cleanup
         if: always()
-        run: |
-          if [[ -f server.key ]]; then
-            rm -f server.key
-          fi
+        run: rm -f server.key

@@ -3,65 +3,55 @@ name: PR Validation Against Destination Org
 on:
   pull_request:
     branches:
-      - SIT
       - QA
       - UAT
       - main
 
-permissions:
-  contents: read
-
 jobs:
+  # Job 1: Check if PR is from main branch
   check_source_branch:
     name: Check PR Source Branch
     runs-on: ubuntu-latest
     outputs:
       should_validate: ${{ steps.verify.outputs.should_validate }}
-      safe_source_branch: ${{ steps.verify.outputs.safe_source_branch }}
-      dest_branch: ${{ steps.verify.outputs.dest_branch }}
-
+    
     steps:
       - name: Verify Source Branch
         id: verify
         shell: bash
+        env:
+          SOURCE_BRANCH: ${{ github.head_ref }}
         run: |
-          set -euo pipefail
-
-          SOURCE_BRANCH="${{ github.head_ref }}"
-          DEST_BRANCH="${{ github.base_ref }}"
-          SAFE_SOURCE_BRANCH="${SOURCE_BRANCH//\//_}"
-
           echo "PR Source Branch: $SOURCE_BRANCH"
-          echo "PR Destination Branch: $DEST_BRANCH"
-          echo "Safe Source Branch: $SAFE_SOURCE_BRANCH"
-
+          
           if [[ "$SOURCE_BRANCH" == "main" ]]; then
+            echo "❌ PR from 'main' branch detected - SKIPPING validation"
             echo "should_validate=false" >> "$GITHUB_OUTPUT"
           else
+            echo "✅ PR from '$SOURCE_BRANCH' - ALLOWING validation"
             echo "should_validate=true" >> "$GITHUB_OUTPUT"
           fi
 
-          echo "safe_source_branch=$SAFE_SOURCE_BRANCH" >> "$GITHUB_OUTPUT"
-          echo "dest_branch=$DEST_BRANCH" >> "$GITHUB_OUTPUT"
-
+  # Job 2: Skip notification
   notify_main_skip:
     name: Notify - Validation Skipped
     needs: check_source_branch
     if: needs.check_source_branch.outputs.should_validate == 'false'
     runs-on: ubuntu-latest
-
+    
     steps:
       - name: Validation Skipped
         shell: bash
         run: |
           echo "=========================================="
-          echo "⚠️ VALIDATION SKIPPED"
+          echo "⚠️  VALIDATION SKIPPED"
+          echo "=========================================="
           echo "PR from 'main' branch detected"
           echo "Policy: PRs from 'main' branch bypass validation"
           echo "=========================================="
 
+  # Job 3: Main validation job
   Pre_Validation_Build:
-    name: Pre Validation Build
     needs: check_source_branch
     if: needs.check_source_branch.outputs.should_validate == 'true'
     runs-on: ubuntu-latest
@@ -72,79 +62,62 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Show Runtime Versions
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "Node: $(node -v)"
-          echo "npm: $(npm -v)"
+      # Configured Node.js v20 explicitly to avoid telemetry thread hangs on v24+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
 
       - name: Install Salesforce CLI
-        shell: bash
         run: |
-          set -euo pipefail
           npm install -g @salesforce/cli
           sf --version
 
       - name: Generate JWT Key File
-        shell: bash
         run: |
-          set -euo pipefail
-          printf '%s' "${{ secrets.SALESFORCE_JWT_SECRET_KEY }}" > server.key
+          echo "${{ secrets.SALESFORCE_JWT_SECRET_KEY }}" > server.key
           chmod 600 server.key
-
-      - name: Inspect JWT Key File
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "JWT key file size: $(wc -c < server.key) bytes"
-          echo "JWT key first line: $(head -n 1 server.key)"
-          echo "JWT key last line: $(tail -n 1 server.key)"
-
-      - name: Clear Existing Salesforce Auth
-        shell: bash
-        run: |
-          set -euo pipefail
-          sf org logout --all --no-prompt || true
-          rm -rf ~/.sf ~/.sfdx || true
 
       - name: Set Source and Destination Branch
         shell: bash
+        env:
+          SOURCE_BRANCH: ${{ github.head_ref }}
+          DEST_BRANCH: ${{ github.base_ref }}
         run: |
-          set -euo pipefail
-          echo "SOURCE_BRANCH=${{ github.head_ref }}" >> "$GITHUB_ENV"
-          echo "SAFE_SOURCE_BRANCH=${{ needs.check_source_branch.outputs.safe_source_branch }}" >> "$GITHUB_ENV"
-          echo "DEST_BRANCH=${{ github.base_ref }}" >> "$GITHUB_ENV"
+          echo "SOURCE_BRANCH=$SOURCE_BRANCH" >> "$GITHUB_ENV"
+          echo "DEST_BRANCH=$DEST_BRANCH" >> "$GITHUB_ENV"
 
       - name: Select Salesforce Org Based on Destination Branch
         shell: bash
+        env:
+          DEST_BRANCH: ${{ env.DEST_BRANCH }}
+          AUTH_QA_USERNAME: ${{ secrets.SFDX_AUTH_QA_USERNAME }}
+          AUTH_UAT_USERNAME: ${{ secrets.SFDX_AUTH_UAT_USERNAME }}
+          AUTH_PROD_USERNAME: ${{ secrets.SFDX_AUTH_PROD_USERNAME }}
+          SANDBOX_URL: ${{ secrets.SANDBOX_URL }}
+          LOGIN_URL: ${{ secrets.LOGIN_URL }}
+          CONSUMER_KEY_QA: ${{ secrets.SALESFORCE_CONSUMER_KEY_QA }}
+          CONSUMER_KEY_UAT: ${{ secrets.SALESFORCE_CONSUMER_KEY_UAT }}
+          CONSUMER_KEY_PROD: ${{ secrets.SALESFORCE_CONSUMER_KEY_PROD }}
         run: |
-          set -euo pipefail
-
           case "$DEST_BRANCH" in
-            SIT)
-              echo "SF_USERNAME=${{ secrets.SFDX_AUTH_SIT_USERNAME }}" >> "$GITHUB_ENV"
-              echo "SF_INSTANCE_URL=https://test.salesforce.com" >> "$GITHUB_ENV"
-              echo "SF_CLIENT_ID=${{ secrets.SALESFORCE_CONSUMER_KEY_SIT }}" >> "$GITHUB_ENV"
-              echo "TARGET_ORG=SIT" >> "$GITHUB_ENV"
-              ;;
             QA)
-              echo "SF_USERNAME=${{ secrets.SFDX_AUTH_QA_USERNAME }}" >> "$GITHUB_ENV"
-              echo "SF_INSTANCE_URL=https://test.salesforce.com" >> "$GITHUB_ENV"
-              echo "SF_CLIENT_ID=${{ secrets.SALESFORCE_CONSUMER_KEY_QA }}" >> "$GITHUB_ENV"
-              echo "TARGET_ORG=QA" >> "$GITHUB_ENV"
+              echo "SF_USERNAME=$AUTH_QA_USERNAME" >> "$GITHUB_ENV"
+              echo "SF_INSTANCE_URL=$SANDBOX_URL" >> "$GITHUB_ENV"
+              echo "SF_CLIENT_ID=$CONSUMER_KEY_QA" >> "$GITHUB_ENV"
+              echo "🎯 Target Org: QA"
               ;;
             UAT)
-              echo "SF_USERNAME=${{ secrets.SFDX_AUTH_UAT_USERNAME }}" >> "$GITHUB_ENV"
-              echo "SF_INSTANCE_URL=https://test.salesforce.com" >> "$GITHUB_ENV"
-              echo "SF_CLIENT_ID=${{ secrets.SALESFORCE_CONSUMER_KEY_UAT }}" >> "$GITHUB_ENV"
-              echo "TARGET_ORG=UAT" >> "$GITHUB_ENV"
+              echo "SF_USERNAME=$AUTH_UAT_USERNAME" >> "$GITHUB_ENV"
+              echo "SF_INSTANCE_URL=$SANDBOX_URL" >> "$GITHUB_ENV"
+              echo "SF_CLIENT_ID=$CONSUMER_KEY_UAT" >> "$GITHUB_ENV"
+              echo "🎯 Target Org: UAT"
               ;;
             main)
-              echo "SF_USERNAME=${{ secrets.SFDX_AUTH_PROD_USERNAME }}" >> "$GITHUB_ENV"
-              echo "SF_INSTANCE_URL=https://login.salesforce.com" >> "$GITHUB_ENV"
-              echo "SF_CLIENT_ID=${{ secrets.SALESFORCE_CONSUMER_KEY_PROD }}" >> "$GITHUB_ENV"
-              echo "TARGET_ORG=PRODUCTION" >> "$GITHUB_ENV"
+              echo "SF_USERNAME=$AUTH_PROD_USERNAME" >> "$GITHUB_ENV"
+              echo "SF_INSTANCE_URL=$LOGIN_URL" >> "$GITHUB_ENV"
+              echo "SF_CLIENT_ID=$CONSUMER_KEY_PROD" >> "$GITHUB_ENV"
+              echo "🎯 Target Org: PRODUCTION"
               ;;
             *)
               echo "❌ Invalid target branch: $DEST_BRANCH"
@@ -152,105 +125,78 @@ jobs:
               ;;
           esac
 
-      - name: Debug Auth Configuration
+      # NEW STEP: Force clear any lingering environments before continuing
+      - name: Clear Prior Salesforce Sessions
         shell: bash
         run: |
-          set -euo pipefail
-          echo "SOURCE_BRANCH=$SOURCE_BRANCH"
-          echo "SAFE_SOURCE_BRANCH=$SAFE_SOURCE_BRANCH"
-          echo "DEST_BRANCH=$DEST_BRANCH"
-          echo "TARGET_ORG=$TARGET_ORG"
-          echo "SF_USERNAME=$SF_USERNAME"
-          echo "SF_INSTANCE_URL=$SF_INSTANCE_URL"
-          echo "SF_CLIENT_ID length: ${#SF_CLIENT_ID}"
+          echo "🧹 Clearing existing Salesforce org sessions..."
+          sf org logout --all --no-prompt || true
 
       - name: Authenticate Salesforce Using JWT
         shell: bash
         run: |
-          set -u
-
-          rm -f auth-result.txt || true
-          AUTH_EXIT_CODE=1
-
-          for i in 1 2 3; do
-            echo "JWT auth attempt $i..."
-
-            if sf org login jwt \
-              --client-id "$SF_CLIENT_ID" \
-              --jwt-key-file server.key \
-              --username "$SF_USERNAME" \
-              --instance-url "$SF_INSTANCE_URL" \
-              --alias targetOrg \
-              --json > auth-result.txt 2>&1
-            then
-              AUTH_EXIT_CODE=0
-              break
-            else
-              AUTH_EXIT_CODE=$?
-              echo "Attempt $i failed with exit code $AUTH_EXIT_CODE"
-              sleep $((i * 5))
-            fi
-          done
-
-          echo "AUTH_EXIT_CODE=$AUTH_EXIT_CODE" >> "$GITHUB_ENV"
-
-      - name: Show Auth Result
-        shell: bash
-        run: |
-          echo "=========================================="
-          echo "AUTH RESULT"
-          echo "=========================================="
-          cat auth-result.txt || true
-          echo "=========================================="
-          echo "Auth exit code: ${AUTH_EXIT_CODE:-unknown}"
-          echo "=========================================="
-
-          if [[ "${AUTH_EXIT_CODE:-1}" -ne 0 ]]; then
-            echo "❌ Salesforce JWT authentication failed"
+          echo "🔐 Authenticating with Salesforce..."
+          sf org login jwt \
+            --client-id "$SF_CLIENT_ID" \
+            --jwt-key-file server.key \
+            --username "$SF_USERNAME" \
+            --instance-url "$SF_INSTANCE_URL" \
+            --set-default
+          
+          if [[ $? -eq 0 ]]; then
+            echo "✅ Successfully authenticated with Salesforce"
+          else
+            echo "❌ Authentication failed"
             exit 1
           fi
-
-      - name: Verify Authenticated Org
-        shell: bash
-        run: |
-          set -euo pipefail
-          sf org display --target-org targetOrg
 
       - name: Check if Package Manifest Exists
         id: check_package
         shell: bash
         run: |
-          set -euo pipefail
-          PKG_MANIFEST="${GITHUB_WORKSPACE}/manifest/${SAFE_SOURCE_BRANCH}_package.xml"
-
+          PKG_MANIFEST="${GITHUB_WORKSPACE}/manifest/${SOURCE_BRANCH}_package.xml"
+          
           echo "Checking for package manifest at: $PKG_MANIFEST"
-
+          
           if [[ -f "$PKG_MANIFEST" ]]; then
+            echo "✅ Package manifest found: $PKG_MANIFEST"
             echo "package_exists=true" >> "$GITHUB_OUTPUT"
             echo "package_path=$PKG_MANIFEST" >> "$GITHUB_OUTPUT"
           else
             echo "❌ Package manifest not found"
             echo "Expected location: $PKG_MANIFEST"
+            echo ""
             echo "Please ensure the following file exists in your repository:"
-            echo "  manifest/${SAFE_SOURCE_BRANCH}_package.xml"
+            echo "  manifest/${SOURCE_BRANCH}_package.xml"
+            echo ""
+            echo "package_exists=false" >> "$GITHUB_OUTPUT"
             exit 1
           fi
 
       - name: Prepare Test Classes
         id: prepare_manifest
         shell: bash
+        env:
+          MANIFEST_PATH: ${{ steps.check_package.outputs.package_path }}
         run: |
-          set -euo pipefail
-          MANIFEST_PATH="${{ steps.check_package.outputs.package_path }}"
-          TEST_CLASS_FILE="${GITHUB_WORKSPACE}/manifest/${SAFE_SOURCE_BRANCH}_TestClass.txt"
+          TEST_CLASS_FILE="${GITHUB_WORKSPACE}/manifest/${SOURCE_BRANCH}_TestClass.txt"
 
           echo "Checking for test class file at: $TEST_CLASS_FILE"
-
+          
           if [[ -f "$TEST_CLASS_FILE" ]]; then
-            TEST_CLASSES=$(tr '\n' ' ' < "$TEST_CLASS_FILE" | xargs)
+            TEST_CLASSES=$(<"$TEST_CLASS_FILE")
+            
+            # Trim leading/trailing whitespace and newlines
+            TEST_CLASSES="${TEST_CLASSES#"${TEST_CLASSES%%[![:space:]]*}"}"
+            TEST_CLASSES="${TEST_CLASSES%"${TEST_CLASSES##*[![:space:]]}"}"
 
             if [[ -z "$TEST_CLASSES" ]]; then
               echo "❌ Test class file is empty"
+              echo "Expected location: $TEST_CLASS_FILE"
+              echo ""
+              echo "Please ensure the test class file contains test class names"
+              echo "Format: One test class per line or space-separated"
+              echo ""
               exit 1
             fi
 
@@ -261,10 +207,14 @@ jobs:
           else
             echo "❌ Test class file not found"
             echo "Expected location: $TEST_CLASS_FILE"
+            echo ""
+            echo "Please ensure the following file exists in your repository:"
+            echo "  manifest/${SOURCE_BRANCH}_TestClass.txt"
+            echo ""
             echo "Validation requires a test class file with explicit test classes"
             exit 1
           fi
-
+          
           echo "manifest_path=$MANIFEST_PATH" >> "$GITHUB_OUTPUT"
 
       - name: Display Validation Configuration
@@ -291,19 +241,14 @@ jobs:
           TEST_LEVEL: ${{ steps.prepare_manifest.outputs.test_level }}
           TEST_CLASSES: ${{ steps.prepare_manifest.outputs.test_classes }}
           MANIFEST_PATH: ${{ steps.prepare_manifest.outputs.manifest_path }}
+          SF_USERNAME: ${{ env.SF_USERNAME }}
         run: |
-          set -euo pipefail
-
+          echo "🚀 Starting deployment validation..."
+          echo ""
+          
           read -ra tests_array <<< "$TEST_CLASSES"
 
-          CMD=(sf project deploy validate
-            --target-org targetOrg
-            --manifest "$MANIFEST_PATH"
-            --wait 60
-            --ignore-warnings
-            --test-level "$TEST_LEVEL"
-            --verbose
-          )
+          CMD=(sf project deploy validate --target-org "$SF_USERNAME" --manifest "$MANIFEST_PATH" --wait 60 --ignore-warnings --test-level "$TEST_LEVEL")
 
           if [[ "$TEST_LEVEL" == "RunSpecifiedTests" && ${#tests_array[@]} -gt 0 ]]; then
             CMD+=(--tests)
@@ -312,58 +257,61 @@ jobs:
             done
           fi
 
+          CMD+=(--verbose)
+
           echo "Executing command:"
-          printf '%q ' "${CMD[@]}"
-          echo
+          echo "${CMD[@]}"
+          echo ""
+          
+          # set +e allows us to record execution status outputs instead of crashing early
+          set +e
+          "${CMD[@]}" | tee deploy-result.txt
+          VALIDATION_EXIT_CODE=${PIPESTATUS[0]}
+          set -e
 
-          "${CMD[@]}" 2>&1 | tee deploy-result.txt
-          exit_code=${PIPESTATUS[0]}
-
-          echo "VALIDATION_EXIT_CODE=$exit_code" >> "$GITHUB_ENV"
-
-          if [[ "$exit_code" -ne 0 ]]; then
-            echo "❌ Validation command failed with exit code $exit_code"
-            exit "$exit_code"
-          fi
+          echo "VALIDATION_EXIT_CODE=$VALIDATION_EXIT_CODE" >> "$GITHUB_OUTPUT"
 
       - name: Display Validation Result
         shell: bash
+        env:
+          EXIT_CODE: ${{ steps.validate.outputs.VALIDATION_EXIT_CODE }}
         run: |
-          set -euo pipefail
-
+          if [[ ! -f deploy-result.txt ]]; then
+            echo "❌ No result output generated"
+            exit 1
+          fi
+          
+          echo ""
           echo "=========================================="
           echo "VALIDATION RESULT"
           echo "=========================================="
+          echo ""
 
-          if [[ "${VALIDATION_EXIT_CODE:-1}" == "0" ]]; then
+          if [[ "$EXIT_CODE" == "0" ]]; then
             echo "✅ VALIDATION PASSED SUCCESSFULLY"
+            echo ""
             echo "The package validation was successful!"
+            echo "=========================================="
+            exit 0
           else
             echo "❌ VALIDATION FAILED"
-            echo "Exit Code: ${VALIDATION_EXIT_CODE:-unknown}"
+            echo ""
+            echo "Exit Code: $EXIT_CODE"
+            echo ""
             echo "Error details:"
-            grep -i "error\|failed\|exception" deploy-result.txt | head -30 || true
+            echo "---"
+            grep -i "error\|failed" deploy-result.txt | head -30 || true
+            echo "---"
+            echo ""
+            echo "=========================================="
             exit 1
           fi
-
-      - name: Post Validation Success
-        if: success()
-        shell: bash
-        run: |
-          echo "✅ PR VALIDATION COMPLETED SUCCESSFULLY"
-          echo "This PR is ready to be merged."
-
-      - name: Post Validation Failure
-        if: failure()
-        shell: bash
-        run: |
-          echo "❌ PR VALIDATION FAILED"
-          echo "Please review the validation errors above and fix the issues."
 
       - name: Remove JWT Key File
         if: always()
         shell: bash
         run: |
-          set -euo pipefail
-          rm -f server.key
-          echo "✅ JWT key file cleaned up"
+          if [[ -f server.key ]]; then
+            rm -f server.key
+            echo "✅ JWT key file cleaned up"
+          fi
