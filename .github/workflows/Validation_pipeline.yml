@@ -39,6 +39,15 @@ jobs:
       SF_ENV_ALIAS: lodhaOrg
       SF_LOGIN_URL_TEST: https://test.salesforce.com
       SF_LOGIN_URL_PROD: https://login.salesforce.com
+    if: >
+      (github.event_name == 'workflow_dispatch' &&
+       (
+         (github.ref == 'refs/heads/DEV' && github.event.inputs.environment == 'DEV') ||
+         (github.ref == 'refs/heads/QA' && github.event.inputs.environment == 'QA') ||
+         (github.ref == 'refs/heads/UAT' && github.event.inputs.environment == 'UAT') ||
+         (github.ref == 'refs/heads/main' && github.event.inputs.environment == 'PRODUCTION') ||
+         (github.ref == 'refs/heads/main' && github.event.inputs.environment == 'HOTFIX')
+       ))
     steps:
       - name: Checkout branch
         uses: actions/checkout@v4
