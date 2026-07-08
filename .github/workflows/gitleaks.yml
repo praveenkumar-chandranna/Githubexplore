@@ -49,7 +49,7 @@ jobs:
 
       - name: Upload Scan Report
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: gitleaks-report
           path: gitleaks-report.sarif
