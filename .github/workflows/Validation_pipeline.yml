@@ -126,47 +126,6 @@ jobs:
           
           sf org login jwt --client-id "${CLIENT_ID}" --jwt-key-file server.key --username "${USERNAME}" --instance-url "${LOGIN_URL}" --alias "$SF_ALIAS" --set-default
 
-      - name: Run Salesforce Code Analyzer
-        id: run-scanner
-        uses: forcedotcom/run-code-analyzer@v2
-        with:
-          run-arguments: --target force-app
-          results-artifact-name: salesforce-code-analyzer-results
-
-      - name: Fail if critical violations found
-        if: |
-          steps.run-scanner.outputs.exit-code > 0 ||
-          steps.run-scanner.outputs.num-sev1-violations > 0 ||
-          steps.run-scanner.outputs.num-violations > 10
-        run: exit 0
-                  
-      - name: Install Gitleaks
-        run: |
-          GITLEAKS_VERSION=$(curl -s https://api.github.com/repos/gitleaks/gitleaks/releases/latest | grep tag_name | cut -d '"' -f 4 | sed 's/v//')
-          wget -q "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
-          tar -xzf "gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
-          chmod +x gitleaks
-          sudo mv gitleaks /usr/local/bin/
-
-      - name: Run Gitleaks Scan
-        run: |
-          gitleaks detect --source . --config .gitleaks.toml --report-format sarif --report-path gitleaks-report.sarif --verbose
-          echo "✅ No secrets detected"
-
-      - name: Upload Scan Report
-        if: failure()
-        uses: actions/upload-artifact@v7
-        with:
-          name: gitleaks-report
-          path: gitleaks-report.sarif
-          retention-days: 30
-
-      - name: Fail if critical violations found
-        if: |
-          steps.run-scanner.outputs.exit-code > 0 ||
-          steps.run-scanner.outputs.num-sev1-violations > 0 ||
-          steps.run-scanner.outputs.num-violations > 10
-        run: exit 0
 
       - name: Determine test classes for RunSpecifiedTests, if needed
         id: prepare_tests
@@ -219,7 +178,47 @@ jobs:
           else
             sf project deploy validate --manifest "$PACKAGE_XML" --target-org "$SF_ALIAS" --test-level "$TESTLEVEL" --wait 30
           fi
+      - name: Run Salesforce Code Analyzer
+        id: run-scanner
+        uses: forcedotcom/run-code-analyzer@v2
+        with:
+          run-arguments: --target force-app
+          results-artifact-name: salesforce-code-analyzer-results
 
+      - name: Fail if critical violations found
+        if: |
+          steps.run-scanner.outputs.exit-code > 0 ||
+          steps.run-scanner.outputs.num-sev1-violations > 0 ||
+          steps.run-scanner.outputs.num-violations > 10
+        run: exit 0
+                  
+      - name: Install Gitleaks
+        run: |
+          GITLEAKS_VERSION=$(curl -s https://api.github.com/repos/gitleaks/gitleaks/releases/latest | grep tag_name | cut -d '"' -f 4 | sed 's/v//')
+          wget -q "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          tar -xzf "gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          chmod +x gitleaks
+          sudo mv gitleaks /usr/local/bin/
+
+      - name: Run Gitleaks Scan
+        run: |
+          gitleaks detect --source . --config .gitleaks.toml --report-format sarif --report-path gitleaks-report.sarif --verbose
+          echo "✅ No secrets detected"
+
+      - name: Upload Scan Report
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: gitleaks-report
+          path: gitleaks-report.sarif
+          retention-days: 30
+
+      - name: Fail if critical violations found
+        if: |
+          steps.run-scanner.outputs.exit-code > 0 ||
+          steps.run-scanner.outputs.num-sev1-violations > 0 ||
+          steps.run-scanner.outputs.num-violations > 10
+        run: exit 0
       - name: Cleanup
         if: always()
         run: rm -f server.key
