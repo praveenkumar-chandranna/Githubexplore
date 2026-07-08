@@ -47,8 +47,8 @@ jobs:
           echo "=========================================="
           echo "⚠️  VALIDATION SKIPPED"
           echo "=========================================="
-          echo "PR from 'main' branch detected"
-          echo "Policy: PRs from 'main' branch bypass validation"
+          echo "PR Raised from 'main' branch"
+          echo "Please run Validation for Feature Branch"
           echo "=========================================="
 
   # Job 3: Main validation job
@@ -228,12 +228,14 @@ jobs:
           
           echo "manifest_path=$MANIFEST_PATH" >> "$GITHUB_OUTPUT"
 
-      - name: Display Validation Configuration
+      - name: Validate Deployment - ${{ env.TARGET_ORG_NAME }} Org
+        id: validate
         shell: bash
         env:
           TEST_LEVEL: ${{ steps.prepare_manifest.outputs.test_level }}
           TEST_CLASSES: ${{ steps.prepare_manifest.outputs.test_classes }}
           MANIFEST_PATH: ${{ steps.prepare_manifest.outputs.manifest_path }}
+          SF_USERNAME: ${{ env.SF_USERNAME }}
         run: |
           echo ""
           echo "=========================================="
@@ -244,16 +246,6 @@ jobs:
           echo "Test Classes: $TEST_CLASSES"
           echo "=========================================="
           echo ""
-
-      - name: Validate Deployment - ${{ env.TARGET_ORG_NAME }} Org
-        id: validate
-        shell: bash
-        env:
-          TEST_LEVEL: ${{ steps.prepare_manifest.outputs.test_level }}
-          TEST_CLASSES: ${{ steps.prepare_manifest.outputs.test_classes }}
-          MANIFEST_PATH: ${{ steps.prepare_manifest.outputs.manifest_path }}
-          SF_USERNAME: ${{ env.SF_USERNAME }}
-        run: |
           echo "🚀 Starting deployment validation..."
           echo ""
           
@@ -316,6 +308,44 @@ jobs:
             echo "=========================================="
             exit 1
           fi
+
+      - name: Install Salesforce Code Analyzer plugin
+        run: sf plugins install @salesforce/sfdx-scanner@latest
+        
+      - name: Run Salesforce Code Analyzer
+        id: run-scanner
+        uses: forcedotcom/run-code-analyzer@v2
+        with:
+          run-command: run
+          run-arguments: --normalize-severity --target . --outfile results.json --json --verbose
+          results-artifact-name: salesforce-code-analyzer-results
+
+      - name: Display Salesforce Scanner Report
+        run: |
+          echo "| Rule Id | Severity | File | Line | Message |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|----------|------|------|---------|" >> $GITHUB_STEP_SUMMARY
+          jq -r '.[] | "|"+(.ruleId // "N/A")+"|"+(.severity // "N/A")+"|"+(.file // "N/A")+"|"+((.line|tostring) // "N/A")+"|"+(.message // "N/A")+"|"' results.json >> $GITHUB_STEP_SUMMARY
+          
+      - name: Install Gitleaks
+        run: |
+          GITLEAKS_VERSION=$(curl -s https://api.github.com/repos/gitleaks/gitleaks/releases/latest | grep tag_name | cut -d '"' -f 4 | sed 's/v//')
+          wget -q "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          tar -xzf "gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          chmod +x gitleaks
+          sudo mv gitleaks /usr/local/bin/
+
+      - name: Run Gitleaks Scan
+        run: |
+          gitleaks detect --source . --config .gitleaks.toml --report-format sarif --report-path gitleaks-report.sarif --verbose
+          echo "✅ No secrets detected"
+
+      - name: Upload Scan Report
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: gitleaks-report
+          path: gitleaks-report.sarif
+          retention-days: 30
 
       - name: Remove JWT Key File
         if: always()

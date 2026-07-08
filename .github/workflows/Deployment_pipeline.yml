@@ -212,22 +212,6 @@ jobs:
             --username "$USERNAME" \
             --instance-url "$LOGIN_URL" \
             --set-default
-      - name: Install Salesforce Code Analyzer plugin
-        run: sf plugins install @salesforce/sfdx-scanner@latest
-        
-      - name: Run Salesforce Code Analyzer
-        id: run-scanner
-        uses: forcedotcom/run-code-analyzer@v2
-        with:
-          run-command: run
-          run-arguments: --normalize-severity --target . --outfile results.json --json --verbose
-          results-artifact-name: salesforce-code-analyzer-results
-
-      - name: Display Salesforce Scanner Report
-        run: |
-          echo "| Rule Id | Severity | File | Line | Message |" >> $GITHUB_STEP_SUMMARY
-          echo "|---------|----------|------|------|---------|" >> $GITHUB_STEP_SUMMARY
-          jq -r '.[] | "|"+(.ruleId // "N/A")+"|"+(.severity // "N/A")+"|"+(.file // "N/A")+"|"+((.line|tostring) // "N/A")+"|"+(.message // "N/A")+"|"' results.json >> $GITHUB_STEP_SUMMARY
 
       - name: Fail if critical violations found
         if: |
@@ -236,18 +220,7 @@ jobs:
           steps.run-scanner.outputs.num-violations > 10
         run: exit 0
 
-      - name: Check Manifest exists
-        env:
-          WORKSPACE: ${{ github.workspace }}
-          FEATURE_BRANCH: ${{ env.FEATURE_BRANCH }}
-        run: |
-          MANIFEST="${WORKSPACE}/manifest/${FEATURE_BRANCH}_package.xml"
-          if [[ ! -f "$MANIFEST" ]]; then
-            echo "ERROR: Manifest file $MANIFEST not found."
-            exit 1
-          fi
-
-      - name: Prepare test classes for RunSpecifiedTests
+      - name: Check Manifest Exists and Prepare test classes for RunSpecifiedTests
         id: prepare-tests
         env:
           TEST_LEVEL: ${{ env.TEST_LEVEL }}
@@ -255,6 +228,11 @@ jobs:
           FEATURE_BRANCH: ${{ env.FEATURE_BRANCH }}
           WORKSPACE: ${{ github.workspace }}
         run: |
+          MANIFEST="${WORKSPACE}/manifest/${FEATURE_BRANCH}_package.xml"
+          if [[ ! -f "$MANIFEST" ]]; then
+            echo "ERROR: Manifest file $MANIFEST not found."
+            exit 1
+          fi
           if [[ "$TEST_LEVEL" == "RunSpecifiedTests" ]]; then
             if [[ -z "$SPECIFIED_CLASS" ]]; then
               TEST_CLASS_FILE="${WORKSPACE}/manifest/${FEATURE_BRANCH}_TestClass.txt"
@@ -273,7 +251,7 @@ jobs:
             echo "test_classes=" >> $GITHUB_OUTPUT
           fi
 
-      - name: Deployment Validation - ${{ env.ENVIRONMENT }}
+      - name: Validation Deployment for salesforce - ${{ env.ENVIRONMENT }} Org
         shell: bash
         env:
           WORKSPACE: ${{ github.workspace }}
@@ -296,7 +274,7 @@ jobs:
           echo "${CMD[@]}"
           "${CMD[@]}"
 
-      - name: Deploy to Salesforce  - ${{ env.ENVIRONMENT }}
+      - name: Deploy to Salesforce  - ${{ env.ENVIRONMENT }} Org
         shell: bash
         env:
           WORKSPACE: ${{ github.workspace }}
