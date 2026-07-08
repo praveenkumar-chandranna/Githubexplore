@@ -14,7 +14,7 @@ on:
           - DEV
           - QA
           - UAT
-          - PROD
+          - PRODUCTION
           - HOTFIX
         default: "DEV"
         required: true
@@ -63,7 +63,6 @@ jobs:
         run: |
           npm install -g @salesforce/cli@latest
           sf --version
-
       - name: Install Salesforce Code Analyzer Plugin
         run: sf plugins install @salesforce/sfdx-scanner@latest || echo "Plugin already installed"
 
@@ -94,7 +93,7 @@ jobs:
           USER_HOTFIX: ${{ secrets.SFDX_AUTH_HOTFIX_USERNAME }}
         run: |
           LOGIN_URL="$SF_LOGIN_URL_TEST_VAL"
-          if [[ "$INPUT_ENV" =~ ^\s*(PROD|prod)$ ]]; then
+          if [[ "$INPUT_ENV" =~ ^\s*(PRODUCTION|prod)$ ]]; then
             LOGIN_URL="$SF_LOGIN_URL_PROD_VAL"
           fi
 
@@ -111,7 +110,7 @@ jobs:
               CLIENT_ID="$KEY_UAT"
               USERNAME="$USER_UAT"
               ;;
-            "PROD")
+            "PRODUCTION")
               CLIENT_ID="$KEY_PROD"
               USERNAME="$USER_PROD"
               ;;
@@ -131,15 +130,36 @@ jobs:
         id: run-scanner
         uses: forcedotcom/run-code-analyzer@v2
         with:
-          run-command: run
-          run-arguments: --normalize-severity --target . --outfile results.json --json --verbose
+          run-arguments: --target force-app
           results-artifact-name: salesforce-code-analyzer-results
 
-      - name: Display Salesforce Scanner Report
+      - name: Fail if critical violations found
+        if: |
+          steps.run-scanner.outputs.exit-code > 0 ||
+          steps.run-scanner.outputs.num-sev1-violations > 0 ||
+          steps.run-scanner.outputs.num-violations > 10
+        run: exit 0
+                  
+      - name: Install Gitleaks
         run: |
-          echo "| Rule Id | Severity | File | Line | Message |" >> $GITHUB_STEP_SUMMARY
-          echo "|---------|----------|------|------|---------|" >> $GITHUB_STEP_SUMMARY
-          jq -r '.[] | "|"+(.ruleId // "N/A")+"|"+(.severity // "N/A")+"|"+(.file // "N/A")+"|"+((.line|tostring) // "N/A")+"|"+(.message // "N/A")+"|"' results.json >> $GITHUB_STEP_SUMMARY
+          GITLEAKS_VERSION=$(curl -s https://api.github.com/repos/gitleaks/gitleaks/releases/latest | grep tag_name | cut -d '"' -f 4 | sed 's/v//')
+          wget -q "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          tar -xzf "gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          chmod +x gitleaks
+          sudo mv gitleaks /usr/local/bin/
+
+      - name: Run Gitleaks Scan
+        run: |
+          gitleaks detect --source . --config .gitleaks.toml --report-format sarif --report-path gitleaks-report.sarif --verbose
+          echo "✅ No secrets detected"
+
+      - name: Upload Scan Report
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: gitleaks-report
+          path: gitleaks-report.sarif
+          retention-days: 30
 
       - name: Fail if critical violations found
         if: |
