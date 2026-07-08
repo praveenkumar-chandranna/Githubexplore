@@ -309,9 +309,6 @@ jobs:
             exit 1
           fi
 
-      - name: Install Salesforce Code Analyzer plugin
-        run: sf plugins install @salesforce/sfdx-scanner@latest
-        
       - name: Run Salesforce Code Analyzer
         id: run-scanner
         uses: forcedotcom/run-code-analyzer@v2
