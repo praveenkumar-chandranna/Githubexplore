@@ -1,14 +1,6 @@
 name: Lodha Deployment Pipeline
 
 on:
-  pull_request:
-    types:
-      - closed
-    branches:
-      - QA
-      - UAT
-      - main
-
   workflow_dispatch:
     inputs:
       Feature_Branch:
@@ -59,7 +51,6 @@ jobs:
          (github.ref == 'refs/heads/main' && github.event.inputs.environment == 'PRODUCTION') ||
          (github.ref == 'refs/heads/main' && github.event.inputs.environment == 'HOTFIX')
        ))
-      || (github.event_name == 'pull_request' && github.event.pull_request.merged == true)
 
     steps:
       - name: Validate branch-environment consistency
@@ -79,13 +70,18 @@ jobs:
           INPUT_ENV: ${{ github.event.inputs.environment }}
           INPUT_TESTLEVEL: ${{ github.event.inputs.testlevel }}
           INPUT_SPECIFIEDCLASS: ${{ github.event.inputs.specifiedclass }}
-          PR_SOURCE_BRANCH: ${{ github.event.pull_request.head.ref }}
-          PR_TARGET_BRANCH: ${{ github.event.pull_request.base.ref }}
-          EVENT_NAME: ${{ github.event_name }}
         run: |
-          if [[ "$EVENT_NAME" == "pull_request" ]]; then
-            echo "FEATURE_BRANCH=$PR_SOURCE_BRANCH" >> $GITHUB_ENV
-            case "$PR_TARGET_BRANCH" in
+          echo "FEATURE_BRANCH=$INPUT_BRANCH" >> $GITHUB_ENV
+
+          if [ -n "$INPUT_ENV" ]; then
+            echo "ENVIRONMENT=$INPUT_ENV" >> $GITHUB_ENV
+            export ENVIRONMENT="$INPUT_ENV"
+          else
+            case "${GITHUB_REF##*/}" in
+              DEV)
+                echo "ENVIRONMENT=DEV" >> $GITHUB_ENV
+                export ENVIRONMENT="DEV"
+                ;;
               QA)
                 echo "ENVIRONMENT=QA" >> $GITHUB_ENV
                 export ENVIRONMENT="QA"
@@ -98,60 +94,15 @@ jobs:
                 echo "ENVIRONMENT=PRODUCTION" >> $GITHUB_ENV
                 export ENVIRONMENT="PRODUCTION"
                 ;;
+              hotfix)
+                echo "ENVIRONMENT=HOTFIX" >> $GITHUB_ENV
+                export ENVIRONMENT="HOTFIX"
+                ;;
               *)
-                echo "ERROR: PR target branch '$PR_TARGET_BRANCH' does not map to a known environment."
+                echo "ERROR: Branch '${GITHUB_REF##*/}' does not map to a known environment."
                 exit 1
                 ;;
             esac
-            echo "TEST_LEVEL=RunSpecifiedTests" >> $GITHUB_ENV
-            echo "SPECIFIED_CLASS=" >> $GITHUB_ENV
-            echo "Auto-triggered: PR merged from '$PR_SOURCE_BRANCH' to '$PR_TARGET_BRANCH' (Environment: $ENVIRONMENT)"
-          else
-            echo "FEATURE_BRANCH=$INPUT_BRANCH" >> $GITHUB_ENV
-
-            if [ -n "$INPUT_ENV" ]; then
-              echo "ENVIRONMENT=$INPUT_ENV" >> $GITHUB_ENV
-              export ENVIRONMENT="$INPUT_ENV"
-            else
-              case "${GITHUB_REF##*/}" in
-                DEV)
-                  echo "ENVIRONMENT=DEV" >> $GITHUB_ENV
-                  export ENVIRONMENT="DEV"
-                  ;;
-                QA)
-                  echo "ENVIRONMENT=QA" >> $GITHUB_ENV
-                  export ENVIRONMENT="QA"
-                  ;;
-                UAT)
-                  echo "ENVIRONMENT=UAT" >> $GITHUB_ENV
-                  export ENVIRONMENT="UAT"
-                  ;;
-                main)
-                  echo "ENVIRONMENT=PRODUCTION" >> $GITHUB_ENV
-                  export ENVIRONMENT="PRODUCTION"
-                  ;;
-                hotfix)
-                  echo "ENVIRONMENT=HOTFIX" >> $GITHUB_ENV
-                  export ENVIRONMENT="HOTFIX"
-                  ;;
-                *)
-                  echo "ERROR: Branch '${GITHUB_REF##*/}' does not map to a known environment."
-                  exit 1
-                  ;;
-              esac
-            fi
-
-            if [ -n "$INPUT_TESTLEVEL" ]; then
-              echo "TEST_LEVEL=$INPUT_TESTLEVEL" >> $GITHUB_ENV
-            else
-              echo "TEST_LEVEL=RunSpecifiedTests" >> $GITHUB_ENV
-            fi
-
-            SPECIFIED_CLASS="$INPUT_SPECIFIEDCLASS"
-            if [[ "$SPECIFIED_CLASS" == "''" ]]; then
-              SPECIFIED_CLASS=""
-            fi
-            echo "SPECIFIED_CLASS=$SPECIFIED_CLASS" >> $GITHUB_ENV
           fi
 
           if [[ -z "${ENVIRONMENT}" ]]; then
@@ -159,10 +110,22 @@ jobs:
             exit 1
           fi
 
+          if [ -n "$INPUT_TESTLEVEL" ]; then
+            echo "TEST_LEVEL=$INPUT_TESTLEVEL" >> $GITHUB_ENV
+          else
+            echo "TEST_LEVEL=RunSpecifiedTests" >> $GITHUB_ENV
+          fi
+
+          SPECIFIED_CLASS="$INPUT_SPECIFIEDCLASS"
+          if [[ "$SPECIFIED_CLASS" == "''" ]]; then
+            SPECIFIED_CLASS=""
+          fi
+          echo "SPECIFIED_CLASS=$SPECIFIED_CLASS" >> $GITHUB_ENV
+
       - name: Checkout source code
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref || github.ref_name }}
+          ref: ${{ github.ref_name }}
           fetch-depth: 0
 
       - name: Setup Node.js
@@ -361,8 +324,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: Deployment_Build
     if: >
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'PRODUCTION' && github.ref == 'refs/heads/main') ||
-      (github.event_name == 'pull_request' && github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'main')
+      github.event.inputs.environment == 'PRODUCTION' &&
+      github.ref == 'refs/heads/main'
 
     env:
       SF_LOGIN_URL_TEST: https://test.salesforce.com
@@ -402,7 +365,7 @@ jobs:
         shell: bash
         env:
           WORKSPACE: ${{ github.workspace }}
-          FEATURE_BRANCH: ${{ github.event.inputs.Feature_Branch || github.event.pull_request.head.ref }}
+          FEATURE_BRANCH: ${{ github.event.inputs.Feature_Branch }}
           ORG_USERNAME: ${{ secrets.SFDX_AUTH_HOTFIX_USERNAME }}
         run: |
           MANIFEST="${WORKSPACE}/manifest/${FEATURE_BRANCH}_package.xml"
