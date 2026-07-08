@@ -325,7 +325,13 @@ jobs:
           echo "| Rule Id | Severity | File | Line | Message |" >> $GITHUB_STEP_SUMMARY
           echo "|---------|----------|------|------|---------|" >> $GITHUB_STEP_SUMMARY
           jq -r '.[] | "|"+(.ruleId // "N/A")+"|"+(.severity // "N/A")+"|"+(.file // "N/A")+"|"+((.line|tostring) // "N/A")+"|"+(.message // "N/A")+"|"' results.json >> $GITHUB_STEP_SUMMARY
-          
+      - name: Fail if critical violations found
+        if: |
+          steps.run-scanner.outputs.exit-code > 0 ||
+          steps.run-scanner.outputs.num-sev1-violations > 0 ||
+          steps.run-scanner.outputs.num-violations > 10
+        run: exit 0
+                  
       - name: Install Gitleaks
         run: |
           GITLEAKS_VERSION=$(curl -s https://api.github.com/repos/gitleaks/gitleaks/releases/latest | grep tag_name | cut -d '"' -f 4 | sed 's/v//')

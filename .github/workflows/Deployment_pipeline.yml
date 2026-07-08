@@ -213,12 +213,7 @@ jobs:
             --instance-url "$LOGIN_URL" \
             --set-default
 
-      - name: Fail if critical violations found
-        if: |
-          steps.run-scanner.outputs.exit-code > 0 ||
-          steps.run-scanner.outputs.num-sev1-violations > 0 ||
-          steps.run-scanner.outputs.num-violations > 10
-        run: exit 0
+
 
       - name: Check Manifest Exists and Prepare test classes for RunSpecifiedTests
         id: prepare-tests
