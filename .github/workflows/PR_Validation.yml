@@ -73,6 +73,9 @@ jobs:
           npm install -g @salesforce/cli
           sf --version
 
+      - name: Install Salesforce Code Analyzer Plugin
+        run: sf plugins install code-analyzer@latest
+
       - name: Generate JWT Key File
         run: |
           echo "${{ secrets.SALESFORCE_JWT_SECRET_KEY }}" > server.key
@@ -313,15 +316,9 @@ jobs:
         id: run-scanner
         uses: forcedotcom/run-code-analyzer@v2
         with:
-          run-command: run
-          run-arguments: --normalize-severity --target . --outfile results.json --json --verbose
+          run-arguments: --target force-app
           results-artifact-name: salesforce-code-analyzer-results
 
-      - name: Display Salesforce Scanner Report
-        run: |
-          echo "| Rule Id | Severity | File | Line | Message |" >> $GITHUB_STEP_SUMMARY
-          echo "|---------|----------|------|------|---------|" >> $GITHUB_STEP_SUMMARY
-          jq -r '.[] | "|"+(.ruleId // "N/A")+"|"+(.severity // "N/A")+"|"+(.file // "N/A")+"|"+((.line|tostring) // "N/A")+"|"+(.message // "N/A")+"|"' results.json >> $GITHUB_STEP_SUMMARY
       - name: Fail if critical violations found
         if: |
           steps.run-scanner.outputs.exit-code > 0 ||
