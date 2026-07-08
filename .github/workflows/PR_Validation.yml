@@ -139,7 +139,7 @@ jobs:
           echo "🧹 Clearing existing Salesforce org sessions..."
           sf org logout --all --no-prompt || true
 
-      - name: Authenticate Salesforce Using JWT
+      - name: Authenticate Salesforce - ${{ env.DEST_BRANCH }} Org
         shell: bash
         run: |
           echo "🔐 Authenticating with Salesforce..."
@@ -241,7 +241,7 @@ jobs:
           echo "=========================================="
           echo ""
 
-      - name: Validate Deployment against Target Org
+      - name: Validate Deployment - ${{ env.DEST_BRANCH }} Org
         id: validate
         shell: bash
         env:

@@ -76,7 +76,7 @@ jobs:
           echo "🧹 Clearing existing Salesforce org sessions..."
           sf org logout --all --no-prompt || true
 
-      - name: Authorize to Salesforce org
+      - name: Authorize to Salesforce - ${{ github.event.inputs.environment }} Org
         env:
           INPUT_ENV: ${{ github.event.inputs.environment }}
           SF_LOGIN_URL_TEST_VAL: ${{ env.SF_LOGIN_URL_TEST }}
@@ -173,7 +173,7 @@ jobs:
             echo "test_classes=$TEST_CLASSES" >> $GITHUB_OUTPUT
           fi
 
-      - name: Deployment Validation 
+      - name: Deployment Validation - ${{ github.event.inputs.environment }} Org
         shell: bash
         env:
           INPUT_BRANCH: ${{ github.event.inputs.Feature_Branch }}
