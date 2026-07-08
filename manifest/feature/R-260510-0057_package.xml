@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Package xmlns="http://soap.sforce.com/2006/04/metadata">
+    <types>
+        <members>saudaAllocationScreenCmp</members>
+        <members>saudaBookingAllocate</members>
+        <name>LightningComponentBundle</name>
+    </types>
+    <types>
+        <members>SaudaBooking__c.PreventStatusChangeDeactiveSauda</members>
+        <name>ValidationRule</name>
+    </types>
+    <version>66.0</version>
+</Package>

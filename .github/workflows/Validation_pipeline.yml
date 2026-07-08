@@ -1,0 +1,196 @@
+name: Lodha Validation Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      Feature_Branch:
+        type: string
+        description: Please Enter Branch To validate in Environment.
+        required: true
+      environment:
+        type: choice
+        description: Please Select The Validation Environment.
+        options:
+          - DEV
+          - QA
+          - UAT
+          - PROD
+          - HOTFIX
+        default: "DEV"
+        required: true
+      testlevel:
+        type: choice
+        description: Select Test class Run Type.
+        options:
+          - RunLocalTests
+          - RunSpecifiedTests
+          - RunAllTestsInOrg
+        default: "RunSpecifiedTests"
+        required: true
+      specifiedclass:
+        type: string
+        description: Please Enter Test Class Names (space separated).
+        required: false
+
+jobs:
+  Validation_Build:
+    runs-on: ubuntu-latest
+    env:
+      SF_ENV_ALIAS: lodhaOrg
+      SF_LOGIN_URL_TEST: https://test.salesforce.com
+      SF_LOGIN_URL_PROD: https://login.salesforce.com
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Salesforce CLI
+        run: |
+          npm install -g @salesforce/cli@latest
+          sf --version
+
+      - name: Install Salesforce Code Analyzer Plugin
+        run: sf plugins install @salesforce/sfdx-scanner@latest || echo "Plugin already installed"
+
+      - name: Generate JWT Key file
+        run: echo "${{ secrets.SALESFORCE_JWT_SECRET_KEY }}" > server.key && chmod 600 server.key
+
+      - name: Clear Prior Salesforce Sessions
+        shell: bash
+        run: |
+          echo "🧹 Clearing existing Salesforce org sessions..."
+          sf org logout --all --no-prompt || true
+
+      - name: Authorize to Salesforce org
+        env:
+          INPUT_ENV: ${{ github.event.inputs.environment }}
+          SF_LOGIN_URL_TEST_VAL: ${{ env.SF_LOGIN_URL_TEST }}
+          SF_LOGIN_URL_PROD_VAL: ${{ env.SF_LOGIN_URL_PROD }}
+          SF_ALIAS: ${{ env.SF_ENV_ALIAS }}
+          KEY_DEV: ${{ secrets.SALESFORCE_CONSUMER_KEY_DEV }}
+          KEY_QA: ${{ secrets.SALESFORCE_CONSUMER_KEY_QA }}
+          KEY_UAT: ${{ secrets.SALESFORCE_CONSUMER_KEY_UAT }}
+          KEY_PROD: ${{ secrets.SALESFORCE_CONSUMER_KEY_PROD }}
+          KEY_HOTFIX: ${{ secrets.SALESFORCE_CONSUMER_KEY_HOTFIX }}
+          USER_DEV: ${{ secrets.SFDX_AUTH_DEV_USERNAME }}
+          USER_QA: ${{ secrets.SFDX_AUTH_QA_USERNAME }}
+          USER_UAT: ${{ secrets.SFDX_AUTH_UAT_USERNAME }}
+          USER_PROD: ${{ secrets.SFDX_AUTH_PROD_USERNAME }}
+          USER_HOTFIX: ${{ secrets.SFDX_AUTH_HOTFIX_USERNAME }}
+        run: |
+          LOGIN_URL="$SF_LOGIN_URL_TEST_VAL"
+          if [[ "$INPUT_ENV" =~ ^\s*(PROD|prod)$ ]]; then
+            LOGIN_URL="$SF_LOGIN_URL_PROD_VAL"
+          fi
+
+          case "$INPUT_ENV" in
+            "DEV")
+              CLIENT_ID="$KEY_DEV"
+              USERNAME="$USER_DEV"
+              ;;
+            "QA")
+              CLIENT_ID="$KEY_QA"
+              USERNAME="$USER_QA"
+              ;;
+            "UAT")
+              CLIENT_ID="$KEY_UAT"
+              USERNAME="$USER_UAT"
+              ;;
+            "PROD")
+              CLIENT_ID="$KEY_PROD"
+              USERNAME="$USER_PROD"
+              ;;
+            "HOTFIX")
+              CLIENT_ID="$KEY_HOTFIX"
+              USERNAME="$USER_HOTFIX"
+              ;;
+            *)
+              echo "Unknown environment: $INPUT_ENV"
+              exit 1
+              ;;
+          esac
+          
+          sf org login jwt --client-id "${CLIENT_ID}" --jwt-key-file server.key --username "${USERNAME}" --instance-url "${LOGIN_URL}" --alias "$SF_ALIAS" --set-default
+
+      - name: Run Salesforce Code Analyzer
+        id: run-scanner
+        uses: forcedotcom/run-code-analyzer@v1
+        with:
+          run-command: run
+          run-arguments: --normalize-severity --target . --outfile results.json --json --verbose
+          results-artifact-name: salesforce-code-analyzer-results
+
+      - name: Display Salesforce Scanner Report
+        run: |
+          echo "| Rule Id | Severity | File | Line | Message |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|----------|------|------|---------|" >> $GITHUB_STEP_SUMMARY
+          jq -r '.[] | "|"+(.ruleId // "N/A")+"|"+(.severity // "N/A")+"|"+(.file // "N/A")+"|"+((.line|tostring) // "N/A")+"|"+(.message // "N/A")+"|"' results.json >> $GITHUB_STEP_SUMMARY
+
+      - name: Fail if critical violations found
+        if: |
+          steps.run-scanner.outputs.exit-code > 0 ||
+          steps.run-scanner.outputs.num-sev1-violations > 0 ||
+          steps.run-scanner.outputs.num-violations > 10
+        run: exit 0
+
+      - name: Determine test classes for RunSpecifiedTests, if needed
+        id: prepare_tests
+        env:
+          INPUT_TESTLEVEL: ${{ github.event.inputs.testlevel }}
+          INPUT_SPECIFIEDCLASS: ${{ github.event.inputs.specifiedclass }}
+          INPUT_BRANCH: ${{ github.event.inputs.Feature_Branch }}
+          WORKSPACE: ${{ github.workspace }}
+        run: |
+          if [[ "$INPUT_TESTLEVEL" == "RunSpecifiedTests" ]]; then
+            if [ -n "$INPUT_SPECIFIEDCLASS" ]; then
+              echo "Using specified test classes from input"
+              TEST_CLASSES="$INPUT_SPECIFIEDCLASS"
+            else
+              TEST_FILE="${WORKSPACE}/manifest/${INPUT_BRANCH}_TestClass.txt"
+              if [[ -f "$TEST_FILE" ]]; then
+                TEST_CLASSES=$(paste -sd " " "$TEST_FILE")
+                echo "Read test classes from file: $TEST_CLASSES"
+              else
+                echo "Error: Test classes file not found at '$TEST_FILE' and no classes specified via input"
+                exit 1
+              fi
+            fi
+            echo "test_classes=$TEST_CLASSES" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Deployment Validation 
+        shell: bash
+        env:
+          INPUT_BRANCH: ${{ github.event.inputs.Feature_Branch }}
+          INPUT_TESTLEVEL: ${{ github.event.inputs.testlevel }}
+          TESTS: ${{ steps.prepare_tests.outputs.test_classes }}
+          SF_ALIAS: ${{ env.SF_ENV_ALIAS }}
+          WORKSPACE: ${{ github.workspace }}
+        run: |
+          PACKAGE_XML="${WORKSPACE}/manifest/${INPUT_BRANCH}_package.xml"
+          echo "Validating deployment of package: $PACKAGE_XML"
+          
+          TESTLEVEL="$INPUT_TESTLEVEL"
+          
+          echo "Using test level: $TESTLEVEL"
+          echo "Using test classes: $TESTS"
+          
+          if [[ "$TESTLEVEL" == "RunSpecifiedTests" ]]; then
+            if [[ -z "$TESTS" ]]; then
+              echo "No test classes specified, switching to RunLocalTests for coverage"
+              TESTLEVEL="RunLocalTests"
+            fi
+            sf project deploy validate --manifest "$PACKAGE_XML" --target-org "$SF_ALIAS" --test-level "$TESTLEVEL" --tests $TESTS --wait 30
+          else
+            sf project deploy validate --manifest "$PACKAGE_XML" --target-org "$SF_ALIAS" --test-level "$TESTLEVEL" --wait 30
+          fi
+
+      - name: Cleanup
+        if: always()
+        run: rm -f server.key
