@@ -107,24 +107,28 @@ jobs:
               echo "SF_USERNAME=$AUTH_DEV_USERNAME" >> "$GITHUB_ENV"
               echo "SF_INSTANCE_URL=$SANDBOX_URL" >> "$GITHUB_ENV"
               echo "SF_CLIENT_ID=$CONSUMER_KEY_DEV" >> "$GITHUB_ENV"
+              echo "TARGET_ORG_NAME=DEV" >> "$GITHUB_ENV"
               echo "🎯 Target Org: DEV"
               ;;
             QA)
               echo "SF_USERNAME=$AUTH_QA_USERNAME" >> "$GITHUB_ENV"
               echo "SF_INSTANCE_URL=$SANDBOX_URL" >> "$GITHUB_ENV"
               echo "SF_CLIENT_ID=$CONSUMER_KEY_QA" >> "$GITHUB_ENV"
+              echo "TARGET_ORG_NAME=QA" >> "$GITHUB_ENV"
               echo "🎯 Target Org: QA"
               ;;
             UAT)
               echo "SF_USERNAME=$AUTH_UAT_USERNAME" >> "$GITHUB_ENV"
               echo "SF_INSTANCE_URL=$SANDBOX_URL" >> "$GITHUB_ENV"
               echo "SF_CLIENT_ID=$CONSUMER_KEY_UAT" >> "$GITHUB_ENV"
+              echo "TARGET_ORG_NAME=UAT" >> "$GITHUB_ENV"
               echo "🎯 Target Org: UAT"
               ;;
             main)
               echo "SF_USERNAME=$AUTH_PROD_USERNAME" >> "$GITHUB_ENV"
               echo "SF_INSTANCE_URL=$LOGIN_URL" >> "$GITHUB_ENV"
               echo "SF_CLIENT_ID=$CONSUMER_KEY_PROD" >> "$GITHUB_ENV"
+              echo "TARGET_ORG_NAME=PRODUCTION" >> "$GITHUB_ENV"
               echo "🎯 Target Org: PRODUCTION"
               ;;
             *)
@@ -139,7 +143,7 @@ jobs:
           echo "🧹 Clearing existing Salesforce org sessions..."
           sf org logout --all --no-prompt || true
 
-      - name: Authenticate Salesforce Using JWT
+      - name: Authenticate Salesforce - ${{ env.TARGET_ORG_NAME }} Org
         shell: bash
         run: |
           echo "🔐 Authenticating with Salesforce..."
@@ -241,7 +245,7 @@ jobs:
           echo "=========================================="
           echo ""
 
-      - name: Validate Deployment against Target Org
+      - name: Validate Deployment - ${{ env.TARGET_ORG_NAME }} Org
         id: validate
         shell: bash
         env:
