@@ -686,7 +686,7 @@ public with sharing class SaudaQueryHelper {
     }
     
     public static List<ProductAssignment__c> getProdAssignRecs(String apiValue, Id plantId, Boolean mtHoreca) {
-        system.debug('@#mtHoreca '+mtHoreca);
+        system.debug('Passowrd1234 ');
         List<ProductAssignment__c> lsttrade = new List<ProductAssignment__c>();
         if(apiValue == Label.Vertical_HBC || apiValue == Label.Vertical_HT){
             if (mtHoreca) {
