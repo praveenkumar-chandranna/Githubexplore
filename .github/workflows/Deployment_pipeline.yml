@@ -36,6 +36,7 @@ on:
 jobs:
   Deployment_Build:
     runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment == 'PRODUCTION' && 'PRODUCTION' || '' }}
 
     env:
       SF_LOGIN_URL_TEST: https://test.salesforce.com
@@ -275,6 +276,7 @@ jobs:
           "${CMD[@]}"
 
       - name: Deploy to Salesforce  - ${{ env.ENVIRONMENT }} Org
+        id: deploy
         shell: bash
         env:
           WORKSPACE: ${{ github.workspace }}
@@ -293,6 +295,76 @@ jobs:
           echo "Running deploy command:"
           echo "${CMD[@]}"
           "${CMD[@]}"
+          echo "deploy_status=success" >> $GITHUB_OUTPUT
+
+      - name: Tag Release
+        if: success() && env.ENVIRONMENT == 'PRODUCTION'
+        run: |
+          TAG="release-$(date +'%Y%m%d-%H%M%S')"
+          git tag "$TAG"
+          git push origin "$TAG"
+          echo "RELEASE_TAG=$TAG" >> $GITHUB_ENV
+
+      - name: Post-deploy Health Check
+        id: health-check
+        if: success() && env.ENVIRONMENT == 'PRODUCTION'
+        shell: bash
+        env:
+          ORG_USERNAME: ${{ steps.set-org.outputs.USERNAME }}
+        run: |
+          echo "🔍 Running post-deploy health check..."
+          RESULT=$(sf org display --target-org "$ORG_USERNAME" --json 2>&1)
+          if echo "$RESULT" | jq -e '.status == 0' > /dev/null 2>&1; then
+            echo "✅ Health check passed"
+            echo "health_status=passed" >> $GITHUB_OUTPUT
+          else
+            echo "❌ Health check failed"
+            echo "health_status=failed" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+      - name: Publish Confluence Release Notes
+        if: success() && env.ENVIRONMENT == 'PRODUCTION'
+        env:
+          CONFLUENCE_BASE_URL: ${{ secrets.CONFLUENCE_BASE_URL }}
+          CONFLUENCE_EMAIL: ${{ secrets.CONFLUENCE_EMAIL }}
+          CONFLUENCE_API_TOKEN: ${{ secrets.CONFLUENCE_API_TOKEN }}
+          CONFLUENCE_SPACE_KEY: ${{ secrets.CONFLUENCE_SPACE_KEY }}
+          CONFLUENCE_PARENT_PAGE_ID: ${{ secrets.CONFLUENCE_PARENT_PAGE_ID }}
+          FEATURE_BRANCH: ${{ env.FEATURE_BRANCH }}
+          RELEASE_TAG: ${{ env.RELEASE_TAG }}
+        run: |
+          TITLE="Release: $RELEASE_TAG - $(date +'%Y-%m-%d')"
+          BODY="<h2>Release Notes</h2><ul><li><b>Tag:</b> $RELEASE_TAG</li><li><b>Feature:</b> $FEATURE_BRANCH</li><li><b>Deployed by:</b> ${{ github.actor }}</li><li><b>Date:</b> $(date +'%Y-%m-%d %H:%M:%S UTC')</li><li><b>Workflow:</b> <a href=\"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\">View Run</a></li></ul>"
+
+          curl -s -X POST \
+            "${CONFLUENCE_BASE_URL}/wiki/rest/api/content" \
+            -H "Content-Type: application/json" \
+            -u "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
+            -d "{
+              \"type\": \"page\",
+              \"title\": \"${TITLE}\",
+              \"space\": {\"key\": \"${CONFLUENCE_SPACE_KEY}\"},
+              \"ancestors\": [{\"id\": \"${CONFLUENCE_PARENT_PAGE_ID}\"}],
+              \"body\": {\"storage\": {\"value\": \"${BODY}\", \"representation\": \"storage\"}}
+            }" || echo "⚠️ Confluence update failed"
+
+      - name: Trigger Rollback on Health Check Failure
+        if: failure() && steps.health-check.outputs.health_status == 'failed'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          if [[ -n "$PREV_TAG" ]]; then
+            echo "🔄 Triggering rollback to $PREV_TAG"
+            curl -s -X POST \
+              "${{ github.api_url }}/repos/${{ github.repository }}/dispatches" \
+              -H "Authorization: token $GH_TOKEN" \
+              -H "Accept: application/vnd.github.v3+json" \
+              -d "{\"event_type\":\"health-check-failure\",\"client_payload\":{\"rollback_tag\":\"$PREV_TAG\",\"environment\":\"PRODUCTION\",\"reason\":\"Post-deploy health check failed for ${{ env.RELEASE_TAG }}\"}}"
+          else
+            echo "⚠️ No previous tag found for rollback"
+          fi
 
       - name: Cleanup JWT key
         if: always()
