@@ -150,7 +150,7 @@ jobs:
           ENVIRONMENT: ${{ env.ENVIRONMENT }}
           SF_LOGIN_URL_TEST_VAL: ${{ env.SF_LOGIN_URL_TEST }}
           SF_LOGIN_URL_PROD_VAL: ${{ env.SF_LOGIN_URL_PROD }}
-          KEY_DEV: "1234678"
+          KEY_DEV: ${{ secrets.SALESFORCE_CONSUMER_KEY_DEV }}
           KEY_QA: ${{ secrets.SALESFORCE_CONSUMER_KEY_QA }}
           KEY_UAT: ${{ secrets.SALESFORCE_CONSUMER_KEY_UAT }}
           KEY_PROD: ${{ secrets.SALESFORCE_CONSUMER_KEY_PROD }}
