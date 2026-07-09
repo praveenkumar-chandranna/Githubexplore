@@ -66,7 +66,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: 20
+          node-version: 22
 
       - name: Install Salesforce CLI
         run: |
@@ -263,7 +263,7 @@ jobs:
             done
           fi
 
-          CMD+=(--verbose)
+          CMD+=(--verbose --coverage-formatters json)
 
           echo "Executing command:"
           echo "${CMD[@]}"
@@ -310,6 +310,31 @@ jobs:
             echo ""
             echo "=========================================="
             exit 1
+          fi
+
+      - name: Check Code Coverage (minimum 80%)
+        shell: bash
+        run: |
+          COVERAGE_FILE=$(find . -name "coverage.json" -path "*/coverage/coverage.json" 2>/dev/null | head -1)
+          if [[ -z "$COVERAGE_FILE" ]]; then
+            echo "⚠️ Coverage file not found, checking deploy output..."
+            COVERAGE=$(grep -oP 'Overall Code Coverage: \K[0-9]+' deploy-result.txt 2>/dev/null || echo "")
+            if [[ -z "$COVERAGE" ]]; then
+              echo "⚠️ Could not determine code coverage from output"
+              exit 0
+            fi
+          else
+            COVERAGE=$(jq '[.[].coveredPercent] | add / length | floor' "$COVERAGE_FILE" 2>/dev/null || echo "")
+          fi
+
+          if [[ -n "$COVERAGE" ]]; then
+            echo "📊 Code Coverage: ${COVERAGE}%"
+            if [[ "$COVERAGE" -lt 80 ]]; then
+              echo "❌ Code coverage ${COVERAGE}% is below minimum threshold of 80%"
+              exit 1
+            else
+              echo "✅ Code coverage ${COVERAGE}% meets minimum threshold of 80%"
+            fi
           fi
 
       - name: Run Salesforce Code Analyzer
