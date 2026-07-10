@@ -1,0 +1,30 @@
+name: Validate Commit Message
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check commit messages
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: commits } = await github.rest.pulls.listCommits({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.payload.pull_request.number
+            });
+
+            const regex = /^[A-Z]+-\d+ (feat|fix|chore|docs|refactor): .+/;
+
+            for (const commit of commits) {
+              if (!regex.test(commit.commit.message.split('\n')[0])) {
+                core.setFailed(
+                  `Invalid commit message: ${commit.commit.message}`
+                );
+              }
+            }
