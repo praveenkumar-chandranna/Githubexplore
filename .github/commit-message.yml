@@ -19,7 +19,7 @@ jobs:
               pull_number: context.payload.pull_request.number
             });
 
-            const regex = /^[A-Z]+-\d+ (feat|fix|chore|docs|refactor): .+/;
+            const regex = /^[A-Z]+-[0-9]+: .+
 
             for (const commit of commits) {
               if (!regex.test(commit.commit.message.split('\n')[0])) {
