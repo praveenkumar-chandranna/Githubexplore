@@ -19,12 +19,14 @@ jobs:
               pull_number: context.payload.pull_request.number
             });
 
-            const regex = /^[A-Z]+-[0-9]+: .+
+            const regex = /^[A-Z]+-[0-9]+: .+$/;
 
             for (const commit of commits) {
-              if (!regex.test(commit.commit.message.split('\n')[0])) {
+              const message = commit.commit.message.split('\n')[0];
+
+              if (!regex.test(message)) {
                 core.setFailed(
-                  `Invalid commit message: ${commit.commit.message}`
+                  `Invalid commit message: ${message}`
                 );
               }
             }
