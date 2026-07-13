@@ -10,7 +10,7 @@ jobs:
 
     steps:
       - name: Check commit messages
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const { data: commits } = await github.rest.pulls.listCommits({
