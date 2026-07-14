@@ -44,4 +44,10 @@ public with sharing class OpportunityService {
         opp.CloseDate = newCloseDate;
         update opp;
     }
+
+    public static void updateAmount(Id oppId, Decimal newAmount) {
+        Opportunity opp = [SELECT Id, Amount FROM Opportunity WHERE Id = :oppId LIMIT 1];
+        opp.Amount = newAmount;
+        update opp;
+    }
 }

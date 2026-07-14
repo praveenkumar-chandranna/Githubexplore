@@ -281,13 +281,36 @@ jobs:
         run: |
           MANIFEST="${WORKSPACE}/manifest/${FEATURE_BRANCH}_package.xml"
           echo "Deploying manifest: $MANIFEST"
-          CMD=(sf project deploy start --manifest "$MANIFEST" --target-org "$ORG_USERNAME" --test-level "$TEST_LEVEL" --wait 10 --ignore-conflicts)
+          CMD=(sf project deploy start --manifest "$MANIFEST" --target-org "$ORG_USERNAME" --test-level "$TEST_LEVEL" --wait 10 --ignore-conflicts --coverage-formatters json --results-dir coverage-results)
           if [[ "$TEST_LEVEL" == "RunSpecifiedTests" && -n "$TEST_CLASSES" ]]; then
             CMD+=(--tests $TEST_CLASSES)
           fi
           echo "Running deploy command:"
           echo "${CMD[@]}"
           "${CMD[@]}"
+
+      - name: Check Code Coverage
+        if: env.TEST_LEVEL != 'NoTestRun'
+        shell: bash
+        run: |
+          COVERAGE_FILE=$(find . -name "coverage.json" -path "*/coverage-results/*" 2>/dev/null | head -1)
+          if [[ -z "$COVERAGE_FILE" ]]; then
+            echo "⚠️ Coverage file not found."
+            exit 0
+          fi
+          echo "📄 Found coverage file: $COVERAGE_FILE"
+          COVERAGE=$(jq '[.[].coveredPercent] | add / length | floor' "$COVERAGE_FILE" 2>/dev/null || echo "")
+          if [[ -n "$COVERAGE" ]]; then
+            echo "📊 Code Coverage: ${COVERAGE}%"
+            if [[ "$COVERAGE" -lt 80 ]]; then
+              echo "❌ Code coverage ${COVERAGE}% is below minimum threshold of 80%"
+              exit 1
+            else
+              echo "✅ Code coverage ${COVERAGE}% meets minimum threshold of 80%"
+            fi
+          else
+            echo "⚠️ Could not parse coverage data"
+          fi
 
       - name: Cleanup JWT key
         if: always()
