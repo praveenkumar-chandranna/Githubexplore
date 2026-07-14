@@ -359,7 +359,7 @@ jobs:
           fi
 
           echo "📊 Overall Code Coverage: ${COVERAGE}%"
-          if [[ "$COVERAGE" -lt 82 ]]; then
+          if [[ "$COVERAGE" -lt 80 ]]; then
             echo "❌ Code coverage ${COVERAGE}% is below minimum threshold of 80%"
             exit 1
           else
