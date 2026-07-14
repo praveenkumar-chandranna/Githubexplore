@@ -43,4 +43,19 @@ private class OpportunityServiceTest {
         Opportunity result = [SELECT StageName FROM Opportunity WHERE Id = :opp.Id];
         System.assertEquals('Closed Won', result.StageName);
     }
+
+    @isTest
+    static void testUpdateCloseDate() {
+        Account acc = new Account(Name = 'Test Account 4');
+        insert acc;
+        Opportunity opp = new Opportunity(Name = 'Date Opp', StageName = 'Prospecting', CloseDate = Date.today().addDays(30), AccountId = acc.Id);
+        insert opp;
+
+        Test.startTest();
+        OpportunityService.updateCloseDate(opp.Id, Date.today().addDays(90));
+        Test.stopTest();
+
+        Opportunity result = [SELECT CloseDate FROM Opportunity WHERE Id = :opp.Id];
+        System.assertEquals(Date.today().addDays(90), result.CloseDate);
+    }
 }
