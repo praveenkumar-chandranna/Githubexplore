@@ -301,11 +301,26 @@ jobs:
 
           if [[ -n "$COVERAGE_FILE" ]]; then
             echo "📄 Found coverage file: $COVERAGE_FILE"
-            echo "📋 File content preview:"
-            head -c 500 "$COVERAGE_FILE"
-            echo ""
 
-            COVERAGE=$(jq 'if type == "array" then [.[].coveredPercent // 0] | if length > 0 then add / length | floor else 0 end elif type == "object" then [to_entries[].value | if type == "object" then (.coveredPercent // 0) else 0 end] | if length > 0 then add / length | floor else 0 end else 0 end' "$COVERAGE_FILE" 2>/dev/null || echo "")
+            COVERAGE=$(jq '
+              [to_entries[] | .value.s | to_entries | {total: length, covered: [.[] | select(.value > 0)] | length}]
+              | {total: (map(.total) | add), covered: (map(.covered) | add)}
+              | if .total > 0 then (.covered * 100 / .total | floor) else 0 end
+            ' "$COVERAGE_FILE" 2>/dev/null || echo "")
+
+            echo ""
+            echo "=========================================="
+            echo "CODE COVERAGE REPORT"
+            echo "=========================================="
+            jq -r '
+              to_entries[] |
+              .key as $class |
+              .value.s | to_entries |
+              {class: $class, total: length, covered: ([.[] | select(.value > 0)] | length)} |
+              "\(.class): \(.covered)/\(.total) lines covered (\(if .total > 0 then (.covered * 100 / .total | floor) else 0 end)%)"
+            ' "$COVERAGE_FILE" 2>/dev/null || true
+            echo "=========================================="
+            echo ""
           fi
 
           if [[ -z "$COVERAGE" || "$COVERAGE" == "null" || "$COVERAGE" == "0" ]]; then
@@ -315,11 +330,10 @@ jobs:
 
           if [[ -z "$COVERAGE" || "$COVERAGE" == "null" ]]; then
             echo "⚠️ Could not determine code coverage"
-            find . -name "*coverage*" -type f 2>/dev/null || true
             exit 0
           fi
 
-          echo "📊 Code Coverage: ${COVERAGE}%"
+          echo "📊 Overall Code Coverage: ${COVERAGE}%"
           if [[ "$COVERAGE" -lt 80 ]]; then
             echo "❌ Code coverage ${COVERAGE}% is below minimum threshold of 80%"
             exit 1
