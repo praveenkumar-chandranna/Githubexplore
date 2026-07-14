@@ -58,4 +58,17 @@ private class OpportunityServiceTest {
         Opportunity result = [SELECT CloseDate FROM Opportunity WHERE Id = :opp.Id];
         System.assertEquals(Date.today().addDays(90), result.CloseDate);
     }
+
+    @isTest
+    static void testGetOpportunitiesByAccount() {
+        Account acc = new Account(Name = 'Test Account 5');
+        insert acc;
+        insert new Opportunity(Name = 'Opp1', StageName = 'Prospecting', CloseDate = Date.today().addDays(30), AccountId = acc.Id);
+
+        Test.startTest();
+        List<Opportunity> opps = OpportunityService.getOpportunitiesByAccount(acc.Id);
+        Test.stopTest();
+
+        System.assertEquals(1, opps.size());
+    }
 }
