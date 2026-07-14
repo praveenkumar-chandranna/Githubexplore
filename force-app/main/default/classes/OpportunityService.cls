@@ -33,4 +33,15 @@ public with sharing class OpportunityService {
         Opportunity opp = [SELECT Id FROM Opportunity WHERE Id = :oppId LIMIT 1];
         delete opp;
     }
+
+    public static List<Opportunity> getOpportunitiesByAccount(Id accountId) {
+        List<Opportunity> opps = [SELECT Id, Name, StageName, CloseDate, Amount FROM Opportunity WHERE AccountId = :accountId];
+        return opps;
+    }
+
+    public static void updateCloseDate(Id oppId, Date newCloseDate) {
+        Opportunity opp = [SELECT Id, CloseDate FROM Opportunity WHERE Id = :oppId LIMIT 1];
+        opp.CloseDate = newCloseDate;
+        update opp;
+    }
 }
