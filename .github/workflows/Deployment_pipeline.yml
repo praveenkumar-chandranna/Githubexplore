@@ -281,13 +281,65 @@ jobs:
         run: |
           MANIFEST="${WORKSPACE}/manifest/${FEATURE_BRANCH}_package.xml"
           echo "Deploying manifest: $MANIFEST"
-          CMD=(sf project deploy start --manifest "$MANIFEST" --target-org "$ORG_USERNAME" --test-level "$TEST_LEVEL" --wait 10 --ignore-conflicts)
+          CMD=(sf project deploy start --manifest "$MANIFEST" --target-org "$ORG_USERNAME" --test-level "$TEST_LEVEL" --wait 10 --ignore-conflicts --coverage-formatters json --results-dir coverage-results)
           if [[ "$TEST_LEVEL" == "RunSpecifiedTests" && -n "$TEST_CLASSES" ]]; then
             CMD+=(--tests $TEST_CLASSES)
           fi
           echo "Running deploy command:"
           echo "${CMD[@]}"
           "${CMD[@]}"
+
+      - name: Check Code Coverage
+        if: env.TEST_LEVEL != 'NoTestRun'
+        shell: bash
+        run: |
+          echo "🔍 Searching for coverage file..."
+          COVERAGE_FILE=$(find . -name "*.json" -path "*coverage-results*" 2>/dev/null | head -1)
+          if [[ -z "$COVERAGE_FILE" ]]; then
+            COVERAGE_FILE=$(find . -name "coverage*.json" 2>/dev/null | head -1)
+          fi
+
+          if [[ -n "$COVERAGE_FILE" ]]; then
+            echo "📄 Found coverage file: $COVERAGE_FILE"
+
+            COVERAGE=$(jq '
+              [to_entries[] | .value.s | to_entries | {total: length, covered: [.[] | select(.value > 0)] | length}]
+              | {total: (map(.total) | add), covered: (map(.covered) | add)}
+              | if .total > 0 then (.covered * 100 / .total | floor) else 0 end
+            ' "$COVERAGE_FILE" 2>/dev/null || echo "")
+
+            echo ""
+            echo "=========================================="
+            echo "CODE COVERAGE REPORT"
+            echo "=========================================="
+            jq -r '
+              to_entries[] |
+              .key as $class |
+              .value.s | to_entries |
+              {class: $class, total: length, covered: ([.[] | select(.value > 0)] | length)} |
+              "\(.class): \(.covered)/\(.total) lines covered (\(if .total > 0 then (.covered * 100 / .total | floor) else 0 end)%)"
+            ' "$COVERAGE_FILE" 2>/dev/null || true
+            echo "=========================================="
+            echo ""
+          fi
+
+          if [[ -z "$COVERAGE" || "$COVERAGE" == "null" || "$COVERAGE" == "0" ]]; then
+            echo "⚠️ Could not parse coverage from JSON, checking deploy output..."
+            COVERAGE=$(grep -oP '\d+(?=%)' deploy-result.txt 2>/dev/null | tail -1 || echo "")
+          fi
+
+          if [[ -z "$COVERAGE" || "$COVERAGE" == "null" ]]; then
+            echo "⚠️ Could not determine code coverage"
+            exit 0
+          fi
+
+          echo "📊 Overall Code Coverage: ${COVERAGE}%"
+          if [[ "$COVERAGE" -lt 80 ]]; then
+            echo "❌ Code coverage ${COVERAGE}% is below minimum threshold of 80%"
+            exit 1
+          else
+            echo "✅ Code coverage ${COVERAGE}% meets minimum threshold of 80%"
+          fi
 
       - name: Cleanup JWT key
         if: always()

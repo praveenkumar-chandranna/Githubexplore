@@ -3,6 +3,8 @@
     <types>
         <members>AccountQueryService</members>
         <members>AccountQueryServiceTest</members>
+        <members>OpportunityService</members>
+        <members>OpportunityServiceTest</members>
         <name>ApexClass</name>
     </types>
     <version>67.0</version>

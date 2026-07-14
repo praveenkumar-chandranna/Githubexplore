@@ -263,7 +263,7 @@ jobs:
             done
           fi
 
-          CMD+=(--verbose --coverage-formatters json)
+          CMD+=(--verbose --coverage-formatters json --results-dir coverage-results)
 
           echo "Executing command:"
           echo "${CMD[@]}"
@@ -315,26 +315,55 @@ jobs:
       - name: Check Code Coverage (minimum 80%)
         shell: bash
         run: |
-          COVERAGE_FILE=$(find . -name "coverage.json" -path "*/coverage/coverage.json" 2>/dev/null | head -1)
+          echo "🔍 Searching for coverage file..."
+          COVERAGE_FILE=$(find . -name "*.json" -path "*coverage-results*" 2>/dev/null | head -1)
           if [[ -z "$COVERAGE_FILE" ]]; then
-            echo "⚠️ Coverage file not found, checking deploy output..."
-            COVERAGE=$(grep -oP 'Overall Code Coverage: \K[0-9]+' deploy-result.txt 2>/dev/null || echo "")
-            if [[ -z "$COVERAGE" ]]; then
-              echo "⚠️ Could not determine code coverage from output"
-              exit 0
-            fi
-          else
-            COVERAGE=$(jq '[.[].coveredPercent] | add / length | floor' "$COVERAGE_FILE" 2>/dev/null || echo "")
+            COVERAGE_FILE=$(find . -name "coverage*.json" 2>/dev/null | head -1)
           fi
 
-          if [[ -n "$COVERAGE" ]]; then
-            echo "📊 Code Coverage: ${COVERAGE}%"
-            if [[ "$COVERAGE" -lt 80 ]]; then
-              echo "❌ Code coverage ${COVERAGE}% is below minimum threshold of 80%"
-              exit 1
-            else
-              echo "✅ Code coverage ${COVERAGE}% meets minimum threshold of 80%"
-            fi
+          if [[ -n "$COVERAGE_FILE" ]]; then
+            echo "📄 Found coverage file: $COVERAGE_FILE"
+
+            # Salesforce CLI generates Istanbul format coverage JSON
+            # Calculate coverage from statement counts per class
+            COVERAGE=$(jq '
+              [to_entries[] | .value.s | to_entries | {total: length, covered: [.[] | select(.value > 0)] | length}]
+              | {total: (map(.total) | add), covered: (map(.covered) | add)}
+              | if .total > 0 then (.covered * 100 / .total | floor) else 0 end
+            ' "$COVERAGE_FILE" 2>/dev/null || echo "")
+
+            # Display per-class coverage
+            echo ""
+            echo "=========================================="
+            echo "CODE COVERAGE REPORT"
+            echo "=========================================="
+            jq -r '
+              to_entries[] |
+              .key as $class |
+              .value.s | to_entries |
+              {class: $class, total: length, covered: ([.[] | select(.value > 0)] | length)} |
+              "\(.class): \(.covered)/\(.total) lines covered (\(if .total > 0 then (.covered * 100 / .total | floor) else 0 end)%)"
+            ' "$COVERAGE_FILE" 2>/dev/null || true
+            echo "=========================================="
+            echo ""
+          fi
+
+          if [[ -z "$COVERAGE" || "$COVERAGE" == "null" || "$COVERAGE" == "0" ]]; then
+            echo "⚠️ Could not parse coverage from JSON, checking deploy output..."
+            COVERAGE=$(grep -oP '\d+(?=%)' deploy-result.txt 2>/dev/null | tail -1 || echo "")
+          fi
+
+          if [[ -z "$COVERAGE" || "$COVERAGE" == "null" ]]; then
+            echo "⚠️ Could not determine code coverage"
+            exit 0
+          fi
+
+          echo "📊 Overall Code Coverage: ${COVERAGE}%"
+          if [[ "$COVERAGE" -lt 80 ]]; then
+            echo "❌ Code coverage ${COVERAGE}% is below minimum threshold of 80%"
+            exit 1
+          else
+            echo "✅ Code coverage ${COVERAGE}% meets minimum threshold of 80%"
           fi
 
       - name: Run Salesforce Code Analyzer
