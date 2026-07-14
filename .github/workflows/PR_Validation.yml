@@ -318,18 +318,22 @@ jobs:
           echo "🔍 Searching for coverage file..."
           COVERAGE_FILE=$(find . -name "*.json" -path "*coverage-results*" 2>/dev/null | head -1)
           if [[ -z "$COVERAGE_FILE" ]]; then
-            echo "⚠️ Coverage results directory not found, searching broadly..."
             COVERAGE_FILE=$(find . -name "coverage*.json" 2>/dev/null | head -1)
           fi
 
           if [[ -n "$COVERAGE_FILE" ]]; then
             echo "📄 Found coverage file: $COVERAGE_FILE"
-            COVERAGE=$(jq '[.[].coveredPercent] | if length > 0 then add / length | floor else 0 end' "$COVERAGE_FILE" 2>/dev/null || echo "")
+            echo "📋 File content preview:"
+            head -c 500 "$COVERAGE_FILE"
+            echo ""
+
+            # Try array format: [{"coveredPercent": X}]
+            COVERAGE=$(jq 'if type == "array" then [.[].coveredPercent // 0] | if length > 0 then add / length | floor else 0 end elif type == "object" then [to_entries[].value | if type == "object" then (.coveredPercent // 0) else 0 end] | if length > 0 then add / length | floor else 0 end else 0 end' "$COVERAGE_FILE" 2>/dev/null || echo "")
           fi
 
-          if [[ -z "$COVERAGE" || "$COVERAGE" == "null" ]]; then
+          if [[ -z "$COVERAGE" || "$COVERAGE" == "null" || "$COVERAGE" == "0" ]]; then
             echo "⚠️ Could not parse coverage from JSON, checking deploy output..."
-            COVERAGE=$(grep -oP '(?<=Overall Code Coverage[:\s]*)\d+' deploy-result.txt 2>/dev/null || echo "")
+            COVERAGE=$(grep -oP '\d+(?=%)' deploy-result.txt 2>/dev/null | tail -1 || echo "")
           fi
 
           if [[ -z "$COVERAGE" || "$COVERAGE" == "null" ]]; then

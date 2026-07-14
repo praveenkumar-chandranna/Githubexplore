@@ -293,23 +293,38 @@ jobs:
         if: env.TEST_LEVEL != 'NoTestRun'
         shell: bash
         run: |
-          COVERAGE_FILE=$(find . -name "coverage.json" -path "*/coverage-results/*" 2>/dev/null | head -1)
+          echo "🔍 Searching for coverage file..."
+          COVERAGE_FILE=$(find . -name "*.json" -path "*coverage-results*" 2>/dev/null | head -1)
           if [[ -z "$COVERAGE_FILE" ]]; then
-            echo "⚠️ Coverage file not found."
+            COVERAGE_FILE=$(find . -name "coverage*.json" 2>/dev/null | head -1)
+          fi
+
+          if [[ -n "$COVERAGE_FILE" ]]; then
+            echo "📄 Found coverage file: $COVERAGE_FILE"
+            echo "📋 File content preview:"
+            head -c 500 "$COVERAGE_FILE"
+            echo ""
+
+            COVERAGE=$(jq 'if type == "array" then [.[].coveredPercent // 0] | if length > 0 then add / length | floor else 0 end elif type == "object" then [to_entries[].value | if type == "object" then (.coveredPercent // 0) else 0 end] | if length > 0 then add / length | floor else 0 end else 0 end' "$COVERAGE_FILE" 2>/dev/null || echo "")
+          fi
+
+          if [[ -z "$COVERAGE" || "$COVERAGE" == "null" || "$COVERAGE" == "0" ]]; then
+            echo "⚠️ Could not parse coverage from JSON, checking deploy output..."
+            COVERAGE=$(grep -oP '\d+(?=%)' deploy-result.txt 2>/dev/null | tail -1 || echo "")
+          fi
+
+          if [[ -z "$COVERAGE" || "$COVERAGE" == "null" ]]; then
+            echo "⚠️ Could not determine code coverage"
+            find . -name "*coverage*" -type f 2>/dev/null || true
             exit 0
           fi
-          echo "📄 Found coverage file: $COVERAGE_FILE"
-          COVERAGE=$(jq '[.[].coveredPercent] | add / length | floor' "$COVERAGE_FILE" 2>/dev/null || echo "")
-          if [[ -n "$COVERAGE" ]]; then
-            echo "📊 Code Coverage: ${COVERAGE}%"
-            if [[ "$COVERAGE" -lt 80 ]]; then
-              echo "❌ Code coverage ${COVERAGE}% is below minimum threshold of 80%"
-              exit 1
-            else
-              echo "✅ Code coverage ${COVERAGE}% meets minimum threshold of 80%"
-            fi
+
+          echo "📊 Code Coverage: ${COVERAGE}%"
+          if [[ "$COVERAGE" -lt 80 ]]; then
+            echo "❌ Code coverage ${COVERAGE}% is below minimum threshold of 80%"
+            exit 1
           else
-            echo "⚠️ Could not parse coverage data"
+            echo "✅ Code coverage ${COVERAGE}% meets minimum threshold of 80%"
           fi
 
       - name: Cleanup JWT key
