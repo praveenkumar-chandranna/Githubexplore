@@ -56,7 +56,7 @@ jobs:
         shell: bash
         env:
           FEATURE_INPUT: ${{ github.event.inputs.Feature_Branch }}
-          MANIFEST_DIR: ${{ github.workspace }}/manifest/feature
+          MANIFEST_DIR: ${{ github.workspace }}/manifest
         run: |
           FEATURE_INPUT=$(echo "$FEATURE_INPUT" | xargs)
 
