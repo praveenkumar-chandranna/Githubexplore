@@ -5,7 +5,8 @@ on:
     inputs:
       Feature_Branch:
         type: string
-        description: Package manifest to deploy (e.g. package name / branch name)
+        description: >
+          Branch name(s) to deploy. Single: feature/LODHA-123  |  Multiple: feature/LODHA123,feature/LODHA4321
         required: true
       environment:
         type: choice
@@ -28,17 +29,14 @@ on:
           - RunAllTestsInOrg
         default: RunSpecifiedTests
         required: true
-      specifiedclass:
-        type: string
-        description: Test class names (space separated, required if RunSpecifiedTests)
-        required: false
 
 jobs:
   Deployment_Build:
     runs-on: ubuntu-latest
-
+    permissions:
+      contents: write
     env:
-      SF_LOGIN_URL_TEST: https://test.salesforce.com
+      SF_LOGIN_URL_TEST: https://login.salesforce.com
       SF_LOGIN_URL_PROD: https://login.salesforce.com
       SF_ALIAS: lodhaOrg
 
@@ -52,81 +50,176 @@ jobs:
          (github.ref == 'refs/heads/main' && github.event.inputs.environment == 'HOTFIX')
        ))
 
+    outputs:
+      deploy_package: ${{ steps.resolve-package.outputs.deploy_package }}
+      environment: ${{ steps.set-env.outputs.environment }}
+
     steps:
       - name: Validate branch-environment consistency
-        if: github.event_name == 'workflow_dispatch'
         shell: bash
-        env:
-          INPUT_ENV: ${{ github.event.inputs.environment }}
-          INPUT_BRANCH: ${{ github.event.inputs.Feature_Branch }}
         run: |
-          DEPLOY_BRANCH="${GITHUB_REF##*/}"
-          echo "Manual run: Deployment Environment=$INPUT_ENV. Package to deploy: $INPUT_BRANCH"
+          echo "Manual run: Environment=${{ github.event.inputs.environment }}, Package(s)=${{ github.event.inputs.Feature_Branch }}"
 
       - name: Set environment variables
+        id: set-env
         shell: bash
         env:
-          INPUT_BRANCH: ${{ github.event.inputs.Feature_Branch }}
           INPUT_ENV: ${{ github.event.inputs.environment }}
           INPUT_TESTLEVEL: ${{ github.event.inputs.testlevel }}
-          INPUT_SPECIFIEDCLASS: ${{ github.event.inputs.specifiedclass }}
         run: |
-          echo "FEATURE_BRANCH=$INPUT_BRANCH" >> $GITHUB_ENV
-
-          if [ -n "$INPUT_ENV" ]; then
-            echo "ENVIRONMENT=$INPUT_ENV" >> $GITHUB_ENV
-            export ENVIRONMENT="$INPUT_ENV"
-          else
-            case "${GITHUB_REF##*/}" in
-              DEV)
-                echo "ENVIRONMENT=DEV" >> $GITHUB_ENV
-                export ENVIRONMENT="DEV"
-                ;;
-              QA)
-                echo "ENVIRONMENT=QA" >> $GITHUB_ENV
-                export ENVIRONMENT="QA"
-                ;;
-              UAT)
-                echo "ENVIRONMENT=UAT" >> $GITHUB_ENV
-                export ENVIRONMENT="UAT"
-                ;;
-              main)
-                echo "ENVIRONMENT=PRODUCTION" >> $GITHUB_ENV
-                export ENVIRONMENT="PRODUCTION"
-                ;;
-              hotfix)
-                echo "ENVIRONMENT=HOTFIX" >> $GITHUB_ENV
-                export ENVIRONMENT="HOTFIX"
-                ;;
-              *)
-                echo "ERROR: Branch '${GITHUB_REF##*/}' does not map to a known environment."
-                exit 1
-                ;;
-            esac
-          fi
-
-          if [[ -z "${ENVIRONMENT}" ]]; then
-            echo "ERROR: ENVIRONMENT variable is not set or empty!"
-            exit 1
-          fi
-
-          if [ -n "$INPUT_TESTLEVEL" ]; then
-            echo "TEST_LEVEL=$INPUT_TESTLEVEL" >> $GITHUB_ENV
-          else
-            echo "TEST_LEVEL=RunSpecifiedTests" >> $GITHUB_ENV
-          fi
-
-          SPECIFIED_CLASS="$INPUT_SPECIFIEDCLASS"
-          if [[ "$SPECIFIED_CLASS" == "''" ]]; then
-            SPECIFIED_CLASS=""
-          fi
-          echo "SPECIFIED_CLASS=$SPECIFIED_CLASS" >> $GITHUB_ENV
+          echo "ENVIRONMENT=$INPUT_ENV" >> $GITHUB_ENV
+          echo "environment=$INPUT_ENV" >> $GITHUB_OUTPUT
+          echo "TEST_LEVEL=$INPUT_TESTLEVEL" >> $GITHUB_ENV
 
       - name: Checkout source code
         uses: actions/checkout@v7
         with:
           ref: ${{ github.ref_name }}
           fetch-depth: 0
+
+      - name: Consolidate or Resolve Package
+        id: resolve-package
+        shell: bash
+        env:
+          FEATURE_INPUT: ${{ github.event.inputs.Feature_Branch }}
+          MANIFEST_DIR: ${{ github.workspace }}/manifest/feature
+          OUTPUT_DIR: ${{ github.workspace }}/manifest
+        run: |
+          FEATURE_INPUT=$(echo "$FEATURE_INPUT" | xargs)
+
+          if [[ "$FEATURE_INPUT" == *","* ]]; then
+            echo "📦 Multiple branches detected — consolidating..."
+
+            RELEASE_DATE=$(date +'%d%m%Y')
+            OUTPUT_NAME="Release_${RELEASE_DATE}"
+            OUTPUT_PKG="${OUTPUT_DIR}/${OUTPUT_NAME}_package.xml"
+            OUTPUT_TEST="${OUTPUT_DIR}/${OUTPUT_NAME}_TestClass.txt"
+
+            echo "=========================================="
+            echo "PACKAGE CONSOLIDATION"
+            echo "=========================================="
+            echo "Branches : $FEATURE_INPUT"
+            echo "Output   : $OUTPUT_NAME"
+            echo "=========================================="
+
+            IFS=',' read -ra BRANCHES <<< "$FEATURE_INPUT"
+
+            echo ""
+            echo "🔍 Validating input files..."
+            for BRANCH in "${BRANCHES[@]}"; do
+              BRANCH=$(echo "$BRANCH" | xargs | sed 's|^feature/||')
+              PKG_FILE="${MANIFEST_DIR}/${BRANCH}_package.xml"
+              if [[ ! -f "$PKG_FILE" ]]; then
+                echo "❌ Package file not found: $PKG_FILE"
+                exit 1
+              fi
+              echo "  ✅ Found: ${BRANCH}_package.xml"
+            done
+
+            MAX_VERSION="0"
+            ALL_MEMBERS_RAW=""
+
+            for BRANCH in "${BRANCHES[@]}"; do
+              BRANCH=$(echo "$BRANCH" | xargs | sed 's|^feature/||')
+              PKG_FILE="${MANIFEST_DIR}/${BRANCH}_package.xml"
+              echo "  Processing: ${BRANCH}_package.xml"
+
+              VERSION=$(grep -oP '(?<=<version>)[^<]+' "$PKG_FILE" || echo "0")
+              if awk "BEGIN {exit !($VERSION > $MAX_VERSION)}"; then
+                MAX_VERSION="$VERSION"
+              fi
+
+              # Parse <types> blocks line by line — no awk/sed multi-char RS needed
+              IN_BLOCK=0
+              CUR_TYPE=""
+              CUR_MEMBERS=""
+              while IFS= read -r LINE; do
+                LINE=$(echo "$LINE" | sed 's/^[[:space:]]*//')
+                if echo "$LINE" | grep -q '<types>'; then
+                  IN_BLOCK=1; CUR_TYPE=""; CUR_MEMBERS=""
+                elif [[ $IN_BLOCK -eq 1 ]]; then
+                  if echo "$LINE" | grep -q '<name>'; then
+                    CUR_TYPE=$(echo "$LINE" | grep -oP '(?<=<name>)[^<]+')
+                  elif echo "$LINE" | grep -q '<members>'; then
+                    M=$(echo "$LINE" | grep -oP '(?<=<members>)[^<]+')
+                    CUR_MEMBERS+="$M"$'\n'
+                  elif echo "$LINE" | grep -q '</types>'; then
+                    if [[ -n "$CUR_TYPE" ]]; then
+                      while IFS= read -r MEMBER; do
+                        [[ -n "$MEMBER" ]] && ALL_MEMBERS_RAW+="${CUR_TYPE}|||${MEMBER}"$'\n'
+                      done <<< "$CUR_MEMBERS"
+                    fi
+                    IN_BLOCK=0; CUR_TYPE=""; CUR_MEMBERS=""
+                  fi
+                fi
+              done < "$PKG_FILE"
+            done
+
+            printf '<?xml version="1.0" encoding="UTF-8"?>\n' > "$OUTPUT_PKG"
+            printf '<Package xmlns="http://soap.sforce.com/2006/04/metadata">\n' >> "$OUTPUT_PKG"
+
+            SORTED_TYPES=$(echo "$ALL_MEMBERS_RAW" | grep -v '^$' | cut -d'|' -f1 | sort -u)
+            while IFS= read -r TYPE_NAME; do
+              [[ -z "$TYPE_NAME" ]] && continue
+              printf '    <types>\n' >> "$OUTPUT_PKG"
+              echo "$ALL_MEMBERS_RAW" | grep -v '^$' | grep -F "${TYPE_NAME}|||" | cut -d'|' -f4 | sort -u | while read -r MEMBER; do
+                [[ -n "$MEMBER" ]] && printf '        <members>%s</members>\n' "$MEMBER" >> "$OUTPUT_PKG"
+              done
+              printf '        <name>%s</name>\n' "$TYPE_NAME" >> "$OUTPUT_PKG"
+              printf '    </types>\n' >> "$OUTPUT_PKG"
+            done <<< "$SORTED_TYPES"
+
+            printf '    <version>%s</version>\n' "$MAX_VERSION" >> "$OUTPUT_PKG"
+            printf '</Package>\n' >> "$OUTPUT_PKG"
+
+            ALL_TESTS=""
+            for BRANCH in "${BRANCHES[@]}"; do
+              BRANCH=$(echo "$BRANCH" | xargs | sed 's|^feature/||')
+              TEST_FILE="${MANIFEST_DIR}/${BRANCH}_TestClass.txt"
+              if [[ -f "$TEST_FILE" ]]; then
+                CONTENT=$(cat "$TEST_FILE" | tr ' ' '\n' | tr ',' '\n')
+                ALL_TESTS+=$'\n'"$CONTENT"
+              fi
+            done
+
+            UNIQUE_TESTS=$(echo "$ALL_TESTS" | sort -u | grep -v '^$' | tr '\n' ' ' | xargs)
+            [[ -n "$UNIQUE_TESTS" ]] && echo "$UNIQUE_TESTS" > "$OUTPUT_TEST"
+
+            echo ""
+            echo "=========================================="
+            echo "📦 CONSOLIDATED PACKAGE.XML"
+            echo "=========================================="
+            cat "$OUTPUT_PKG"
+            if [[ -f "$OUTPUT_TEST" ]]; then
+              echo ""
+              echo "=========================================="
+              echo "🧪 CONSOLIDATED TESTCLASS.TXT"
+              echo "=========================================="
+              cat "$OUTPUT_TEST"
+            fi
+
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+            git add "${OUTPUT_DIR}/${OUTPUT_NAME}_package.xml"
+            [[ -f "$OUTPUT_TEST" ]] && git add "${OUTPUT_DIR}/${OUTPUT_NAME}_TestClass.txt"
+            if git diff --cached --quiet; then
+              echo "⚠️ No changes to commit"
+            else
+              git commit -m "chore: consolidated package ${OUTPUT_NAME} [skip ci]"
+              git push origin ${{ github.ref_name }}
+            fi
+
+            echo "FEATURE_BRANCH=${OUTPUT_NAME}" >> $GITHUB_ENV
+            echo "deploy_package=${OUTPUT_NAME}" >> $GITHUB_OUTPUT
+            echo "✅ Consolidation complete: $OUTPUT_NAME"
+
+          else
+            echo "📄 Single branch detected — using directly: $FEATURE_INPUT"
+            FEATURE_INPUT=$(echo "$FEATURE_INPUT" | sed 's|^feature/||')
+            echo "FEATURE_BRANCH=feature/${FEATURE_INPUT}" >> $GITHUB_ENV
+            echo "deploy_package=feature/${FEATURE_INPUT}" >> $GITHUB_OUTPUT
+          fi
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -162,35 +255,12 @@ jobs:
           USER_HOTFIX: ${{ secrets.SFDX_AUTH_HOTFIX_USERNAME }}
         run: |
           case "$ENVIRONMENT" in
-            DEV)
-              echo "CLIENT_ID=$KEY_DEV" >> $GITHUB_OUTPUT
-              echo "USERNAME=$USER_DEV" >> $GITHUB_OUTPUT
-              echo "LOGIN_URL=$SF_LOGIN_URL_TEST_VAL" >> $GITHUB_OUTPUT
-              ;;
-            QA)
-              echo "CLIENT_ID=$KEY_QA" >> $GITHUB_OUTPUT
-              echo "USERNAME=$USER_QA" >> $GITHUB_OUTPUT
-              echo "LOGIN_URL=$SF_LOGIN_URL_TEST_VAL" >> $GITHUB_OUTPUT
-              ;;
-            UAT)
-              echo "CLIENT_ID=$KEY_UAT" >> $GITHUB_OUTPUT
-              echo "USERNAME=$USER_UAT" >> $GITHUB_OUTPUT
-              echo "LOGIN_URL=$SF_LOGIN_URL_TEST_VAL" >> $GITHUB_OUTPUT
-              ;;
-            PRODUCTION)
-              echo "CLIENT_ID=$KEY_PROD" >> $GITHUB_OUTPUT
-              echo "USERNAME=$USER_PROD" >> $GITHUB_OUTPUT
-              echo "LOGIN_URL=$SF_LOGIN_URL_PROD_VAL" >> $GITHUB_OUTPUT
-              ;;
-            HOTFIX)
-              echo "CLIENT_ID=$KEY_HOTFIX" >> $GITHUB_OUTPUT
-              echo "USERNAME=$USER_HOTFIX" >> $GITHUB_OUTPUT
-              echo "LOGIN_URL=$SF_LOGIN_URL_TEST_VAL" >> $GITHUB_OUTPUT
-              ;;
-            *)
-              echo "Unsupported environment $ENVIRONMENT"
-              exit 1
-              ;;
+            DEV)        echo "CLIENT_ID=$KEY_DEV"    >> $GITHUB_OUTPUT; echo "USERNAME=$USER_DEV"    >> $GITHUB_OUTPUT; echo "LOGIN_URL=$SF_LOGIN_URL_TEST_VAL" >> $GITHUB_OUTPUT ;;
+            QA)         echo "CLIENT_ID=$KEY_QA"     >> $GITHUB_OUTPUT; echo "USERNAME=$USER_QA"     >> $GITHUB_OUTPUT; echo "LOGIN_URL=$SF_LOGIN_URL_TEST_VAL" >> $GITHUB_OUTPUT ;;
+            UAT)        echo "CLIENT_ID=$KEY_UAT"    >> $GITHUB_OUTPUT; echo "USERNAME=$USER_UAT"    >> $GITHUB_OUTPUT; echo "LOGIN_URL=$SF_LOGIN_URL_TEST_VAL" >> $GITHUB_OUTPUT ;;
+            PRODUCTION) echo "CLIENT_ID=$KEY_PROD"   >> $GITHUB_OUTPUT; echo "USERNAME=$USER_PROD"   >> $GITHUB_OUTPUT; echo "LOGIN_URL=$SF_LOGIN_URL_PROD_VAL" >> $GITHUB_OUTPUT ;;
+            HOTFIX)     echo "CLIENT_ID=$KEY_HOTFIX" >> $GITHUB_OUTPUT; echo "USERNAME=$USER_HOTFIX" >> $GITHUB_OUTPUT; echo "LOGIN_URL=$SF_LOGIN_URL_TEST_VAL" >> $GITHUB_OUTPUT ;;
+            *) echo "Unsupported environment $ENVIRONMENT"; exit 1 ;;
           esac
 
       - name: Clear Prior Salesforce Sessions
@@ -199,12 +269,11 @@ jobs:
           echo "🧹 Clearing existing Salesforce org sessions..."
           sf org logout --all --no-prompt || true
 
-      - name: Authenticate to  - ${{ env.ENVIRONMENT }} Org
+      - name: Authenticate to - ${{ github.event.inputs.environment }} Org
         env:
           CLIENT_ID: ${{ steps.set-org.outputs.CLIENT_ID }}
           USERNAME: ${{ steps.set-org.outputs.USERNAME }}
           LOGIN_URL: ${{ steps.set-org.outputs.LOGIN_URL }}
-          ENVIRONMENT: ${{ env.ENVIRONMENT }}
         run: |
           sf org login jwt \
             --client-id "$CLIENT_ID" \
@@ -213,13 +282,11 @@ jobs:
             --instance-url "$LOGIN_URL" \
             --set-default
 
-
-
-      - name: Check Manifest Exists and Prepare test classes for RunSpecifiedTests
+      - name: Check Manifest Exists and Prepare Test Classes
         id: prepare-tests
+        shell: bash
         env:
           TEST_LEVEL: ${{ env.TEST_LEVEL }}
-          SPECIFIED_CLASS: ${{ env.SPECIFIED_CLASS }}
           FEATURE_BRANCH: ${{ env.FEATURE_BRANCH }}
           WORKSPACE: ${{ github.workspace }}
         run: |
@@ -228,25 +295,22 @@ jobs:
             echo "ERROR: Manifest file $MANIFEST not found."
             exit 1
           fi
+          echo "✅ Manifest found: $MANIFEST"
+
           if [[ "$TEST_LEVEL" == "RunSpecifiedTests" ]]; then
-            if [[ -z "$SPECIFIED_CLASS" ]]; then
-              TEST_CLASS_FILE="${WORKSPACE}/manifest/${FEATURE_BRANCH}_TestClass.txt"
-              if [[ ! -f "$TEST_CLASS_FILE" ]]; then
-                echo "ERROR: Test class file $TEST_CLASS_FILE not found and no specified class input provided."
-                exit 1
-              fi
-              TEST_CLASSES=$(paste -sd ' ' "$TEST_CLASS_FILE")
-              echo "Using test classes from file: $TEST_CLASSES"
-              echo "test_classes=$TEST_CLASSES" >> $GITHUB_OUTPUT
-            else
-              echo "Using specified test classes: $SPECIFIED_CLASS"
-              echo "test_classes=$SPECIFIED_CLASS" >> $GITHUB_OUTPUT
+            TEST_CLASS_FILE="${WORKSPACE}/manifest/${FEATURE_BRANCH}_TestClass.txt"
+            if [[ ! -f "$TEST_CLASS_FILE" ]]; then
+              echo "ERROR: Test class file $TEST_CLASS_FILE not found."
+              exit 1
             fi
+            TEST_CLASSES=$(paste -sd ' ' "$TEST_CLASS_FILE")
+            echo "✅ Test classes: $TEST_CLASSES"
+            echo "test_classes=$TEST_CLASSES" >> $GITHUB_OUTPUT
           else
             echo "test_classes=" >> $GITHUB_OUTPUT
           fi
 
-      - name: Validation Deployment for salesforce - ${{ env.ENVIRONMENT }} Org
+      - name: Validation Deployment - ${{ github.event.inputs.environment }} Org
         shell: bash
         env:
           WORKSPACE: ${{ github.workspace }}
@@ -254,22 +318,16 @@ jobs:
           TEST_LEVEL: ${{ env.TEST_LEVEL }}
           TEST_CLASSES: ${{ steps.prepare-tests.outputs.test_classes }}
           ORG_USERNAME: ${{ steps.set-org.outputs.USERNAME }}
-          ENVIRONMENT: ${{ env.ENVIRONMENT }}
         run: |
           MANIFEST="${WORKSPACE}/manifest/${FEATURE_BRANCH}_package.xml"
-          echo "Validating deployment of manifest: $MANIFEST"
-          echo "Target Org: $ORG_USERNAME ($ENVIRONMENT)"
-          echo "Test level: $TEST_LEVEL"
-          echo "Test classes: $TEST_CLASSES"
+          echo "Validating: $MANIFEST"
           CMD=(sf project deploy validate --manifest "$MANIFEST" --target-org "$ORG_USERNAME" --test-level "$TEST_LEVEL" --wait 30 --ignore-warnings --verbose)
           if [[ "$TEST_LEVEL" == "RunSpecifiedTests" && -n "$TEST_CLASSES" ]]; then
             CMD+=(--tests $TEST_CLASSES)
           fi
-          echo "Running validation command:"
-          echo "${CMD[@]}"
           "${CMD[@]}"
 
-      - name: Deploy to Salesforce  - ${{ env.ENVIRONMENT }} Org
+      - name: Deploy to Salesforce - ${{ github.event.inputs.environment }} Org
         shell: bash
         env:
           WORKSPACE: ${{ github.workspace }}
@@ -277,16 +335,13 @@ jobs:
           TEST_LEVEL: ${{ env.TEST_LEVEL }}
           TEST_CLASSES: ${{ steps.prepare-tests.outputs.test_classes }}
           ORG_USERNAME: ${{ steps.set-org.outputs.USERNAME }}
-          ENVIRONMENT: ${{ env.ENVIRONMENT }}
         run: |
           MANIFEST="${WORKSPACE}/manifest/${FEATURE_BRANCH}_package.xml"
-          echo "Deploying manifest: $MANIFEST"
+          echo "Deploying: $MANIFEST"
           CMD=(sf project deploy start --manifest "$MANIFEST" --target-org "$ORG_USERNAME" --test-level "$TEST_LEVEL" --wait 10 --ignore-conflicts --coverage-formatters json --results-dir coverage-results)
           if [[ "$TEST_LEVEL" == "RunSpecifiedTests" && -n "$TEST_CLASSES" ]]; then
             CMD+=(--tests $TEST_CLASSES)
           fi
-          echo "Running deploy command:"
-          echo "${CMD[@]}"
           "${CMD[@]}"
 
       - name: Check Code Coverage
@@ -295,13 +350,10 @@ jobs:
         run: |
           echo "🔍 Searching for coverage file..."
           COVERAGE_FILE=$(find . -name "*.json" -path "*coverage-results*" 2>/dev/null | head -1)
-          if [[ -z "$COVERAGE_FILE" ]]; then
-            COVERAGE_FILE=$(find . -name "coverage*.json" 2>/dev/null | head -1)
-          fi
+          [[ -z "$COVERAGE_FILE" ]] && COVERAGE_FILE=$(find . -name "coverage*.json" 2>/dev/null | head -1)
 
           if [[ -n "$COVERAGE_FILE" ]]; then
             echo "📄 Found coverage file: $COVERAGE_FILE"
-
             COVERAGE=$(jq '
               [to_entries[] | .value.s | to_entries | {total: length, covered: [.[] | select(.value > 0)] | length}]
               | {total: (map(.total) | add), covered: (map(.covered) | add)}
@@ -320,11 +372,9 @@ jobs:
               "\(.class): \(.covered)/\(.total) lines covered (\(if .total > 0 then (.covered * 100 / .total | floor) else 0 end)%)"
             ' "$COVERAGE_FILE" 2>/dev/null || true
             echo "=========================================="
-            echo ""
           fi
 
           if [[ -z "$COVERAGE" || "$COVERAGE" == "null" || "$COVERAGE" == "0" ]]; then
-            echo "⚠️ Could not parse coverage from JSON, checking deploy output..."
             COVERAGE=$(grep -oP '\d+(?=%)' deploy-result.txt 2>/dev/null | tail -1 || echo "")
           fi
 
@@ -349,6 +399,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: Deployment_Build
     if: >
+      needs.Deployment_Build.result == 'success' &&
       github.event.inputs.environment == 'PRODUCTION' &&
       github.ref == 'refs/heads/main'
 
@@ -390,13 +441,156 @@ jobs:
         shell: bash
         env:
           WORKSPACE: ${{ github.workspace }}
-          FEATURE_BRANCH: ${{ github.event.inputs.Feature_Branch }}
+          DEPLOY_PACKAGE: ${{ needs.Deployment_Build.outputs.deploy_package }}
           ORG_USERNAME: ${{ secrets.SFDX_AUTH_HOTFIX_USERNAME }}
         run: |
-          MANIFEST="${WORKSPACE}/manifest/${FEATURE_BRANCH}_package.xml"
+          MANIFEST="${WORKSPACE}/manifest/${DEPLOY_PACKAGE}_package.xml"
           echo "Deploying to HOTFIX: $MANIFEST"
-          sf project deploy start --manifest "$MANIFEST" --target-org "$ORG_USERNAME" --test-level NoTestRun --wait 10 --ignore-conflicts
+          sf project deploy start --manifest "$MANIFEST" --target-org "$ORG_USERNAME" --test-level NoTestRun --wait 10 --ignore-conflicts --verbose
 
       - name: Cleanup JWT key
         if: always()
         run: rm -f server.key
+
+  Update_Release_Notes:
+    runs-on: ubuntu-latest
+    needs: Deployment_Build
+    if: needs.Deployment_Build.result == 'success'
+
+    env:
+      JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+      JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
+      ATLASSIAN_API_TOKEN: ${{ secrets.ATLASSIAN_API_TOKEN }}
+      CONFLUENCE_BASE_URL: ${{ secrets.CONFLUENCE_BASE_URL }}
+      CONFLUENCE_PAGE_ID: ${{ secrets.CONFLUENCE_PAGE_ID }}
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 50
+
+      - name: Extract Jira Tickets from Commits
+        id: extract_tickets
+        shell: bash
+        run: |
+          echo "🔍 Extracting Jira ticket IDs from recent commits..."
+          TICKETS=$(git log --oneline -50 | grep -oP '[A-Z]+-\d+' | sort -u | tr '\n' ',' | sed 's/,$//')
+          if [[ -z "$TICKETS" ]]; then
+            echo "⚠️ No Jira tickets found in recent commits"
+            echo "has_tickets=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "✅ Found tickets: $TICKETS"
+            echo "tickets=$TICKETS" >> "$GITHUB_OUTPUT"
+            echo "has_tickets=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fetch Jira Details and Update Confluence
+        if: steps.extract_tickets.outputs.has_tickets == 'true'
+        shell: bash
+        env:
+          TICKETS: ${{ steps.extract_tickets.outputs.tickets }}
+          ENVIRONMENT: ${{ needs.Deployment_Build.outputs.environment }}
+          PAGE_ID: ${{ secrets.CONFLUENCE_PAGE_ID }}
+        run: |
+          echo "📋 Fetching Jira ticket details..."
+
+          RELEASE_DATE=$(date +'%Y-%m-%d %H:%M:%S UTC')
+          DEPLOYER="${{ github.actor }}"
+          BRANCH="${{ github.ref_name }}"
+          PACKAGE="${{ needs.Deployment_Build.outputs.deploy_package }}"
+
+          RELEASE_HTML="<h2>🚀 Release - ${ENVIRONMENT} | ${RELEASE_DATE}</h2>"
+          RELEASE_HTML+="<p><strong>Deployed by:</strong> ${DEPLOYER} | <strong>Branch:</strong> ${BRANCH} | <strong>Package:</strong> ${PACKAGE}</p>"
+          RELEASE_HTML+="<table><tr><th>Ticket</th><th>Summary</th><th>Type</th><th>Status</th><th>Priority</th></tr>"
+
+          IFS=',' read -ra TICKET_ARRAY <<< "$TICKETS"
+          TICKET_COUNT=0
+
+          for TICKET in "${TICKET_ARRAY[@]}"; do
+            echo "  Fetching: $TICKET"
+            RESPONSE=$(curl -s -w "\n%{http_code}" \
+              -u "${JIRA_USER_EMAIL}:${ATLASSIAN_API_TOKEN}" \
+              -H "Content-Type: application/json" \
+              "${JIRA_BASE_URL}/rest/api/3/issue/${TICKET}?fields=summary,issuetype,status,priority")
+
+            HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+            BODY=$(echo "$RESPONSE" | sed '$d')
+
+            if [[ "$HTTP_CODE" == "200" ]]; then
+              SUMMARY=$(echo "$BODY" | jq -r '.fields.summary // "N/A"')
+              ISSUE_TYPE=$(echo "$BODY" | jq -r '.fields.issuetype.name // "N/A"')
+              STATUS=$(echo "$BODY" | jq -r '.fields.status.name // "N/A"')
+              PRIORITY=$(echo "$BODY" | jq -r '.fields.priority.name // "N/A"')
+              TICKET_URL="${JIRA_BASE_URL}/browse/${TICKET}"
+              RELEASE_HTML+="<tr><td><a href=\"${TICKET_URL}\">${TICKET}</a></td><td>${SUMMARY}</td><td>${ISSUE_TYPE}</td><td>${STATUS}</td><td>${PRIORITY}</td></tr>"
+              TICKET_COUNT=$((TICKET_COUNT + 1))
+            else
+              echo "    ⚠️ Could not fetch $TICKET (HTTP $HTTP_CODE)"
+              RELEASE_HTML+="<tr><td>${TICKET}</td><td colspan=\"4\">Could not fetch details</td></tr>"
+            fi
+          done
+
+          RELEASE_HTML+="</table><p><em>Total tickets: ${TICKET_COUNT}</em></p><hr/>"
+          echo "✅ Built release notes for ${TICKET_COUNT} tickets"
+
+          echo "📄 Fetching current Confluence page..."
+          PAGE_RESPONSE=$(curl -s \
+            -u "${JIRA_USER_EMAIL}:${ATLASSIAN_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            "${CONFLUENCE_BASE_URL}/rest/api/content/${PAGE_ID}?expand=body.storage,version")
+
+          CURRENT_VERSION=$(echo "$PAGE_RESPONSE" | jq -r '.version.number')
+          CURRENT_BODY=$(echo "$PAGE_RESPONSE" | jq -r '.body.storage.value')
+          PAGE_TITLE=$(echo "$PAGE_RESPONSE" | jq -r '.title')
+
+          if [[ -z "$CURRENT_VERSION" || "$CURRENT_VERSION" == "null" ]]; then
+            echo "❌ Failed to fetch Confluence page"
+            echo "$PAGE_RESPONSE"
+            exit 1
+          fi
+
+          NEW_VERSION=$((CURRENT_VERSION + 1))
+          echo "📝 Updating: $PAGE_TITLE (v$CURRENT_VERSION → v$NEW_VERSION)"
+
+          NEW_BODY="${RELEASE_HTML}${CURRENT_BODY}"
+          NEW_BODY_ESCAPED=$(echo "$NEW_BODY" | jq -Rs .)
+
+          UPDATE_PAYLOAD=$(cat <<EOF
+          {
+            "version": { "number": ${NEW_VERSION} },
+            "title": "${PAGE_TITLE}",
+            "type": "page",
+            "body": {
+              "storage": {
+                "value": ${NEW_BODY_ESCAPED},
+                "representation": "storage"
+              }
+            }
+          }
+          EOF
+          )
+
+          UPDATE_RESPONSE=$(curl -s -w "\n%{http_code}" \
+            -X PUT \
+            -u "${JIRA_USER_EMAIL}:${ATLASSIAN_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "$UPDATE_PAYLOAD" \
+            "${CONFLUENCE_BASE_URL}/rest/api/content/${PAGE_ID}")
+
+          UPDATE_CODE=$(echo "$UPDATE_RESPONSE" | tail -1)
+
+          if [[ "$UPDATE_CODE" == "200" ]]; then
+            echo "✅ Confluence page updated successfully!"
+            echo "🔗 ${CONFLUENCE_BASE_URL}/pages/viewpage.action?pageId=${PAGE_ID}"
+          else
+            echo "❌ Failed to update Confluence page (HTTP $UPDATE_CODE)"
+            echo "$UPDATE_RESPONSE" | sed '$d'
+            exit 1
+          fi
+
+      - name: No Tickets Found
+        if: steps.extract_tickets.outputs.has_tickets != 'true'
+        run: |
+          echo "⚠️ No Jira tickets found in recent commits."
+          echo "Ensure commit messages contain ticket IDs (e.g., LODHA-123)"

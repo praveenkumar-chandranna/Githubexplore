@@ -5,7 +5,8 @@ on:
     inputs:
       Feature_Branch:
         type: string
-        description: Please Enter Branch To validate in Environment.
+        description: >-
+          Branch name(s) to validate. Single: feature/LODHA-123  |  Multiple: feature/LODHA123,feature/LODHA4321
         required: true
       environment:
         type: choice
@@ -27,14 +28,12 @@ on:
           - RunAllTestsInOrg
         default: "RunSpecifiedTests"
         required: true
-      specifiedclass:
-        type: string
-        description: Please Enter Test Class Names (space separated).
-        required: false
 
 jobs:
   Validation_Build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     env:
       SF_ENV_ALIAS: lodhaOrg
       SF_LOGIN_URL_TEST: https://test.salesforce.com
@@ -53,6 +52,148 @@ jobs:
         uses: actions/checkout@v7
         with:
           ref: ${{ github.ref_name }}
+          fetch-depth: 0
+
+      - name: Consolidate or Resolve Package
+        id: resolve-package
+        shell: bash
+        env:
+          FEATURE_INPUT: ${{ github.event.inputs.Feature_Branch }}
+          MANIFEST_DIR: ${{ github.workspace }}/manifest/feature
+          OUTPUT_DIR: ${{ github.workspace }}/manifest
+        run: |
+          FEATURE_INPUT=$(echo "$FEATURE_INPUT" | xargs)
+
+          if [[ "$FEATURE_INPUT" == *","* ]]; then
+            echo "📦 Multiple branches detected — consolidating..."
+
+            RELEASE_DATE=$(date +'%d%m%Y')
+            OUTPUT_NAME="Release_${RELEASE_DATE}"
+            OUTPUT_PKG="${OUTPUT_DIR}/${OUTPUT_NAME}_package.xml"
+            OUTPUT_TEST="${OUTPUT_DIR}/${OUTPUT_NAME}_TestClass.txt"
+
+            echo "=========================================="
+            echo "PACKAGE CONSOLIDATION"
+            echo "=========================================="
+            echo "Branches : $FEATURE_INPUT"
+            echo "Output   : $OUTPUT_NAME"
+            echo "=========================================="
+
+            IFS=',' read -ra BRANCHES <<< "$FEATURE_INPUT"
+
+            echo "🔍 Validating input files..."
+            for BRANCH in "${BRANCHES[@]}"; do
+              BRANCH=$(echo "$BRANCH" | xargs | sed 's|^feature/||')
+              PKG_FILE="${MANIFEST_DIR}/${BRANCH}_package.xml"
+              if [[ ! -f "$PKG_FILE" ]]; then
+                echo "❌ Package file not found: $PKG_FILE"
+                exit 1
+              fi
+              echo "  ✅ Found: ${BRANCH}_package.xml"
+            done
+
+            MAX_VERSION="0"
+            ALL_MEMBERS_RAW=""
+
+            for BRANCH in "${BRANCHES[@]}"; do
+              BRANCH=$(echo "$BRANCH" | xargs | sed 's|^feature/||')
+              PKG_FILE="${MANIFEST_DIR}/${BRANCH}_package.xml"
+              echo "  Processing: ${BRANCH}_package.xml"
+
+              VERSION=$(grep -oP '(?<=<version>)[^<]+' "$PKG_FILE" || echo "0")
+              if awk "BEGIN {exit !($VERSION > $MAX_VERSION)}"; then
+                MAX_VERSION="$VERSION"
+              fi
+
+              # Parse <types> blocks line by line — no awk/sed multi-char RS needed
+              IN_BLOCK=0
+              CUR_TYPE=""
+              CUR_MEMBERS=""
+              while IFS= read -r LINE; do
+                LINE=$(echo "$LINE" | sed 's/^[[:space:]]*//')
+                if echo "$LINE" | grep -q '<types>'; then
+                  IN_BLOCK=1; CUR_TYPE=""; CUR_MEMBERS=""
+                elif [[ $IN_BLOCK -eq 1 ]]; then
+                  if echo "$LINE" | grep -q '<name>'; then
+                    CUR_TYPE=$(echo "$LINE" | grep -oP '(?<=<name>)[^<]+')
+                  elif echo "$LINE" | grep -q '<members>'; then
+                    M=$(echo "$LINE" | grep -oP '(?<=<members>)[^<]+')
+                    CUR_MEMBERS+="$M"$'\n'
+                  elif echo "$LINE" | grep -q '</types>'; then
+                    if [[ -n "$CUR_TYPE" ]]; then
+                      while IFS= read -r MEMBER; do
+                        [[ -n "$MEMBER" ]] && ALL_MEMBERS_RAW+="${CUR_TYPE}|||${MEMBER}"$'\n'
+                      done <<< "$CUR_MEMBERS"
+                    fi
+                    IN_BLOCK=0; CUR_TYPE=""; CUR_MEMBERS=""
+                  fi
+                fi
+              done < "$PKG_FILE"
+            done
+
+            printf '<?xml version="1.0" encoding="UTF-8"?>\n' > "$OUTPUT_PKG"
+            printf '<Package xmlns="http://soap.sforce.com/2006/04/metadata">\n' >> "$OUTPUT_PKG"
+
+            SORTED_TYPES=$(echo "$ALL_MEMBERS_RAW" | grep -v '^$' | cut -d'|' -f1 | sort -u)
+            while IFS= read -r TYPE_NAME; do
+              [[ -z "$TYPE_NAME" ]] && continue
+              printf '    <types>\n' >> "$OUTPUT_PKG"
+              echo "$ALL_MEMBERS_RAW" | grep -v '^$' | grep -F "${TYPE_NAME}|||" | cut -d'|' -f4 | sort -u | while read -r MEMBER; do
+                [[ -n "$MEMBER" ]] && printf '        <members>%s</members>\n' "$MEMBER" >> "$OUTPUT_PKG"
+              done
+              printf '        <name>%s</name>\n' "$TYPE_NAME" >> "$OUTPUT_PKG"
+              printf '    </types>\n' >> "$OUTPUT_PKG"
+            done <<< "$SORTED_TYPES"
+
+            printf '    <version>%s</version>\n' "$MAX_VERSION" >> "$OUTPUT_PKG"
+            printf '</Package>\n' >> "$OUTPUT_PKG"
+
+            ALL_TESTS=""
+            for BRANCH in "${BRANCHES[@]}"; do
+              BRANCH=$(echo "$BRANCH" | xargs | sed 's|^feature/||')
+              TEST_FILE="${MANIFEST_DIR}/${BRANCH}_TestClass.txt"
+              if [[ -f "$TEST_FILE" ]]; then
+                CONTENT=$(cat "$TEST_FILE" | tr ' ' '\n' | tr ',' '\n')
+                ALL_TESTS+=$'\n'"$CONTENT"
+              fi
+            done
+
+            UNIQUE_TESTS=$(echo "$ALL_TESTS" | sort -u | grep -v '^$' | tr '\n' ' ' | xargs)
+            [[ -n "$UNIQUE_TESTS" ]] && echo "$UNIQUE_TESTS" > "$OUTPUT_TEST"
+
+            echo ""
+            echo "=========================================="
+            echo "📦 CONSOLIDATED PACKAGE.XML"
+            echo "=========================================="
+            cat "$OUTPUT_PKG"
+            if [[ -f "$OUTPUT_TEST" ]]; then
+              echo ""
+              echo "=========================================="
+              echo "🧪 CONSOLIDATED TESTCLASS.TXT"
+              echo "=========================================="
+              cat "$OUTPUT_TEST"
+            fi
+
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+            git add "${OUTPUT_DIR}/${OUTPUT_NAME}_package.xml"
+            [[ -f "$OUTPUT_TEST" ]] && git add "${OUTPUT_DIR}/${OUTPUT_NAME}_TestClass.txt"
+            if git diff --cached --quiet; then
+              echo "⚠️ No changes to commit"
+            else
+              git commit -m "chore: consolidated package ${OUTPUT_NAME} [skip ci]"
+              git push origin ${{ github.ref_name }}
+            fi
+
+            echo "FEATURE_BRANCH=${OUTPUT_NAME}" >> $GITHUB_ENV
+            echo "✅ Consolidation complete: $OUTPUT_NAME"
+
+          else
+            echo "📄 Single branch detected — using directly: $FEATURE_INPUT"
+            FEATURE_INPUT=$(echo "$FEATURE_INPUT" | sed 's|^feature/||')
+            echo "FEATURE_BRANCH=feature/${FEATURE_INPUT}" >> $GITHUB_ENV
+          fi
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -63,6 +204,7 @@ jobs:
         run: |
           npm install -g @salesforce/cli@latest
           sf --version
+
       - name: Install Salesforce Code Analyzer Plugin
         run: sf plugins install @salesforce/sfdx-scanner@latest || echo "Plugin already installed"
 
@@ -93,61 +235,36 @@ jobs:
           USER_HOTFIX: ${{ secrets.SFDX_AUTH_HOTFIX_USERNAME }}
         run: |
           LOGIN_URL="$SF_LOGIN_URL_TEST_VAL"
-          if [[ "$INPUT_ENV" =~ ^\s*(PRODUCTION|prod)$ ]]; then
+          if [[ "$INPUT_ENV" == "PRODUCTION" ]]; then
             LOGIN_URL="$SF_LOGIN_URL_PROD_VAL"
           fi
 
           case "$INPUT_ENV" in
-            "DEV")
-              CLIENT_ID="$KEY_DEV"
-              USERNAME="$USER_DEV"
-              ;;
-            "QA")
-              CLIENT_ID="$KEY_QA"
-              USERNAME="$USER_QA"
-              ;;
-            "UAT")
-              CLIENT_ID="$KEY_UAT"
-              USERNAME="$USER_UAT"
-              ;;
-            "PRODUCTION")
-              CLIENT_ID="$KEY_PROD"
-              USERNAME="$USER_PROD"
-              ;;
-            "HOTFIX")
-              CLIENT_ID="$KEY_HOTFIX"
-              USERNAME="$USER_HOTFIX"
-              ;;
-            *)
-              echo "Unknown environment: $INPUT_ENV"
-              exit 1
-              ;;
+            "DEV")        CLIENT_ID="$KEY_DEV";    USERNAME="$USER_DEV"    ;;
+            "QA")         CLIENT_ID="$KEY_QA";     USERNAME="$USER_QA"     ;;
+            "UAT")        CLIENT_ID="$KEY_UAT";    USERNAME="$USER_UAT"    ;;
+            "PRODUCTION") CLIENT_ID="$KEY_PROD";   USERNAME="$USER_PROD"   ;;
+            "HOTFIX")     CLIENT_ID="$KEY_HOTFIX"; USERNAME="$USER_HOTFIX" ;;
+            *) echo "Unknown environment: $INPUT_ENV"; exit 1 ;;
           esac
-          
-          sf org login jwt --client-id "${CLIENT_ID}" --jwt-key-file server.key --username "${USERNAME}" --instance-url "${LOGIN_URL}" --alias "$SF_ALIAS" --set-default
 
+          sf org login jwt --client-id "${CLIENT_ID}" --jwt-key-file server.key --username "${USERNAME}" --instance-url "${LOGIN_URL}" --alias "$SF_ALIAS" --set-default
 
       - name: Determine test classes for RunSpecifiedTests, if needed
         id: prepare_tests
         env:
           INPUT_TESTLEVEL: ${{ github.event.inputs.testlevel }}
-          INPUT_SPECIFIEDCLASS: ${{ github.event.inputs.specifiedclass }}
-          INPUT_BRANCH: ${{ github.event.inputs.Feature_Branch }}
+          FEATURE_BRANCH: ${{ env.FEATURE_BRANCH }}
           WORKSPACE: ${{ github.workspace }}
         run: |
           if [[ "$INPUT_TESTLEVEL" == "RunSpecifiedTests" ]]; then
-            if [ -n "$INPUT_SPECIFIEDCLASS" ]; then
-              echo "Using specified test classes from input"
-              TEST_CLASSES="$INPUT_SPECIFIEDCLASS"
+            TEST_FILE="${WORKSPACE}/manifest/${FEATURE_BRANCH}_TestClass.txt"
+            if [[ -f "$TEST_FILE" ]]; then
+              TEST_CLASSES=$(paste -sd " " "$TEST_FILE")
+              echo "✅ Test classes from file: $TEST_CLASSES"
             else
-              TEST_FILE="${WORKSPACE}/manifest/${INPUT_BRANCH}_TestClass.txt"
-              if [[ -f "$TEST_FILE" ]]; then
-                TEST_CLASSES=$(paste -sd " " "$TEST_FILE")
-                echo "Read test classes from file: $TEST_CLASSES"
-              else
-                echo "Error: Test classes file not found at '$TEST_FILE' and no classes specified via input"
-                exit 1
-              fi
+              echo "❌ Test class file not found: $TEST_FILE"
+              exit 1
             fi
             echo "test_classes=$TEST_CLASSES" >> $GITHUB_OUTPUT
           fi
@@ -155,29 +272,28 @@ jobs:
       - name: Deployment Validation - ${{ github.event.inputs.environment }} Org
         shell: bash
         env:
-          INPUT_BRANCH: ${{ github.event.inputs.Feature_Branch }}
+          FEATURE_BRANCH: ${{ env.FEATURE_BRANCH }}
           INPUT_TESTLEVEL: ${{ github.event.inputs.testlevel }}
           TESTS: ${{ steps.prepare_tests.outputs.test_classes }}
           SF_ALIAS: ${{ env.SF_ENV_ALIAS }}
           WORKSPACE: ${{ github.workspace }}
         run: |
-          PACKAGE_XML="${WORKSPACE}/manifest/${INPUT_BRANCH}_package.xml"
+          PACKAGE_XML="${WORKSPACE}/manifest/${FEATURE_BRANCH}_package.xml"
           echo "Validating deployment of package: $PACKAGE_XML"
-          
-          TESTLEVEL="$INPUT_TESTLEVEL"
-          
-          echo "Using test level: $TESTLEVEL"
+          echo "Using test level: $INPUT_TESTLEVEL"
           echo "Using test classes: $TESTS"
-          
+
+          TESTLEVEL="$INPUT_TESTLEVEL"
           if [[ "$TESTLEVEL" == "RunSpecifiedTests" ]]; then
             if [[ -z "$TESTS" ]]; then
-              echo "No test classes specified, switching to RunLocalTests for coverage"
+              echo "No test classes specified, switching to RunLocalTests"
               TESTLEVEL="RunLocalTests"
             fi
             sf project deploy validate --manifest "$PACKAGE_XML" --target-org "$SF_ALIAS" --test-level "$TESTLEVEL" --tests $TESTS --wait 30
           else
             sf project deploy validate --manifest "$PACKAGE_XML" --target-org "$SF_ALIAS" --test-level "$TESTLEVEL" --wait 30
           fi
+
       - name: Run Salesforce Code Analyzer
         id: run-scanner
         uses: forcedotcom/run-code-analyzer@v2
@@ -191,7 +307,7 @@ jobs:
           steps.run-scanner.outputs.num-sev1-violations > 0 ||
           steps.run-scanner.outputs.num-violations > 10
         run: exit 0
-                  
+
       - name: Install Gitleaks
         run: |
           GITLEAKS_VERSION=$(curl -s https://api.github.com/repos/gitleaks/gitleaks/releases/latest | grep tag_name | cut -d '"' -f 4 | sed 's/v//')
@@ -213,12 +329,6 @@ jobs:
           path: gitleaks-report.sarif
           retention-days: 30
 
-      - name: Fail if critical violations found
-        if: |
-          steps.run-scanner.outputs.exit-code > 0 ||
-          steps.run-scanner.outputs.num-sev1-violations > 0 ||
-          steps.run-scanner.outputs.num-violations > 10
-        run: exit 0
       - name: Cleanup
         if: always()
         run: rm -f server.key
