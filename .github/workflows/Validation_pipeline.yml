@@ -59,6 +59,7 @@ jobs:
         env:
           FEATURE_INPUT: ${{ github.event.inputs.Feature_Branch }}
           MANIFEST_DIR: ${{ github.workspace }}/manifest/feature
+          OUTPUT_DIR: ${{ github.workspace }}/manifest
         run: |
           FEATURE_INPUT=$(echo "$FEATURE_INPUT" | xargs)
 
@@ -67,8 +68,8 @@ jobs:
 
             RELEASE_DATE=$(date +'%d%m%Y')
             OUTPUT_NAME="Release_${RELEASE_DATE}"
-            OUTPUT_PKG="${MANIFEST_DIR}/${OUTPUT_NAME}_package.xml"
-            OUTPUT_TEST="${MANIFEST_DIR}/${OUTPUT_NAME}_TestClass.txt"
+            OUTPUT_PKG="${OUTPUT_DIR}/${OUTPUT_NAME}_package.xml"
+            OUTPUT_TEST="${OUTPUT_DIR}/${OUTPUT_NAME}_TestClass.txt"
 
             echo "=========================================="
             echo "PACKAGE CONSOLIDATION"
@@ -103,16 +104,13 @@ jobs:
                 MAX_VERSION="$VERSION"
               fi
 
-              TYPE=""
-              while IFS= read -r LINE; do
-                LINE=$(echo "$LINE" | xargs)
-                if [[ "$LINE" =~ \<name\>(.+)\</name\> ]]; then
-                  TYPE="${BASH_REMATCH[1]}"
-                elif [[ "$LINE" =~ \<members\>(.+)\</members\> ]]; then
-                  MEMBER="${BASH_REMATCH[1]}"
-                  ALL_MEMBERS_RAW+="${TYPE}|||${MEMBER}"$'\n'
-                fi
-              done < "$PKG_FILE"
+              # Two-pass: extract each <types> block, then get name and members
+              while IFS= read -r TYPES_BLOCK; do
+                TYPE_NAME=$(echo "$TYPES_BLOCK" | grep -oP '(?<=<name>)[^<]+')
+                while IFS= read -r MEMBER; do
+                  [[ -n "$TYPE_NAME" && -n "$MEMBER" ]] && ALL_MEMBERS_RAW+="${TYPE_NAME}|||${MEMBER}"$'\n'
+                done < <(echo "$TYPES_BLOCK" | grep -oP '(?<=<members>)[^<]+')
+              done < <(grep -oPz '(?s)<types>.*?</types>' "$PKG_FILE" | tr '\0' '\n')
             done
 
             printf '<?xml version="1.0" encoding="UTF-8"?>\n' > "$OUTPUT_PKG"
@@ -161,8 +159,8 @@ jobs:
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
             git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
-            git add "${MANIFEST_DIR}/${OUTPUT_NAME}_package.xml"
-            [[ -f "$OUTPUT_TEST" ]] && git add "${MANIFEST_DIR}/${OUTPUT_NAME}_TestClass.txt"
+            git add "${OUTPUT_DIR}/${OUTPUT_NAME}_package.xml"
+            [[ -f "$OUTPUT_TEST" ]] && git add "${OUTPUT_DIR}/${OUTPUT_NAME}_TestClass.txt"
             if git diff --cached --quiet; then
               echo "⚠️ No changes to commit"
             else
@@ -170,7 +168,7 @@ jobs:
               git push origin ${{ github.ref_name }}
             fi
 
-            echo "FEATURE_BRANCH=feature/${OUTPUT_NAME}" >> $GITHUB_ENV
+            echo "FEATURE_BRANCH=${OUTPUT_NAME}" >> $GITHUB_ENV
             echo "✅ Consolidation complete: $OUTPUT_NAME"
 
           else
@@ -224,11 +222,11 @@ jobs:
           fi
 
           case "$INPUT_ENV" in
-            "DEV")   CLIENT_ID="$KEY_DEV";    USERNAME="$USER_DEV"    ;;
-            "QA")    CLIENT_ID="$KEY_QA";     USERNAME="$USER_QA"     ;;
-            "UAT")   CLIENT_ID="$KEY_UAT";    USERNAME="$USER_UAT"    ;;
-            "PRODUCTION") CLIENT_ID="$KEY_PROD"; USERNAME="$USER_PROD" ;;
-            "HOTFIX") CLIENT_ID="$KEY_HOTFIX"; USERNAME="$USER_HOTFIX" ;;
+            "DEV")        CLIENT_ID="$KEY_DEV";    USERNAME="$USER_DEV"    ;;
+            "QA")         CLIENT_ID="$KEY_QA";     USERNAME="$USER_QA"     ;;
+            "UAT")        CLIENT_ID="$KEY_UAT";    USERNAME="$USER_UAT"    ;;
+            "PRODUCTION") CLIENT_ID="$KEY_PROD";   USERNAME="$USER_PROD"   ;;
+            "HOTFIX")     CLIENT_ID="$KEY_HOTFIX"; USERNAME="$USER_HOTFIX" ;;
             *) echo "Unknown environment: $INPUT_ENV"; exit 1 ;;
           esac
 
