@@ -105,13 +105,30 @@ jobs:
                 MAX_VERSION="$VERSION"
               fi
 
-              # Extract each <types> block using sed, then parse name and members
-              while IFS= read -r TYPES_BLOCK; do
-                TYPE_NAME=$(echo "$TYPES_BLOCK" | grep -oP '(?<=<name>)[^<]+')
-                while IFS= read -r MEMBER; do
-                  [[ -n "$TYPE_NAME" && -n "$MEMBER" ]] && ALL_MEMBERS_RAW+="${TYPE_NAME}|||${MEMBER}"$'\n'
-                done < <(echo "$TYPES_BLOCK" | grep -oP '(?<=<members>)[^<]+')
-              done < <(sed -n 's/^[[:space:]]*//; /<types>/,/<\/types>/{ H; /<\/types>/{ x; p; s/.*//; x } }' "$PKG_FILE" | sed '/^$/d')
+              # Parse <types> blocks line by line — no awk/sed multi-char RS needed
+              IN_BLOCK=0
+              CUR_TYPE=""
+              CUR_MEMBERS=""
+              while IFS= read -r LINE; do
+                LINE=$(echo "$LINE" | sed 's/^[[:space:]]*//')
+                if echo "$LINE" | grep -q '<types>'; then
+                  IN_BLOCK=1; CUR_TYPE=""; CUR_MEMBERS=""
+                elif [[ $IN_BLOCK -eq 1 ]]; then
+                  if echo "$LINE" | grep -q '<name>'; then
+                    CUR_TYPE=$(echo "$LINE" | grep -oP '(?<=<name>)[^<]+')
+                  elif echo "$LINE" | grep -q '<members>'; then
+                    M=$(echo "$LINE" | grep -oP '(?<=<members>)[^<]+')
+                    CUR_MEMBERS+="$M"$'\n'
+                  elif echo "$LINE" | grep -q '</types>'; then
+                    if [[ -n "$CUR_TYPE" ]]; then
+                      while IFS= read -r MEMBER; do
+                        [[ -n "$MEMBER" ]] && ALL_MEMBERS_RAW+="${CUR_TYPE}|||${MEMBER}"$'\n'
+                      done <<< "$CUR_MEMBERS"
+                    fi
+                    IN_BLOCK=0; CUR_TYPE=""; CUR_MEMBERS=""
+                  fi
+                fi
+              done < "$PKG_FILE"
             done
 
             printf '<?xml version="1.0" encoding="UTF-8"?>\n' > "$OUTPUT_PKG"
