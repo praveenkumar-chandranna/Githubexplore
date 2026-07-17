@@ -197,8 +197,8 @@ jobs:
               git push origin ${{ github.ref_name }}
             fi
 
-            echo "FEATURE_BRANCH=feature/${OUTPUT_NAME}" >> $GITHUB_ENV
-            echo "deploy_package=feature/${OUTPUT_NAME}" >> $GITHUB_OUTPUT
+            echo "FEATURE_BRANCH=${OUTPUT_NAME}" >> $GITHUB_ENV
+            echo "deploy_package=${OUTPUT_NAME}" >> $GITHUB_OUTPUT
             echo "✅ Consolidation complete: $OUTPUT_NAME"
 
           else
