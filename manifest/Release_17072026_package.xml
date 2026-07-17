@@ -1,8 +1,22 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <Package xmlns="http://soap.sforce.com/2006/04/metadata">
     <types>
-        <members>SaudaBooking__c.PreventStatusChangeDeactiveSauda</members>
+        <members>AccountQueryService</members>
+        <members>AccountQueryServiceTest</members>
+        <members>FulfillSecondaryOrderController</members>
+        <members>OpportunityService</members>
+        <members>OpportunityServiceTest</members>
+        <members>SaudaQueryHelper</members>
+        <name>ApexClass</name>
+    </types>
+    <types>
+        <members>saudaAllocationScreenCmp</members>
+        <members>saudaBookingAllocate</members>
         <name>LightningComponentBundle</name>
+    </types>
+    <types>
+        <members>SaudaBooking__c.PreventStatusChangeDeactiveSauda</members>
+        <name>ValidationRule</name>
     </types>
     <version>67.0</version>
 </Package>
