@@ -203,8 +203,8 @@ jobs:
 
           else
             echo "📄 Single branch detected — using directly: $FEATURE_INPUT"
-            echo "FEATURE_BRANCH=feature/${FEATURE_INPUT}" >> $GITHUB_ENV
-            echo "deploy_package=feature/${FEATURE_INPUT}" >> $GITHUB_OUTPUT
+            echo "FEATURE_BRANCH=${FEATURE_INPUT}" >> $GITHUB_ENV
+            echo "deploy_package=${FEATURE_INPUT}" >> $GITHUB_OUTPUT
           fi
 
       - name: Setup Node.js
