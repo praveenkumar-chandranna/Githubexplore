@@ -446,7 +446,7 @@ jobs:
         run: |
           MANIFEST="${WORKSPACE}/manifest/${DEPLOY_PACKAGE}_package.xml"
           echo "Deploying to HOTFIX: $MANIFEST"
-          sf project deploy start --manifest "$MANIFEST" --target-org "$ORG_USERNAME" --test-level NoTestRun --wait 10 --ignore-conflicts
+          sf project deploy start --manifest "$MANIFEST" --target-org "$ORG_USERNAME" --test-level NoTestRun --wait 10 --ignore-conflicts --verbose
 
       - name: Cleanup JWT key
         if: always()
