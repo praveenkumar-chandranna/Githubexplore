@@ -6,7 +6,7 @@ on:
       Feature_Branch:
         type: string
         description: >
-          Branch name(s) to deploy. Single: feature/ABC123  |  Multiple: feature/ABC123,feature/R-260510-0057
+          Branch name(s) to deploy. Single: feature/LODHA-123  |  Multiple: feature/LODHA123,feature/LODHA4321
         required: true
       environment:
         type: choice
