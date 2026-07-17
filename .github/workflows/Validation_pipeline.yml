@@ -5,7 +5,7 @@ on:
     inputs:
       Feature_Branch:
         type: string
-        description: "Branch name(s) to validate. Single: ABC123  |  Multiple (consolidates): ABC123,R-260510-0057,XYZ789"
+        description: "Branch name(s) to validate. Single: feature/ABC123  |  Multiple: feature/ABC123,feature/R-260510-0057"
         required: true
       environment:
         type: choice
@@ -58,7 +58,7 @@ jobs:
         shell: bash
         env:
           FEATURE_INPUT: ${{ github.event.inputs.Feature_Branch }}
-          MANIFEST_DIR: ${{ github.workspace }}/manifest
+          MANIFEST_DIR: ${{ github.workspace }}/manifest/feature
         run: |
           FEATURE_INPUT=$(echo "$FEATURE_INPUT" | xargs)
 
@@ -81,7 +81,7 @@ jobs:
 
             echo "🔍 Validating input files..."
             for BRANCH in "${BRANCHES[@]}"; do
-              BRANCH=$(echo "$BRANCH" | xargs)
+              BRANCH=$(echo "$BRANCH" | xargs | sed 's|^feature/||')
               PKG_FILE="${MANIFEST_DIR}/${BRANCH}_package.xml"
               if [[ ! -f "$PKG_FILE" ]]; then
                 echo "❌ Package file not found: $PKG_FILE"
@@ -94,7 +94,7 @@ jobs:
             ALL_MEMBERS_RAW=""
 
             for BRANCH in "${BRANCHES[@]}"; do
-              BRANCH=$(echo "$BRANCH" | xargs)
+              BRANCH=$(echo "$BRANCH" | xargs | sed 's|^feature/||')
               PKG_FILE="${MANIFEST_DIR}/${BRANCH}_package.xml"
               echo "  Processing: ${BRANCH}_package.xml"
 
@@ -115,26 +115,26 @@ jobs:
               done < "$PKG_FILE"
             done
 
-            echo '<?xml version="1.0" encoding="UTF-8"?>' > "$OUTPUT_PKG"
-            echo '<Package xmlns="http://soap.sforce.com/2006/04/metadata">' >> "$OUTPUT_PKG"
+            printf '<?xml version="1.0" encoding="UTF-8"?>\n' > "$OUTPUT_PKG"
+            printf '<Package xmlns="http://soap.sforce.com/2006/04/metadata">\n' >> "$OUTPUT_PKG"
 
             SORTED_TYPES=$(echo "$ALL_MEMBERS_RAW" | grep -v '^$' | cut -d'|' -f1 | sort -u)
             while IFS= read -r TYPE_NAME; do
               [[ -z "$TYPE_NAME" ]] && continue
-              echo '    <types>' >> "$OUTPUT_PKG"
+              printf '    <types>\n' >> "$OUTPUT_PKG"
               echo "$ALL_MEMBERS_RAW" | grep -v '^$' | grep "^${TYPE_NAME}|||" | cut -d'|' -f4 | sort -u | while read -r MEMBER; do
-                [[ -n "$MEMBER" ]] && echo "        <members>${MEMBER}</members>" >> "$OUTPUT_PKG"
+                [[ -n "$MEMBER" ]] && printf '        <members>%s</members>\n' "$MEMBER" >> "$OUTPUT_PKG"
               done
-              echo "        <name>${TYPE_NAME}</name>" >> "$OUTPUT_PKG"
-              echo '    </types>' >> "$OUTPUT_PKG"
+              printf '        <name>%s</name>\n' "$TYPE_NAME" >> "$OUTPUT_PKG"
+              printf '    </types>\n' >> "$OUTPUT_PKG"
             done <<< "$SORTED_TYPES"
 
-            echo "    <version>${MAX_VERSION}</version>" >> "$OUTPUT_PKG"
-            echo '</Package>' >> "$OUTPUT_PKG"
+            printf '    <version>%s</version>\n' "$MAX_VERSION" >> "$OUTPUT_PKG"
+            printf '</Package>\n' >> "$OUTPUT_PKG"
 
             ALL_TESTS=""
             for BRANCH in "${BRANCHES[@]}"; do
-              BRANCH=$(echo "$BRANCH" | xargs)
+              BRANCH=$(echo "$BRANCH" | xargs | sed 's|^feature/||')
               TEST_FILE="${MANIFEST_DIR}/${BRANCH}_TestClass.txt"
               if [[ -f "$TEST_FILE" ]]; then
                 CONTENT=$(cat "$TEST_FILE" | tr ' ' '\n' | tr ',' '\n')
@@ -170,12 +170,13 @@ jobs:
               git push origin ${{ github.ref_name }}
             fi
 
-            echo "FEATURE_BRANCH=${OUTPUT_NAME}" >> $GITHUB_ENV
+            echo "FEATURE_BRANCH=feature/${OUTPUT_NAME}" >> $GITHUB_ENV
             echo "✅ Consolidation complete: $OUTPUT_NAME"
 
           else
             echo "📄 Single branch detected — using directly: $FEATURE_INPUT"
-            echo "FEATURE_BRANCH=${FEATURE_INPUT}" >> $GITHUB_ENV
+            FEATURE_INPUT=$(echo "$FEATURE_INPUT" | sed 's|^feature/||')
+            echo "FEATURE_BRANCH=feature/${FEATURE_INPUT}" >> $GITHUB_ENV
           fi
 
       - name: Setup Node.js
@@ -187,6 +188,7 @@ jobs:
         run: |
           npm install -g @salesforce/cli@latest
           sf --version
+
       - name: Install Salesforce Code Analyzer Plugin
         run: sf plugins install @salesforce/sfdx-scanner@latest || echo "Plugin already installed"
 
@@ -217,39 +219,20 @@ jobs:
           USER_HOTFIX: ${{ secrets.SFDX_AUTH_HOTFIX_USERNAME }}
         run: |
           LOGIN_URL="$SF_LOGIN_URL_TEST_VAL"
-          if [[ "$INPUT_ENV" =~ ^\s*(PRODUCTION|prod)$ ]]; then
+          if [[ "$INPUT_ENV" == "PRODUCTION" ]]; then
             LOGIN_URL="$SF_LOGIN_URL_PROD_VAL"
           fi
 
           case "$INPUT_ENV" in
-            "DEV")
-              CLIENT_ID="$KEY_DEV"
-              USERNAME="$USER_DEV"
-              ;;
-            "QA")
-              CLIENT_ID="$KEY_QA"
-              USERNAME="$USER_QA"
-              ;;
-            "UAT")
-              CLIENT_ID="$KEY_UAT"
-              USERNAME="$USER_UAT"
-              ;;
-            "PRODUCTION")
-              CLIENT_ID="$KEY_PROD"
-              USERNAME="$USER_PROD"
-              ;;
-            "HOTFIX")
-              CLIENT_ID="$KEY_HOTFIX"
-              USERNAME="$USER_HOTFIX"
-              ;;
-            *)
-              echo "Unknown environment: $INPUT_ENV"
-              exit 1
-              ;;
+            "DEV")   CLIENT_ID="$KEY_DEV";    USERNAME="$USER_DEV"    ;;
+            "QA")    CLIENT_ID="$KEY_QA";     USERNAME="$USER_QA"     ;;
+            "UAT")   CLIENT_ID="$KEY_UAT";    USERNAME="$USER_UAT"    ;;
+            "PRODUCTION") CLIENT_ID="$KEY_PROD"; USERNAME="$USER_PROD" ;;
+            "HOTFIX") CLIENT_ID="$KEY_HOTFIX"; USERNAME="$USER_HOTFIX" ;;
+            *) echo "Unknown environment: $INPUT_ENV"; exit 1 ;;
           esac
-          
-          sf org login jwt --client-id "${CLIENT_ID}" --jwt-key-file server.key --username "${USERNAME}" --instance-url "${LOGIN_URL}" --alias "$SF_ALIAS" --set-default
 
+          sf org login jwt --client-id "${CLIENT_ID}" --jwt-key-file server.key --username "${USERNAME}" --instance-url "${LOGIN_URL}" --alias "$SF_ALIAS" --set-default
 
       - name: Determine test classes for RunSpecifiedTests, if needed
         id: prepare_tests
@@ -281,21 +264,20 @@ jobs:
         run: |
           PACKAGE_XML="${WORKSPACE}/manifest/${FEATURE_BRANCH}_package.xml"
           echo "Validating deployment of package: $PACKAGE_XML"
-          
-          TESTLEVEL="$INPUT_TESTLEVEL"
-          
-          echo "Using test level: $TESTLEVEL"
+          echo "Using test level: $INPUT_TESTLEVEL"
           echo "Using test classes: $TESTS"
-          
+
+          TESTLEVEL="$INPUT_TESTLEVEL"
           if [[ "$TESTLEVEL" == "RunSpecifiedTests" ]]; then
             if [[ -z "$TESTS" ]]; then
-              echo "No test classes specified, switching to RunLocalTests for coverage"
+              echo "No test classes specified, switching to RunLocalTests"
               TESTLEVEL="RunLocalTests"
             fi
             sf project deploy validate --manifest "$PACKAGE_XML" --target-org "$SF_ALIAS" --test-level "$TESTLEVEL" --tests $TESTS --wait 30
           else
             sf project deploy validate --manifest "$PACKAGE_XML" --target-org "$SF_ALIAS" --test-level "$TESTLEVEL" --wait 30
           fi
+
       - name: Run Salesforce Code Analyzer
         id: run-scanner
         uses: forcedotcom/run-code-analyzer@v2
@@ -309,7 +291,7 @@ jobs:
           steps.run-scanner.outputs.num-sev1-violations > 0 ||
           steps.run-scanner.outputs.num-violations > 10
         run: exit 0
-                  
+
       - name: Install Gitleaks
         run: |
           GITLEAKS_VERSION=$(curl -s https://api.github.com/repos/gitleaks/gitleaks/releases/latest | grep tag_name | cut -d '"' -f 4 | sed 's/v//')
@@ -331,12 +313,6 @@ jobs:
           path: gitleaks-report.sarif
           retention-days: 30
 
-      - name: Fail if critical violations found
-        if: |
-          steps.run-scanner.outputs.exit-code > 0 ||
-          steps.run-scanner.outputs.num-sev1-violations > 0 ||
-          steps.run-scanner.outputs.num-violations > 10
-        run: exit 0
       - name: Cleanup
         if: always()
         run: rm -f server.key

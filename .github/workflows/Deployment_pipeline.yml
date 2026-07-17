@@ -6,7 +6,7 @@ on:
       Feature_Branch:
         type: string
         description: >
-          Branch name(s) to deploy. Single: ABC123  |  Multiple (consolidates): ABC123,R-260510-0057,XYZ789
+          Branch name(s) to deploy. Single: feature/ABC123  |  Multiple: feature/ABC123,feature/R-260510-0057
         required: true
       environment:
         type: choice
@@ -82,12 +82,10 @@ jobs:
         shell: bash
         env:
           FEATURE_INPUT: ${{ github.event.inputs.Feature_Branch }}
-          MANIFEST_DIR: ${{ github.workspace }}/manifest
+          MANIFEST_DIR: ${{ github.workspace }}/manifest/feature
         run: |
-          # Trim whitespace
           FEATURE_INPUT=$(echo "$FEATURE_INPUT" | xargs)
 
-          # Check if multiple branches (contains comma)
           if [[ "$FEATURE_INPUT" == *","* ]]; then
             echo "📦 Multiple branches detected — consolidating..."
 
@@ -108,7 +106,7 @@ jobs:
             echo ""
             echo "🔍 Validating input files..."
             for BRANCH in "${BRANCHES[@]}"; do
-              BRANCH=$(echo "$BRANCH" | xargs)
+              BRANCH=$(echo "$BRANCH" | xargs | sed 's|^feature/||')
               PKG_FILE="${MANIFEST_DIR}/${BRANCH}_package.xml"
               if [[ ! -f "$PKG_FILE" ]]; then
                 echo "❌ Package file not found: $PKG_FILE"
@@ -121,7 +119,7 @@ jobs:
             ALL_MEMBERS_RAW=""
 
             for BRANCH in "${BRANCHES[@]}"; do
-              BRANCH=$(echo "$BRANCH" | xargs)
+              BRANCH=$(echo "$BRANCH" | xargs | sed 's|^feature/||')
               PKG_FILE="${MANIFEST_DIR}/${BRANCH}_package.xml"
               echo "  Processing: ${BRANCH}_package.xml"
 
@@ -142,27 +140,26 @@ jobs:
               done < "$PKG_FILE"
             done
 
-            echo '<?xml version="1.0" encoding="UTF-8"?>' > "$OUTPUT_PKG"
-            echo '<Package xmlns="http://soap.sforce.com/2006/04/metadata">' >> "$OUTPUT_PKG"
+            printf '<?xml version="1.0" encoding="UTF-8"?>\n' > "$OUTPUT_PKG"
+            printf '<Package xmlns="http://soap.sforce.com/2006/04/metadata">\n' >> "$OUTPUT_PKG"
 
             SORTED_TYPES=$(echo "$ALL_MEMBERS_RAW" | grep -v '^$' | cut -d'|' -f1 | sort -u)
             while IFS= read -r TYPE_NAME; do
               [[ -z "$TYPE_NAME" ]] && continue
-              echo '    <types>' >> "$OUTPUT_PKG"
+              printf '    <types>\n' >> "$OUTPUT_PKG"
               echo "$ALL_MEMBERS_RAW" | grep -v '^$' | grep "^${TYPE_NAME}|||" | cut -d'|' -f4 | sort -u | while read -r MEMBER; do
-                [[ -n "$MEMBER" ]] && echo "        <members>${MEMBER}</members>" >> "$OUTPUT_PKG"
+                [[ -n "$MEMBER" ]] && printf '        <members>%s</members>\n' "$MEMBER" >> "$OUTPUT_PKG"
               done
-              echo "        <name>${TYPE_NAME}</name>" >> "$OUTPUT_PKG"
-              echo '    </types>' >> "$OUTPUT_PKG"
+              printf '        <name>%s</name>\n' "$TYPE_NAME" >> "$OUTPUT_PKG"
+              printf '    </types>\n' >> "$OUTPUT_PKG"
             done <<< "$SORTED_TYPES"
 
-            echo "    <version>${MAX_VERSION}</version>" >> "$OUTPUT_PKG"
-            echo '</Package>' >> "$OUTPUT_PKG"
+            printf '    <version>%s</version>\n' "$MAX_VERSION" >> "$OUTPUT_PKG"
+            printf '</Package>\n' >> "$OUTPUT_PKG"
 
-            # Consolidate test classes from all branches
             ALL_TESTS=""
             for BRANCH in "${BRANCHES[@]}"; do
-              BRANCH=$(echo "$BRANCH" | xargs)
+              BRANCH=$(echo "$BRANCH" | xargs | sed 's|^feature/||')
               TEST_FILE="${MANIFEST_DIR}/${BRANCH}_TestClass.txt"
               if [[ -f "$TEST_FILE" ]]; then
                 CONTENT=$(cat "$TEST_FILE" | tr ' ' '\n' | tr ',' '\n')
@@ -186,7 +183,6 @@ jobs:
               cat "$OUTPUT_TEST"
             fi
 
-            # Commit and push consolidated files
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
             git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
@@ -199,14 +195,15 @@ jobs:
               git push origin ${{ github.ref_name }}
             fi
 
-            echo "FEATURE_BRANCH=${OUTPUT_NAME}" >> $GITHUB_ENV
-            echo "deploy_package=${OUTPUT_NAME}" >> $GITHUB_OUTPUT
+            echo "FEATURE_BRANCH=feature/${OUTPUT_NAME}" >> $GITHUB_ENV
+            echo "deploy_package=feature/${OUTPUT_NAME}" >> $GITHUB_OUTPUT
             echo "✅ Consolidation complete: $OUTPUT_NAME"
 
           else
             echo "📄 Single branch detected — using directly: $FEATURE_INPUT"
-            echo "FEATURE_BRANCH=${FEATURE_INPUT}" >> $GITHUB_ENV
-            echo "deploy_package=${FEATURE_INPUT}" >> $GITHUB_OUTPUT
+            FEATURE_INPUT=$(echo "$FEATURE_INPUT" | sed 's|^feature/||')
+            echo "FEATURE_BRANCH=feature/${FEATURE_INPUT}" >> $GITHUB_ENV
+            echo "deploy_package=feature/${FEATURE_INPUT}" >> $GITHUB_OUTPUT
           fi
 
       - name: Setup Node.js
