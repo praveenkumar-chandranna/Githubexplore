@@ -6,7 +6,7 @@ on:
       Feature_Branch:
         type: string
         description: >-
-          Branch name(s) to validate. Single: feature/LODHA-123  |  Multiple: feature/LODHA123,feature/LODHA4321
+          Single: feature/LODHA-123  |  Multiple (comma-separated): feature/LODHA-123,feature/LODHA-456
         required: true
       environment:
         type: choice
@@ -17,7 +17,7 @@ on:
           - UAT
           - PRODUCTION
           - HOTFIX
-        default: "DEV"
+        default: DEV
         required: true
       testlevel:
         type: choice
@@ -26,7 +26,7 @@ on:
           - RunLocalTests
           - RunSpecifiedTests
           - RunAllTestsInOrg
-        default: "RunSpecifiedTests"
+        default: RunSpecifiedTests
         required: true
 
 jobs:
@@ -38,6 +38,7 @@ jobs:
       SF_ENV_ALIAS: lodhaOrg
       SF_LOGIN_URL_TEST: https://test.salesforce.com
       SF_LOGIN_URL_PROD: https://login.salesforce.com
+
     if: >
       (github.event_name == 'workflow_dispatch' &&
        (
@@ -47,6 +48,7 @@ jobs:
          (github.ref == 'refs/heads/main' && github.event.inputs.environment == 'PRODUCTION') ||
          (github.ref == 'refs/heads/main' && github.event.inputs.environment == 'HOTFIX')
        ))
+
     steps:
       - name: Checkout branch
         uses: actions/checkout@v7
@@ -54,28 +56,40 @@ jobs:
           ref: ${{ github.ref_name }}
           fetch-depth: 0
 
-      - name: Consolidate or Resolve Package
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Install Salesforce CLI
+        run: |
+          npm install -g @salesforce/cli@latest
+          sf --version
+
+      - name: Install Salesforce Code Analyzer Plugin
+        run: sf plugins install code-analyzer@latest
+
+      - name: Resolve Package - Single or Multiple
         id: resolve-package
         shell: bash
         env:
           FEATURE_INPUT: ${{ github.event.inputs.Feature_Branch }}
-          MANIFEST_DIR: ${{ github.workspace }}/manifest/feature
-          OUTPUT_DIR: ${{ github.workspace }}/manifest
+          MANIFEST_DIR: ${{ github.workspace }}/manifest
         run: |
           FEATURE_INPUT=$(echo "$FEATURE_INPUT" | xargs)
 
           if [[ "$FEATURE_INPUT" == *","* ]]; then
-            echo "📦 Multiple branches detected — consolidating..."
+            echo "📦 Multiple packages detected — consolidating..."
 
             RELEASE_DATE=$(date +'%d%m%Y')
             OUTPUT_NAME="Release_${RELEASE_DATE}"
-            OUTPUT_PKG="${OUTPUT_DIR}/${OUTPUT_NAME}_package.xml"
-            OUTPUT_TEST="${OUTPUT_DIR}/${OUTPUT_NAME}_TestClass.txt"
+            OUTPUT_PKG="${MANIFEST_DIR}/${OUTPUT_NAME}_package.xml"
+            OUTPUT_TEST="${MANIFEST_DIR}/${OUTPUT_NAME}_TestClass.txt"
 
             echo "=========================================="
             echo "PACKAGE CONSOLIDATION"
             echo "=========================================="
-            echo "Branches : $FEATURE_INPUT"
+            echo "Packages : $FEATURE_INPUT"
             echo "Output   : $OUTPUT_NAME"
             echo "=========================================="
 
@@ -83,29 +97,30 @@ jobs:
 
             echo "🔍 Validating input files..."
             for BRANCH in "${BRANCHES[@]}"; do
-              BRANCH=$(echo "$BRANCH" | xargs | sed 's|^feature/||')
-              PKG_FILE="${MANIFEST_DIR}/${BRANCH}_package.xml"
+              BRANCH=$(echo "$BRANCH" | xargs)
+              BRANCH_SAFE=$(echo "$BRANCH" | sed 's|/|_|g')
+              PKG_FILE="${MANIFEST_DIR}/${BRANCH_SAFE}_package.xml"
               if [[ ! -f "$PKG_FILE" ]]; then
                 echo "❌ Package file not found: $PKG_FILE"
                 exit 1
               fi
-              echo "  ✅ Found: ${BRANCH}_package.xml"
+              echo "  ✅ Found: ${BRANCH_SAFE}_package.xml"
             done
 
             MAX_VERSION="0"
             ALL_MEMBERS_RAW=""
 
             for BRANCH in "${BRANCHES[@]}"; do
-              BRANCH=$(echo "$BRANCH" | xargs | sed 's|^feature/||')
-              PKG_FILE="${MANIFEST_DIR}/${BRANCH}_package.xml"
-              echo "  Processing: ${BRANCH}_package.xml"
+              BRANCH=$(echo "$BRANCH" | xargs)
+              BRANCH_SAFE=$(echo "$BRANCH" | sed 's|/|_|g')
+              PKG_FILE="${MANIFEST_DIR}/${BRANCH_SAFE}_package.xml"
+              echo "  Processing: ${BRANCH_SAFE}_package.xml"
 
               VERSION=$(grep -oP '(?<=<version>)[^<]+' "$PKG_FILE" || echo "0")
               if awk "BEGIN {exit !($VERSION > $MAX_VERSION)}"; then
                 MAX_VERSION="$VERSION"
               fi
 
-              # Parse <types> blocks line by line — no awk/sed multi-char RS needed
               IN_BLOCK=0
               CUR_TYPE=""
               CUR_MEMBERS=""
@@ -150,8 +165,9 @@ jobs:
 
             ALL_TESTS=""
             for BRANCH in "${BRANCHES[@]}"; do
-              BRANCH=$(echo "$BRANCH" | xargs | sed 's|^feature/||')
-              TEST_FILE="${MANIFEST_DIR}/${BRANCH}_TestClass.txt"
+              BRANCH=$(echo "$BRANCH" | xargs)
+              BRANCH_SAFE=$(echo "$BRANCH" | sed 's|/|_|g')
+              TEST_FILE="${MANIFEST_DIR}/${BRANCH_SAFE}_TestClass.txt"
               if [[ -f "$TEST_FILE" ]]; then
                 CONTENT=$(cat "$TEST_FILE" | tr ' ' '\n' | tr ',' '\n')
                 ALL_TESTS+=$'\n'"$CONTENT"
@@ -177,8 +193,8 @@ jobs:
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
             git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
-            git add "${OUTPUT_DIR}/${OUTPUT_NAME}_package.xml"
-            [[ -f "$OUTPUT_TEST" ]] && git add "${OUTPUT_DIR}/${OUTPUT_NAME}_TestClass.txt"
+            git add "${OUTPUT_PKG}"
+            [[ -f "$OUTPUT_TEST" ]] && git add "${OUTPUT_TEST}"
             if git diff --cached --quiet; then
               echo "⚠️ No changes to commit"
             else
@@ -190,32 +206,20 @@ jobs:
             echo "✅ Consolidation complete: $OUTPUT_NAME"
 
           else
-            echo "📄 Single branch detected — using directly: $FEATURE_INPUT"
-            FEATURE_INPUT=$(echo "$FEATURE_INPUT" | sed 's|^feature/||')
-            echo "FEATURE_BRANCH=feature/${FEATURE_INPUT}" >> $GITHUB_ENV
+            echo "📄 Single package detected — using directly: $FEATURE_INPUT"
+            FEATURE_INPUT=$(echo "$FEATURE_INPUT" | xargs)
+            FEATURE_SAFE=$(echo "$FEATURE_INPUT" | sed 's|/|_|g')
+            echo "FEATURE_BRANCH=${FEATURE_SAFE}" >> $GITHUB_ENV
+            echo "✅ Using package: ${FEATURE_SAFE}"
           fi
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: 20
-
-      - name: Install Salesforce CLI
-        run: |
-          npm install -g @salesforce/cli@latest
-          sf --version
-
-      - name: Install Salesforce Code Analyzer Plugin
-        run: sf plugins install @salesforce/sfdx-scanner@latest || echo "Plugin already installed"
-
       - name: Generate JWT Key file
-        run: echo "${{ secrets.SALESFORCE_JWT_SECRET_KEY }}" > server.key && chmod 600 server.key
+        run: |
+          echo "${{ secrets.SALESFORCE_JWT_SECRET_KEY }}" > server.key
+          chmod 600 server.key
 
       - name: Clear Prior Salesforce Sessions
-        shell: bash
-        run: |
-          echo "🧹 Clearing existing Salesforce org sessions..."
-          sf org logout --all --no-prompt || true
+        run: sf org logout --all --no-prompt || true
 
       - name: Authorize to Salesforce - ${{ github.event.inputs.environment }} Org
         env:
@@ -238,20 +242,25 @@ jobs:
           if [[ "$INPUT_ENV" == "PRODUCTION" ]]; then
             LOGIN_URL="$SF_LOGIN_URL_PROD_VAL"
           fi
-
           case "$INPUT_ENV" in
-            "DEV")        CLIENT_ID="$KEY_DEV";    USERNAME="$USER_DEV"    ;;
-            "QA")         CLIENT_ID="$KEY_QA";     USERNAME="$USER_QA"     ;;
-            "UAT")        CLIENT_ID="$KEY_UAT";    USERNAME="$USER_UAT"    ;;
-            "PRODUCTION") CLIENT_ID="$KEY_PROD";   USERNAME="$USER_PROD"   ;;
-            "HOTFIX")     CLIENT_ID="$KEY_HOTFIX"; USERNAME="$USER_HOTFIX" ;;
+            DEV)        CLIENT_ID="$KEY_DEV";    USERNAME="$USER_DEV"    ;;
+            QA)         CLIENT_ID="$KEY_QA";     USERNAME="$USER_QA"     ;;
+            UAT)        CLIENT_ID="$KEY_UAT";    USERNAME="$USER_UAT"    ;;
+            PRODUCTION) CLIENT_ID="$KEY_PROD";   USERNAME="$USER_PROD"   ;;
+            HOTFIX)     CLIENT_ID="$KEY_HOTFIX"; USERNAME="$USER_HOTFIX" ;;
             *) echo "Unknown environment: $INPUT_ENV"; exit 1 ;;
           esac
+          sf org login jwt \
+            --client-id "$CLIENT_ID" \
+            --jwt-key-file server.key \
+            --username "$USERNAME" \
+            --instance-url "$LOGIN_URL" \
+            --alias "$SF_ALIAS" \
+            --set-default
 
-          sf org login jwt --client-id "${CLIENT_ID}" --jwt-key-file server.key --username "${USERNAME}" --instance-url "${LOGIN_URL}" --alias "$SF_ALIAS" --set-default
-
-      - name: Determine test classes for RunSpecifiedTests, if needed
+      - name: Prepare Test Classes
         id: prepare_tests
+        shell: bash
         env:
           INPUT_TESTLEVEL: ${{ github.event.inputs.testlevel }}
           FEATURE_BRANCH: ${{ env.FEATURE_BRANCH }}
@@ -261,15 +270,16 @@ jobs:
             TEST_FILE="${WORKSPACE}/manifest/${FEATURE_BRANCH}_TestClass.txt"
             if [[ -f "$TEST_FILE" ]]; then
               TEST_CLASSES=$(paste -sd " " "$TEST_FILE")
-              echo "✅ Test classes from file: $TEST_CLASSES"
+              echo "✅ Test classes: $TEST_CLASSES"
+              echo "test_classes=$TEST_CLASSES" >> $GITHUB_OUTPUT
             else
               echo "❌ Test class file not found: $TEST_FILE"
               exit 1
             fi
-            echo "test_classes=$TEST_CLASSES" >> $GITHUB_OUTPUT
           fi
 
-      - name: Deployment Validation - ${{ github.event.inputs.environment }} Org
+      - name: Validate Single Package - ${{ github.event.inputs.environment }} Org
+        if: ${{ !contains(github.event.inputs.Feature_Branch, ',') }}
         shell: bash
         env:
           FEATURE_BRANCH: ${{ env.FEATURE_BRANCH }}
@@ -279,20 +289,42 @@ jobs:
           WORKSPACE: ${{ github.workspace }}
         run: |
           PACKAGE_XML="${WORKSPACE}/manifest/${FEATURE_BRANCH}_package.xml"
-          echo "Validating deployment of package: $PACKAGE_XML"
-          echo "Using test level: $INPUT_TESTLEVEL"
-          echo "Using test classes: $TESTS"
-
-          TESTLEVEL="$INPUT_TESTLEVEL"
-          if [[ "$TESTLEVEL" == "RunSpecifiedTests" ]]; then
-            if [[ -z "$TESTS" ]]; then
-              echo "No test classes specified, switching to RunLocalTests"
-              TESTLEVEL="RunLocalTests"
-            fi
-            sf project deploy validate --manifest "$PACKAGE_XML" --target-org "$SF_ALIAS" --test-level "$TESTLEVEL" --tests $TESTS --wait 30
-          else
-            sf project deploy validate --manifest "$PACKAGE_XML" --target-org "$SF_ALIAS" --test-level "$TESTLEVEL" --wait 30
+          echo "=========================================="
+          echo "SINGLE PACKAGE VALIDATION"
+          echo "=========================================="
+          echo "Package  : $PACKAGE_XML"
+          echo "TestLevel: $INPUT_TESTLEVEL"
+          echo "Tests    : $TESTS"
+          echo "=========================================="
+          CMD=(sf project deploy validate --manifest "$PACKAGE_XML" --target-org "$SF_ALIAS" --test-level "$INPUT_TESTLEVEL" --wait 30 --ignore-warnings --verbose)
+          if [[ "$INPUT_TESTLEVEL" == "RunSpecifiedTests" && -n "$TESTS" ]]; then
+            CMD+=(--tests $TESTS)
           fi
+          "${CMD[@]}"
+
+      - name: Validate Consolidated Package - ${{ github.event.inputs.environment }} Org
+        if: ${{ contains(github.event.inputs.Feature_Branch, ',') }}
+        shell: bash
+        env:
+          FEATURE_BRANCH: ${{ env.FEATURE_BRANCH }}
+          INPUT_TESTLEVEL: ${{ github.event.inputs.testlevel }}
+          TESTS: ${{ steps.prepare_tests.outputs.test_classes }}
+          SF_ALIAS: ${{ env.SF_ENV_ALIAS }}
+          WORKSPACE: ${{ github.workspace }}
+        run: |
+          PACKAGE_XML="${WORKSPACE}/manifest/${FEATURE_BRANCH}_package.xml"
+          echo "=========================================="
+          echo "CONSOLIDATED PACKAGE VALIDATION"
+          echo "=========================================="
+          echo "Package  : $PACKAGE_XML"
+          echo "TestLevel: $INPUT_TESTLEVEL"
+          echo "Tests    : $TESTS"
+          echo "=========================================="
+          CMD=(sf project deploy validate --manifest "$PACKAGE_XML" --target-org "$SF_ALIAS" --test-level "$INPUT_TESTLEVEL" --wait 30 --ignore-warnings --verbose)
+          if [[ "$INPUT_TESTLEVEL" == "RunSpecifiedTests" && -n "$TESTS" ]]; then
+            CMD+=(--tests $TESTS)
+          fi
+          "${CMD[@]}"
 
       - name: Run Salesforce Code Analyzer
         id: run-scanner
@@ -304,9 +336,12 @@ jobs:
       - name: Fail if critical violations found
         if: |
           steps.run-scanner.outputs.exit-code > 0 ||
-          steps.run-scanner.outputs.num-sev1-violations > 0 ||
+          steps.run-scanner.outputs.num-sev1-violations > 10 ||
+          steps.run-scanner.outputs.num-sev2-violations > 50 ||
+          steps.run-scanner.outputs.num-sev3-violations > 500 ||
           steps.run-scanner.outputs.num-violations > 10
-        run: exit 0
+        run: exit 1
+
 
       - name: Install Gitleaks
         run: |
