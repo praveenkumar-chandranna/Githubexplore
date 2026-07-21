@@ -23,7 +23,6 @@ on:
         type: choice
         description: Test class run level
         options:
-          - NoTestRun
           - RunLocalTests
           - RunSpecifiedTests
           - RunAllTestsInOrg
