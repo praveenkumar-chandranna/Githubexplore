@@ -36,8 +36,8 @@ jobs:
       contents: write
     env:
       SF_ENV_ALIAS: lodhaOrg
-      SF_LOGIN_URL_TEST: https://test.salesforce.com
-      SF_LOGIN_URL_PROD: https://login.salesforce.com
+      SF_LOGIN_URL_TEST: ${{ secrets.SANDBOX_URL }}
+      SF_LOGIN_URL_PROD: ${{ secrets.LOGIN_URL }}
 
     if: >
       (github.event_name == 'workflow_dispatch' &&

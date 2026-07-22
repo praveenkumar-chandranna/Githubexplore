@@ -35,8 +35,8 @@ jobs:
     permissions:
       contents: write
     env:
-      SF_LOGIN_URL_TEST: https://login.salesforce.com
-      SF_LOGIN_URL_PROD: https://login.salesforce.com
+      SF_LOGIN_URL_TEST: ${{ secrets.SANDBOX_URL }}
+      SF_LOGIN_URL_PROD: ${{ secrets.LOGIN_URL }}
       SF_ALIAS: lodhaOrg
 
     if: >
