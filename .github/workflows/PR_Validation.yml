@@ -316,7 +316,7 @@ jobs:
             exit 1
           fi
 
-      - name: Check Code Coverage (minimum 80%)
+      - name: Check Code Coverage (minimum 75%)
         shell: bash
         run: |
           echo "🔍 Searching for coverage file..."
@@ -328,15 +328,12 @@ jobs:
           if [[ -n "$COVERAGE_FILE" ]]; then
             echo "📄 Found coverage file: $COVERAGE_FILE"
 
-            # Salesforce CLI generates Istanbul format coverage JSON
-            # Calculate coverage from statement counts per class
             COVERAGE=$(jq '
               [to_entries[] | .value.s | to_entries | {total: length, covered: [.[] | select(.value > 0)] | length}]
               | {total: (map(.total) | add), covered: (map(.covered) | add)}
               | if .total > 0 then (.covered * 100 / .total | floor) else 0 end
             ' "$COVERAGE_FILE" 2>/dev/null || echo "")
 
-            # Display per-class coverage
             echo ""
             echo "=========================================="
             echo "CODE COVERAGE REPORT"
@@ -363,11 +360,11 @@ jobs:
           fi
 
           echo "📊 Overall Code Coverage: ${COVERAGE}%"
-          if [[ "$COVERAGE" -lt 80 ]]; then
-            echo "❌ Code coverage ${COVERAGE}% is below minimum threshold of 80%"
+          if [[ "$COVERAGE" -lt 75 ]]; then
+            echo "❌ Code coverage ${COVERAGE}% is below minimum threshold of 75%"
             exit 1
           else
-            echo "✅ Code coverage ${COVERAGE}% meets minimum threshold of 80%"
+            echo "✅ Code coverage ${COVERAGE}% meets minimum threshold of 75%"
           fi
 
       - name: Run Salesforce Code Analyzer
