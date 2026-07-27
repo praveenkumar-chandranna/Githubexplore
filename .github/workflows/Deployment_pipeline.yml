@@ -402,22 +402,22 @@ jobs:
           ENVIRONMENT: ${{ env.ENVIRONMENT }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG_DATE=$(date +'%d%m%Y_%H%M')
+          TAG_DATE=$(TZ='Asia/Kolkata' date +'%d%m%Y_%H%M')
           SAFE_BRANCH=$(echo "$FEATURE_BRANCH" | sed 's|/|-|g')
-          TAG_NAME="release/PRODUCTION/${TAG_DATE}_${SAFE_BRANCH}"
+          TAG_NAME="Production/${TAG_DATE}_${SAFE_BRANCH}"
 
           echo "🏷️ Creating git tag: $TAG_NAME"
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "SFDC DevOps"
+          git config user.email "devops.sfdc@lodhagroup.com"
           git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
-          git tag -a "$TAG_NAME" -m "Production release ${TAG_DATE} | Package: ${FEATURE_BRANCH} | Deployed by: ${{ github.actor }}"
+          git tag -a "$TAG_NAME" -m "Production release ${TAG_DATE} IST | Package: ${FEATURE_BRANCH} | Deployed by: ${{ github.actor }}"
           git push origin "$TAG_NAME"
 
           echo "🚀 Creating GitHub Release..."
           RELEASE_BODY="## 🚀 Production Release\n\n"
           RELEASE_BODY+="| Field | Value |\n"
           RELEASE_BODY+="|---|---|\n"
-          RELEASE_BODY+="| **Date** | $(date +'%d-%m-%Y %H:%M UTC') |\n"
+          RELEASE_BODY+="| **Date** | $(TZ='Asia/Kolkata' date +'%d-%m-%Y %H:%M IST') |\n"
           RELEASE_BODY+="| **Package** | ${FEATURE_BRANCH} |\n"
           RELEASE_BODY+="| **Branch** | ${{ github.ref_name }} |\n"
           RELEASE_BODY+="| **Deployed by** | ${{ github.actor }} |\n"
@@ -480,7 +480,7 @@ jobs:
         run: |
           echo "📋 Fetching Jira ticket details..."
 
-          RELEASE_DATE=$(date +'%Y-%m-%d %H:%M:%S UTC')
+          RELEASE_DATE=$(TZ='Asia/Kolkata' date +'%Y-%m-%d %H:%M:%S IST')
           DEPLOYER="${{ github.actor }}"
           BRANCH="${{ github.ref_name }}"
           PACKAGE="${{ needs.Deployment_Build.outputs.deploy_package }}"

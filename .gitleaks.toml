@@ -13,6 +13,10 @@ paths = [
   '''\.sfdx/''',
 ]
 
+# ==========================================
+# SALESFORCE SECRETS
+# ==========================================
+
 [[rules]]
 id = "salesforce-consumer-key"
 description = "Salesforce Connected App Consumer Key"
@@ -84,3 +88,91 @@ id = "hardcoded-connection-string"
 description = "Database Connection String"
 regex = '''(?i)(jdbc|mongodb(\+srv)?|postgres(ql)?|mysql|mssql):\/\/[^\s'"]+:[^\s'"]+@[^\s'"]+'''
 tags = ["database", "connection"]
+
+# ==========================================
+# INDIAN PII — AADHAAR, PAN, MOBILE, EMAIL
+# ==========================================
+
+[[rules]]
+id = "indian-aadhaar-number"
+description = "Indian Aadhaar Number (12-digit, space/hyphen separated)"
+regex = '''\b[2-9]{1}[0-9]{3}\s?[0-9]{4}\s?[0-9]{4}\b'''
+tags = ["pii", "aadhaar", "india"]
+severity = "critical"
+
+[[rules]]
+id = "indian-pan-number"
+description = "Indian PAN Card Number"
+regex = '''\b[A-Z]{3}[ABCFGHLJPTF]{1}[A-Z]{1}[0-9]{4}[A-Z]{1}\b'''
+tags = ["pii", "pan", "india"]
+severity = "critical"
+
+[[rules]]
+id = "indian-mobile-number"
+description = "Indian Mobile Number hardcoded in source"
+regex = '''(?i)(mobile|phone|contact|cell|mob)\s*[:=]\s*['"]?\+?91[-\s]?[6-9][0-9]{9}['"]?'''
+tags = ["pii", "mobile", "india"]
+severity = "high"
+
+[[rules]]
+id = "indian-mobile-bare"
+description = "Bare Indian Mobile Number (10-digit starting 6-9)"
+regex = '''\b(?<!\d)[6-9][0-9]{9}(?!\d)\b'''
+tags = ["pii", "mobile", "india"]
+severity = "medium"
+[rules.allowlist]
+regexes = ['''[0-9]{10,}[A-Za-z]''']  # skip version strings / IDs
+
+[[rules]]
+id = "email-hardcoded"
+description = "Hardcoded email address in source code"
+regex = '''['"][a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}['"]'''
+tags = ["pii", "email"]
+severity = "high"
+[rules.allowlist]
+regexes = [
+  '''noreply@''',
+  '''example\.com''',
+  '''salesforce\.com''',
+  '''github\.com''',
+  '''atlassian\.net''',
+]
+
+[[rules]]
+id = "indian-passport-number"
+description = "Indian Passport Number"
+regex = '''\b[A-PR-WYa-pr-wy][1-9]\d\s?\d{4}[1-9]\b'''
+tags = ["pii", "passport", "india"]
+severity = "critical"
+
+[[rules]]
+id = "indian-voter-id"
+description = "Indian Voter ID (EPIC Number)"
+regex = '''\b[A-Z]{3}[0-9]{7}\b'''
+tags = ["pii", "voter-id", "india"]
+severity = "high"
+
+[[rules]]
+id = "indian-bank-account"
+description = "Indian Bank Account Number hardcoded"
+regex = '''(?i)(account[_\-]?no|account[_\-]?number|acc[_\-]?no)\s*[:=]\s*['"]?[0-9]{9,18}['"]?'''
+tags = ["pii", "bank", "india"]
+severity = "critical"
+
+[[rules]]
+id = "indian-ifsc-code"
+description = "Indian IFSC Code hardcoded"
+regex = '''\b[A-Z]{4}0[A-Z0-9]{6}\b'''
+tags = ["pii", "ifsc", "india"]
+severity = "medium"
+
+# ==========================================
+# PROFANITY — BLOCK OFFENSIVE STRINGS
+# ==========================================
+
+[[rules]]
+id = "profanity-in-code"
+description = "Profanity or offensive language detected in source"
+regex = '''(?i)\b(fuck|shit|bastard|asshole|bitch|cunt|damn|crap|idiot|stupid|moron|retard|nigger|faggot|whore|slut)\b'''
+tags = ["profanity", "policy"]
+severity = "high"
