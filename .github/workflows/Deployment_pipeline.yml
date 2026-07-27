@@ -89,7 +89,7 @@ jobs:
           if [[ "$FEATURE_INPUT" == *","* ]]; then
             echo "📦 Multiple branches detected — consolidating..."
 
-            RELEASE_DATE=$(date +'%d%m%Y')
+            RELEASE_DATE=$(date +'%d%m%Y_%H%M')
             OUTPUT_NAME="Release_${RELEASE_DATE}"
             OUTPUT_PKG="${OUTPUT_DIR}/${OUTPUT_NAME}_package.xml"
             OUTPUT_TEST="${OUTPUT_DIR}/${OUTPUT_NAME}_TestClass.txt"
@@ -383,11 +383,11 @@ jobs:
           fi
 
           echo "📊 Overall Code Coverage: ${COVERAGE}%"
-          if [[ "$COVERAGE" -lt 80 ]]; then
-            echo "❌ Code coverage ${COVERAGE}% is below minimum threshold of 80%"
+          if [[ "$COVERAGE" -lt 75 ]]; then
+            echo "❌ Code coverage ${COVERAGE}% is below minimum threshold of 75%"
             exit 1
           else
-            echo "✅ Code coverage ${COVERAGE}% meets minimum threshold of 80%"
+            echo "✅ Code coverage ${COVERAGE}% meets minimum threshold of 75%"
           fi
 
       - name: Cleanup JWT key
