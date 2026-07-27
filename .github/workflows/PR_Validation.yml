@@ -404,42 +404,42 @@ jobs:
           GITLEAKS_EXIT=$?
           set -e
 
-          echo "gitleaks_exit=${GITLEAKS_EXIT}" >> $GITHUB_OUTPUT
+          HAS_PII=0; HAS_SECRET=0; HAS_PROFANITY=0; FINDING_SUMMARY=""
 
-          if [[ $GITLEAKS_EXIT -ne 0 && -f gitleaks-report.json ]]; then
+          if [[ -f gitleaks-report.json ]]; then
+            HAS_PII=$(jq '[.[] | select(.Tags[]? | test("pii|aadhaar|pan|mobile|passport|bank"))] | length' gitleaks-report.json 2>/dev/null || echo 0)
+            HAS_SECRET=$(jq '[.[] | select(.Tags[]? | test("salesforce|aws|key|secret|token|password"))] | length' gitleaks-report.json 2>/dev/null || echo 0)
+            HAS_PROFANITY=$(jq '[.[] | select(.Tags[]? | test("profanity"))] | length' gitleaks-report.json 2>/dev/null || echo 0)
+            FINDING_SUMMARY=$(jq -r '.[] | "  \(.RuleID) | \(.File):\(.StartLine) | \(.Description)"' gitleaks-report.json 2>/dev/null || echo "")
+          fi
+
+          TOTAL=$((HAS_PII + HAS_SECRET + HAS_PROFANITY))
+
+          if [[ $TOTAL -gt 0 ]]; then
             echo ""
             echo "=========================================="
             echo "🚨 PII / SECRET FINDINGS"
             echo "=========================================="
-
-            FINDING_SUMMARY=$(jq -r '.[] | "  \(.RuleID) | \(.File):\(.StartLine) | \(.Description)"' gitleaks-report.json 2>/dev/null || echo "  (could not parse report)")
             echo "$FINDING_SUMMARY"
-
-            HAS_PII=$(jq '[.[] | select(.Tags[]? | test("pii|aadhaar|pan|mobile|passport|bank"))] | length' gitleaks-report.json 2>/dev/null || echo 0)
-            HAS_SECRET=$(jq '[.[] | select(.Tags[]? | test("salesforce|aws|key|secret|token|password"))] | length' gitleaks-report.json 2>/dev/null || echo 0)
-            HAS_PROFANITY=$(jq '[.[] | select(.Tags[]? | test("profanity"))] | length' gitleaks-report.json 2>/dev/null || echo 0)
-
-            echo ""
             echo "  PII findings    : $HAS_PII"
             echo "  Secret findings : $HAS_SECRET"
             echo "  Profanity       : $HAS_PROFANITY"
             echo "=========================================="
-
-            echo "has_pii=${HAS_PII}" >> $GITHUB_OUTPUT
-            echo "has_secret=${HAS_SECRET}" >> $GITHUB_OUTPUT
-            echo "has_profanity=${HAS_PROFANITY}" >> $GITHUB_OUTPUT
-            echo "finding_summary<<EOF" >> $GITHUB_OUTPUT
-            echo "$FINDING_SUMMARY" >> $GITHUB_OUTPUT
-            echo "EOF" >> $GITHUB_OUTPUT
+            echo "has_findings=true" >> $GITHUB_OUTPUT
           else
-            echo "has_pii=0" >> $GITHUB_OUTPUT
-            echo "has_secret=0" >> $GITHUB_OUTPUT
-            echo "has_profanity=0" >> $GITHUB_OUTPUT
             echo "✅ No PII, secrets, or profanity detected"
+            echo "has_findings=false" >> $GITHUB_OUTPUT
           fi
 
+          echo "has_pii=${HAS_PII}" >> $GITHUB_OUTPUT
+          echo "has_secret=${HAS_SECRET}" >> $GITHUB_OUTPUT
+          echo "has_profanity=${HAS_PROFANITY}" >> $GITHUB_OUTPUT
+          echo "finding_summary<<EOF" >> $GITHUB_OUTPUT
+          echo "$FINDING_SUMMARY" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
       - name: Comment Findings on PR
-        if: steps.gitleaks.outputs.gitleaks_exit != '0'
+        if: steps.gitleaks.outputs.has_findings == 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -476,7 +476,7 @@ jobs:
           echo "✅ PR comment posted with findings"
 
       - name: Alert DevOps Admin via GitHub Issue
-        if: steps.gitleaks.outputs.gitleaks_exit != '0'
+        if: steps.gitleaks.outputs.has_findings == 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -547,7 +547,7 @@ jobs:
           fi
 
       - name: Block PR — Fail on PII, Secret, or Profanity
-        if: steps.gitleaks.outputs.gitleaks_exit != '0'
+        if: steps.gitleaks.outputs.has_findings == 'true'
         run: |
           echo ""
           echo "=========================================="
