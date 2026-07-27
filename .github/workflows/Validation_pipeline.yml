@@ -36,8 +36,8 @@ jobs:
       contents: write
     env:
       SF_ENV_ALIAS: lodhaOrg
-      SF_LOGIN_URL_TEST: https://test.salesforce.com
-      SF_LOGIN_URL_PROD: https://login.salesforce.com
+      SF_LOGIN_URL_TEST: ${{ secrets.SANDBOX_URL }}
+      SF_LOGIN_URL_PROD: ${{ secrets.LOGIN_URL }}
 
     if: >
       (github.event_name == 'workflow_dispatch' &&
@@ -82,7 +82,7 @@ jobs:
           if [[ "$FEATURE_INPUT" == *","* ]]; then
             echo "📦 Multiple packages detected — consolidating..."
 
-            RELEASE_DATE=$(date +'%d%m%Y')
+            RELEASE_DATE=$(date +'%d%m%Y_%H%M')
             OUTPUT_NAME="Release_${RELEASE_DATE}"
             OUTPUT_PKG="${OUTPUT_DIR}/${OUTPUT_NAME}_package.xml"
             OUTPUT_TEST="${OUTPUT_DIR}/${OUTPUT_NAME}_TestClass.txt"

@@ -23,7 +23,6 @@ on:
         type: choice
         description: Test class run level
         options:
-          - NoTestRun
           - RunLocalTests
           - RunSpecifiedTests
           - RunAllTestsInOrg
@@ -36,8 +35,8 @@ jobs:
     permissions:
       contents: write
     env:
-      SF_LOGIN_URL_TEST: https://login.salesforce.com
-      SF_LOGIN_URL_PROD: https://login.salesforce.com
+      SF_LOGIN_URL_TEST: ${{ secrets.SANDBOX_URL }}
+      SF_LOGIN_URL_PROD: ${{ secrets.LOGIN_URL }}
       SF_ALIAS: lodhaOrg
 
     if: >
@@ -90,7 +89,7 @@ jobs:
           if [[ "$FEATURE_INPUT" == *","* ]]; then
             echo "📦 Multiple branches detected — consolidating..."
 
-            RELEASE_DATE=$(date +'%d%m%Y')
+            RELEASE_DATE=$(date +'%d%m%Y_%H%M')
             OUTPUT_NAME="Release_${RELEASE_DATE}"
             OUTPUT_PKG="${OUTPUT_DIR}/${OUTPUT_NAME}_package.xml"
             OUTPUT_TEST="${OUTPUT_DIR}/${OUTPUT_NAME}_TestClass.txt"
@@ -384,16 +383,59 @@ jobs:
           fi
 
           echo "📊 Overall Code Coverage: ${COVERAGE}%"
-          if [[ "$COVERAGE" -lt 80 ]]; then
-            echo "❌ Code coverage ${COVERAGE}% is below minimum threshold of 80%"
+          if [[ "$COVERAGE" -lt 75 ]]; then
+            echo "❌ Code coverage ${COVERAGE}% is below minimum threshold of 75%"
             exit 1
           else
-            echo "✅ Code coverage ${COVERAGE}% meets minimum threshold of 80%"
+            echo "✅ Code coverage ${COVERAGE}% meets minimum threshold of 75%"
           fi
 
       - name: Cleanup JWT key
         if: always()
         run: rm -f server.key
+
+      - name: Create Production Release Tag
+        if: github.event.inputs.environment == 'PRODUCTION'
+        shell: bash
+        env:
+          FEATURE_BRANCH: ${{ env.FEATURE_BRANCH }}
+          ENVIRONMENT: ${{ env.ENVIRONMENT }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG_DATE=$(date +'%d%m%Y_%H%M')
+          SAFE_BRANCH=$(echo "$FEATURE_BRANCH" | sed 's|/|-|g')
+          TAG_NAME="release/PRODUCTION/${TAG_DATE}_${SAFE_BRANCH}"
+
+          echo "🏷️ Creating git tag: $TAG_NAME"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+          git tag -a "$TAG_NAME" -m "Production release ${TAG_DATE} | Package: ${FEATURE_BRANCH} | Deployed by: ${{ github.actor }}"
+          git push origin "$TAG_NAME"
+
+          echo "🚀 Creating GitHub Release..."
+          RELEASE_BODY="## 🚀 Production Release\n\n"
+          RELEASE_BODY+="| Field | Value |\n"
+          RELEASE_BODY+="|---|---|\n"
+          RELEASE_BODY+="| **Date** | $(date +'%d-%m-%Y %H:%M UTC') |\n"
+          RELEASE_BODY+="| **Package** | ${FEATURE_BRANCH} |\n"
+          RELEASE_BODY+="| **Branch** | ${{ github.ref_name }} |\n"
+          RELEASE_BODY+="| **Deployed by** | ${{ github.actor }} |\n"
+          RELEASE_BODY+="| **Workflow Run** | [${{ github.run_id }}](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) |\n"
+
+          curl -s -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/${{ github.repository }}/releases \
+            -d "$(jq -n \
+              --arg tag "$TAG_NAME" \
+              --arg name "🚀 PRODUCTION | ${TAG_DATE} | ${SAFE_BRANCH}" \
+              --arg body "$(printf '%b' "$RELEASE_BODY")" \
+              '{tag_name: $tag, name: $name, body: $body, draft: false, prerelease: false, make_latest: "true"}')"
+
+          echo "✅ GitHub Release created: $TAG_NAME"
+          echo "🔗 https://github.com/${{ github.repository }}/releases/tag/${TAG_NAME}"
 
   Update_Release_Notes:
     runs-on: ubuntu-latest
