@@ -490,6 +490,7 @@ jobs:
           echo "🚀 Creating GitHub Release..."
           RELEASE_BODY="## 🚀 ${ENVIRONMENT} Release ${VERSION}\n\n"
           RELEASE_BODY+="| Field | Value |\n|---|---|\n"
+          RELEASE_BODY+="| **Tag** | \`${TAG_NAME}\` |\n"
           RELEASE_BODY+="| **Environment** | ${ENVIRONMENT} |\n"
           RELEASE_BODY+="| **Version** | ${VERSION} |\n"
           RELEASE_BODY+="| **Date (IST)** | $(TZ='Asia/Kolkata' date +'%d-%m-%Y %H:%M IST') |\n"
