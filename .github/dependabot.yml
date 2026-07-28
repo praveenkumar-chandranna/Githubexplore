@@ -13,7 +13,7 @@ updates:
       - "dependencies"
       - "github-actions"
     commit-message:
-      prefix: "chore(deps)"
+      prefix: "Updates"
 
   # NPM dependencies (Salesforce CLI plugins, LWC test libs, etc.)
   - package-ecosystem: "npm"
@@ -27,7 +27,7 @@ updates:
       - "dependencies"
       - "npm"
     commit-message:
-      prefix: "chore(deps)"
+      prefix: "Updates"
     ignore:
       # Avoid major bumps on Salesforce CLI packages to prevent breaking changes
       - dependency-name: "@salesforce/*"
