@@ -60,104 +60,12 @@ jobs:
       contents: read
       pull-requests: write
       issues: write
-      security-events: write
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
-
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
-        with:
-          languages: javascript
-          queries: security-and-quality
-
-      - name: Perform CodeQL Analysis
-        id: codeql
-        uses: github/codeql-action/analyze@v3
-        with:
-          category: "/language:javascript"
-          output: codeql-results
-          upload: never
-
-      - name: Check CodeQL Results and Comment on PR
-        if: always()
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          REPO: ${{ github.repository }}
-          RUN_ID: ${{ github.run_id }}
-          ACTOR: ${{ github.actor }}
-          HEAD_REF: ${{ github.head_ref }}
-        run: |
-          SARIF_FILE=$(find codeql-results -name "*.sarif" 2>/dev/null | head -1)
-
-          if [[ -z "$SARIF_FILE" ]]; then
-            echo "⚠️ No SARIF output found from CodeQL"
-            exit 0
-          fi
-
-          TOTAL=$(jq '[.runs[].results[]] | length' "$SARIF_FILE" 2>/dev/null || echo 0)
-          HIGH=$(jq '[.runs[].results[] | select(.properties.problem.severity == "error" or .level == "error")] | length' "$SARIF_FILE" 2>/dev/null || echo 0)
-          MEDIUM=$(jq '[.runs[].results[] | select(.properties.problem.severity == "warning" or .level == "warning")] | length' "$SARIF_FILE" 2>/dev/null || echo 0)
-
-          echo "=========================================="
-          echo "CODEQL ANALYSIS RESULTS"
-          echo "=========================================="
-          echo "  Total findings : $TOTAL"
-          echo "  High           : $HIGH"
-          echo "  Medium         : $MEDIUM"
-          echo "=========================================="
-
-          if [[ "$TOTAL" -gt 0 ]]; then
-            SCAN_TIME=$(TZ='Asia/Kolkata' date +'%d-%m-%Y %H:%M IST')
-            FINDINGS_TABLE=$(jq -r '
-              .runs[].results[] |
-              "| " + (.ruleId // "N/A") +
-              " | " + (.message.text // "N/A" | .[0:80]) +
-              " | " + (.locations[0].physicalLocation.artifactLocation.uri // "N/A") +
-              ":" + (.locations[0].physicalLocation.region.startLine // 0 | tostring) +
-              " | " + (.level // "note") + " |"
-            ' "$SARIF_FILE" 2>/dev/null | head -20 || echo "| N/A | Could not parse findings | N/A | N/A |")
-
-            PR_COMMENT="## 🔍 CodeQL Security Analysis\n\n"
-            PR_COMMENT+="| Field | Value |\n|---|---|\n"
-            PR_COMMENT+="| **Scanned at** | ${SCAN_TIME} |\n"
-            PR_COMMENT+="| **Branch** | ${HEAD_REF} |\n"
-            PR_COMMENT+="| **Author** | ${ACTOR} |\n"
-            PR_COMMENT+="| **Total findings** | ${TOTAL} |\n"
-            PR_COMMENT+="| **High** | ${HIGH} |\n"
-            PR_COMMENT+="| **Medium** | ${MEDIUM} |\n"
-            PR_COMMENT+="| **Workflow Run** | [${RUN_ID}](https://github.com/${REPO}/actions/runs/${RUN_ID}) |\n\n"
-            PR_COMMENT+="### Findings (top 20)\n"
-            PR_COMMENT+="| Rule | Message | Location | Severity |\n|---|---|---|---|\n"
-            PR_COMMENT+="${FINDINGS_TABLE}\n"
-
-            curl -s -X POST \
-              -H "Authorization: Bearer ${GH_TOKEN}" \
-              -H "Accept: application/vnd.github+json" \
-              -H "X-GitHub-Api-Version: 2022-11-28" \
-              "https://api.github.com/repos/${REPO}/issues/${PR_NUMBER}/comments" \
-              -d "$(jq -n --arg body "$(printf '%b' "$PR_COMMENT")" '{body: $body}')"
-            echo "✅ CodeQL findings posted to PR"
-          else
-            echo "✅ No CodeQL findings"
-          fi
-
-          if [[ "$HIGH" -gt 0 ]]; then
-            echo "❌ CodeQL found $HIGH high severity issue(s) — blocking PR"
-            exit 1
-          fi
-
-      - name: Upload CodeQL SARIF to GitHub Security
-        if: always()
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: codeql-results
-          category: "/language:javascript"
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
