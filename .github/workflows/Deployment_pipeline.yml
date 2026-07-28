@@ -510,8 +510,8 @@ jobs:
               --arg tag  "$TAG_NAME" \
               --arg name "🚀 ${ENVIRONMENT} | ${TAG_DATE}_${TAG_TIME} | ${VERSION} | ${SAFE_BRANCH}" \
               --arg body "$(printf '%b' "$RELEASE_BODY")" \
-              --argjson latest "$IS_PROD" \
-              '{tag_name: $tag, name: $name, body: $body, draft: false, prerelease: false, make_latest: ($latest | tostring == "true")}')")
+              --arg latest "$IS_PROD" \
+              '{tag_name: $tag, name: $name, body: $body, draft: false, prerelease: false, make_latest: $latest}')")
 
           RELEASE_HTTP=$(echo "$RELEASE_RESPONSE" | tail -1)
           if [[ "$RELEASE_HTTP" == "201" ]]; then
