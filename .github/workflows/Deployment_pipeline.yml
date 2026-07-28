@@ -52,6 +52,11 @@ jobs:
     outputs:
       deploy_package: ${{ steps.resolve-package.outputs.deploy_package }}
       environment: ${{ steps.set-env.outputs.environment }}
+      tag_name: ${{ steps.release-tag.outputs.tag_name }}
+      run_id: ${{ steps.release-tag.outputs.run_id }}
+      actor: ${{ steps.release-tag.outputs.actor }}
+      ref_name: ${{ steps.release-tag.outputs.ref_name }}
+      repo: ${{ steps.release-tag.outputs.repo }}
 
     steps:
       - name: Validate branch-environment consistency
@@ -405,6 +410,7 @@ jobs:
         run: rm -f server.key
 
       - name: Create Release Tag
+        id: release-tag
         if: github.event.inputs.environment == 'PRODUCTION'
         shell: bash
         env:
@@ -498,6 +504,12 @@ jobs:
               --argjson latest "$IS_PROD" \
               '{tag_name: $tag, name: $name, body: $body, draft: false, prerelease: false, make_latest: $latest}')" > /dev/null
 
+          echo "tag_name=${TAG_NAME}" >> $GITHUB_OUTPUT
+          echo "run_id=${RUN_ID}" >> $GITHUB_OUTPUT
+          echo "actor=${ACTOR}" >> $GITHUB_OUTPUT
+          echo "ref_name=${REF_NAME}" >> $GITHUB_OUTPUT
+          echo "repo=${REPO}" >> $GITHUB_OUTPUT
+
           echo "✅ GitHub Release created: $TAG_NAME"
           echo "🔗 https://github.com/${REPO}/releases/tag/${TAG_NAME}"
 
@@ -541,16 +553,35 @@ jobs:
           TICKETS: ${{ steps.extract_tickets.outputs.tickets }}
           ENVIRONMENT: ${{ needs.Deployment_Build.outputs.environment }}
           PAGE_ID: ${{ secrets.CONFLUENCE_PAGE_ID }}
+          PACKAGE: ${{ needs.Deployment_Build.outputs.deploy_package }}
+          TAG_NAME: ${{ needs.Deployment_Build.outputs.tag_name }}
+          RUN_ID: ${{ needs.Deployment_Build.outputs.run_id }}
+          ACTOR: ${{ needs.Deployment_Build.outputs.actor }}
+          REF_NAME: ${{ needs.Deployment_Build.outputs.ref_name }}
+          REPO: ${{ needs.Deployment_Build.outputs.repo }}
         run: |
           echo "📋 Fetching Jira ticket details..."
 
-          RELEASE_DATE=$(TZ='Asia/Kolkata' date +'%Y-%m-%d %H:%M:%S IST')
-          DEPLOYER="${{ github.actor }}"
-          BRANCH="${{ github.ref_name }}"
-          PACKAGE="${{ needs.Deployment_Build.outputs.deploy_package }}"
+          RELEASE_DATE=$(TZ='Asia/Kolkata' date +'%d-%m-%Y %H:%M:%S IST')
+          TAG_URL="https://github.com/${REPO}/releases/tag/${TAG_NAME}"
+          RUN_URL="https://github.com/${REPO}/actions/runs/${RUN_ID}"
 
-          RELEASE_HTML="<h2>🚀 Release - ${ENVIRONMENT} | ${RELEASE_DATE}</h2>"
-          RELEASE_HTML+="<p><strong>Deployed by:</strong> ${DEPLOYER} | <strong>Branch:</strong> ${BRANCH} | <strong>Package:</strong> ${PACKAGE}</p>"
+          # ── Release header block ────────────────────────────────────────────
+          RELEASE_HTML="<h2>🚀 Release — ${ENVIRONMENT} | ${RELEASE_DATE}</h2>"
+          RELEASE_HTML+="<table>"
+          RELEASE_HTML+="<tr><th>Field</th><th>Details</th></tr>"
+          RELEASE_HTML+="<tr><td><strong>Environment</strong></td><td>${ENVIRONMENT}</td></tr>"
+          RELEASE_HTML+="<tr><td><strong>Deployed by</strong></td><td>${ACTOR}</td></tr>"
+          RELEASE_HTML+="<tr><td><strong>Branch</strong></td><td>${REF_NAME}</td></tr>"
+          RELEASE_HTML+="<tr><td><strong>Package(s)</strong></td><td>${PACKAGE}</td></tr>"
+          if [[ -n "$TAG_NAME" ]]; then
+            RELEASE_HTML+="<tr><td><strong>Release Tag</strong></td><td><a href=\"${TAG_URL}\">${TAG_NAME}</a></td></tr>"
+          fi
+          RELEASE_HTML+="<tr><td><strong>GitHub Actions Run</strong></td><td><a href=\"${RUN_URL}\">${RUN_ID}</a></td></tr>"
+          RELEASE_HTML+="</table>"
+
+          # ── Jira tickets table ───────────────────────────────────────────────
+          RELEASE_HTML+="<h3>📋 Jira Tickets</h3>"
           RELEASE_HTML+="<table><tr><th>Ticket</th><th>Summary</th><th>Type</th><th>Status</th><th>Priority</th></tr>"
 
           IFS=',' read -ra TICKET_ARRAY <<< "$TICKETS"
