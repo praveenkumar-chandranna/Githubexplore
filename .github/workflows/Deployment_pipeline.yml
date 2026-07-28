@@ -56,8 +56,11 @@ jobs:
     steps:
       - name: Validate branch-environment consistency
         shell: bash
+        env:
+          INPUT_ENV: ${{ github.event.inputs.environment }}
+          INPUT_FEATURE: ${{ github.event.inputs.Feature_Branch }}
         run: |
-          echo "Manual run: Environment=${{ github.event.inputs.environment }}, Package(s)=${{ github.event.inputs.Feature_Branch }}"
+          echo "Manual run: Environment=${INPUT_ENV}, Package(s)=${INPUT_FEATURE}"
 
       - name: Set environment variables
         id: set-env
@@ -81,24 +84,31 @@ jobs:
         shell: bash
         env:
           FEATURE_INPUT: ${{ github.event.inputs.Feature_Branch }}
+          ENVIRONMENT: ${{ github.event.inputs.environment }}
           MANIFEST_DIR: ${{ github.workspace }}/manifest/feature
           OUTPUT_DIR: ${{ github.workspace }}/manifest
+          GIT_USER_NAME: ${{ secrets.GIT_USER_NAME }}
+          GIT_USER_EMAIL: ${{ secrets.GIT_USER_EMAIL }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
           FEATURE_INPUT=$(echo "$FEATURE_INPUT" | xargs)
 
           if [[ "$FEATURE_INPUT" == *","* ]]; then
             echo "📦 Multiple branches detected — consolidating..."
 
-            RELEASE_DATE=$(date +'%d%m%Y_%H%M')
-            OUTPUT_NAME="Release_${RELEASE_DATE}"
+            RELEASE_DATE=$(TZ='Asia/Kolkata' date +'%d%m%Y_%H%M')
+            OUTPUT_NAME="Release_${ENVIRONMENT}_${RELEASE_DATE}"
             OUTPUT_PKG="${OUTPUT_DIR}/${OUTPUT_NAME}_package.xml"
             OUTPUT_TEST="${OUTPUT_DIR}/${OUTPUT_NAME}_TestClass.txt"
 
             echo "=========================================="
             echo "PACKAGE CONSOLIDATION"
             echo "=========================================="
-            echo "Branches : $FEATURE_INPUT"
-            echo "Output   : $OUTPUT_NAME"
+            echo "Environment : $ENVIRONMENT"
+            echo "Branches    : $FEATURE_INPUT"
+            echo "Output      : $OUTPUT_NAME"
             echo "=========================================="
 
             IFS=',' read -ra BRANCHES <<< "$FEATURE_INPUT"
@@ -197,16 +207,16 @@ jobs:
               cat "$OUTPUT_TEST"
             fi
 
-            git config user.name "${{ secrets.GIT_USER_NAME }}"
-            git config user.email "${{ secrets.GIT_USER_EMAIL }}"
-            git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+            git config user.name "$GIT_USER_NAME"
+            git config user.email "$GIT_USER_EMAIL"
+            git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
             git add "${OUTPUT_DIR}/${OUTPUT_NAME}_package.xml"
             [[ -f "$OUTPUT_TEST" ]] && git add "${OUTPUT_DIR}/${OUTPUT_NAME}_TestClass.txt"
             if git diff --cached --quiet; then
               echo "⚠️ No changes to commit"
             else
-              git commit -m "chore: consolidated package ${OUTPUT_NAME} [skip ci]"
-              git push origin ${{ github.ref_name }}
+              git commit -m "consolidated package ${OUTPUT_NAME} [skip ci]"
+              git push origin "$REF_NAME"
             fi
 
             echo "FEATURE_BRANCH=${OUTPUT_NAME}" >> $GITHUB_ENV
