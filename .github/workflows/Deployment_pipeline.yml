@@ -197,8 +197,8 @@ jobs:
               cat "$OUTPUT_TEST"
             fi
 
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git config user.name "${{ secrets.GIT_USER_NAME }}"
+            git config user.email "${{ secrets.GIT_USER_EMAIL }}"
             git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
             git add "${OUTPUT_DIR}/${OUTPUT_NAME}_package.xml"
             [[ -f "$OUTPUT_TEST" ]] && git add "${OUTPUT_DIR}/${OUTPUT_NAME}_TestClass.txt"
@@ -407,8 +407,8 @@ jobs:
           TAG_NAME="Production/${TAG_DATE}_${SAFE_BRANCH}"
 
           echo "🏷️ Creating git tag: $TAG_NAME"
-          git config user.name "SFDC DevOps"
-          git config user.email "devops.sfdc@lodhagroup.com"
+          git config user.name "${{ secrets.GIT_USER_NAME }}"
+          git config user.email "${{ secrets.GIT_USER_EMAIL }}"
           git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
           git tag -a "$TAG_NAME" -m "Production release ${TAG_DATE} IST | Package: ${FEATURE_BRANCH} | Deployed by: ${{ github.actor }}"
           git push origin "$TAG_NAME"
