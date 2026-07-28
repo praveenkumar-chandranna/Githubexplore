@@ -445,14 +445,18 @@ jobs:
           HAS_SECRET: ${{ steps.gitleaks.outputs.has_secret }}
           HAS_PROFANITY: ${{ steps.gitleaks.outputs.has_profanity }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          ACTOR: ${{ github.actor }}
+          HEAD_REF: ${{ github.head_ref }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
         run: |
           SCAN_TIME=$(TZ='Asia/Kolkata' date +'%d-%m-%Y %H:%M IST')
           PR_COMMENT="## 🚨 PII / Secret / Profanity Detected\n\n"
           PR_COMMENT+="> **This PR is blocked.** Remove all flagged content before requesting review.\n\n"
           PR_COMMENT+="| Field | Value |\n|---|---|\n"
           PR_COMMENT+="| **Scanned at** | ${SCAN_TIME} |\n"
-          PR_COMMENT+="| **Branch** | ${{ github.head_ref }} |\n"
-          PR_COMMENT+="| **Author** | ${{ github.actor }} |\n"
+          PR_COMMENT+="| **Branch** | ${HEAD_REF} |\n"
+          PR_COMMENT+="| **Author** | ${ACTOR} |\n"
           PR_COMMENT+="| **PII findings** | ${HAS_PII} |\n"
           PR_COMMENT+="| **Secret findings** | ${HAS_SECRET} |\n"
           PR_COMMENT+="| **Profanity findings** | ${HAS_PROFANITY} |\n\n"
@@ -467,7 +471,7 @@ jobs:
             -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
+            "https://api.github.com/repos/${REPO}/issues/${PR_NUMBER}/comments" \
             -d "$(jq -n --arg body "$(printf '%b' "$PR_COMMENT")" '{body: $body}')"
 
           echo "✅ PR comment posted with findings"
@@ -481,15 +485,21 @@ jobs:
           HAS_PII: ${{ steps.gitleaks.outputs.has_pii }}
           HAS_SECRET: ${{ steps.gitleaks.outputs.has_secret }}
           HAS_PROFANITY: ${{ steps.gitleaks.outputs.has_profanity }}
+          ACTOR: ${{ github.actor }}
+          HEAD_REF: ${{ github.head_ref }}
+          BASE_REF: ${{ github.base_ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
         run: |
           SCAN_TIME=$(TZ='Asia/Kolkata' date +'%d-%m-%Y %H:%M IST')
           ISSUE_BODY="## 🚨 PII / Secret / Profanity Detected in PR\n\n"
           ISSUE_BODY+="| Field | Value |\n|---|---|\n"
           ISSUE_BODY+="| **Detected at** | ${SCAN_TIME} |\n"
-          ISSUE_BODY+="| **PR** | #${{ github.event.pull_request.number }} |\n"
-          ISSUE_BODY+="| **Branch** | ${{ github.head_ref }} → ${{ github.base_ref }} |\n"
-          ISSUE_BODY+="| **Author** | ${{ github.actor }} |\n"
-          ISSUE_BODY+="| **Workflow Run** | [${{ github.run_id }}](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) |\n"
+          ISSUE_BODY+="| **PR** | #${PR_NUMBER} |\n"
+          ISSUE_BODY+="| **Branch** | ${HEAD_REF} → ${BASE_REF} |\n"
+          ISSUE_BODY+="| **Author** | ${ACTOR} |\n"
+          ISSUE_BODY+="| **Workflow Run** | [${RUN_ID}](https://github.com/${REPO}/actions/runs/${RUN_ID}) |\n"
           ISSUE_BODY+="| **PII findings** | ${HAS_PII} |\n"
           ISSUE_BODY+="| **Secret findings** | ${HAS_SECRET} |\n"
           ISSUE_BODY+="| **Profanity findings** | ${HAS_PROFANITY} |\n\n"
@@ -500,9 +510,9 @@ jobs:
             -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
-            https://api.github.com/repos/${{ github.repository }}/issues \
+            https://api.github.com/repos/${REPO}/issues \
             -d "$(jq -n \
-              --arg title "🚨 [PII/Secret Alert] PR #${{ github.event.pull_request.number }} by ${{ github.actor }}" \
+              --arg title "🚨 [PII/Secret Alert] PR #${PR_NUMBER} by ${ACTOR}" \
               --arg body "$(printf '%b' "$ISSUE_BODY")" \
               '{title: $title, body: $body, labels: ["security", "pii-alert", "devops-admin"]}')"
 
