@@ -53,10 +53,10 @@ jobs:
       deploy_package: ${{ steps.resolve-package.outputs.deploy_package }}
       environment: ${{ steps.set-env.outputs.environment }}
       tag_name: ${{ steps.release-tag.outputs.tag_name }}
-      run_id: ${{ steps.release-tag.outputs.run_id }}
-      actor: ${{ steps.release-tag.outputs.actor }}
-      ref_name: ${{ steps.release-tag.outputs.ref_name }}
-      repo: ${{ steps.release-tag.outputs.repo }}
+      run_id: ${{ steps.set-run-meta.outputs.run_id }}
+      actor: ${{ steps.set-run-meta.outputs.actor }}
+      ref_name: ${{ steps.set-run-meta.outputs.ref_name }}
+      repo: ${{ steps.set-run-meta.outputs.repo }}
 
     steps:
       - name: Validate branch-environment consistency
