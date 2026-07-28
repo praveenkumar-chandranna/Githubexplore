@@ -530,10 +530,33 @@ jobs:
           echo "ref_name=${REF_NAME}" >> $GITHUB_OUTPUT
           echo "repo=${REPO}" >> $GITHUB_OUTPUT
 
+  Deployment_Success:
+    runs-on: ubuntu-latest
+    needs: Deployment_Build
+    if: needs.Deployment_Build.result == 'success' && needs.Deployment_Build.outputs.environment != 'PRODUCTION'
+    steps:
+      - name: Deployment Successful
+        shell: bash
+        env:
+          ENVIRONMENT: ${{ needs.Deployment_Build.outputs.environment }}
+          PACKAGE: ${{ needs.Deployment_Build.outputs.deploy_package }}
+          ACTOR: ${{ needs.Deployment_Build.outputs.actor }}
+          RUN_ID: ${{ needs.Deployment_Build.outputs.run_id }}
+          REPO: ${{ needs.Deployment_Build.outputs.repo }}
+        run: |
+          echo "=========================================="
+          echo "✅ DEPLOYMENT SUCCESSFUL"
+          echo "=========================================="
+          echo "  Environment : $ENVIRONMENT"
+          echo "  Package     : $PACKAGE"
+          echo "  Deployed by : $ACTOR"
+          echo "  Run         : https://github.com/${REPO}/actions/runs/${RUN_ID}"
+          echo "=========================================="
+
   Update_Release_Notes:
     runs-on: ubuntu-latest
     needs: Deployment_Build
-    if: needs.Deployment_Build.result == 'success'
+    if: needs.Deployment_Build.result == 'success' && needs.Deployment_Build.outputs.environment == 'PRODUCTION'
 
     env:
       JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
