@@ -49,7 +49,7 @@ jobs:
       SF_LOGIN_URL_TEST: ${{ secrets.SANDBOX_URL }}
       SF_LOGIN_URL_PROD: ${{ secrets.LOGIN_URL }}
       # gh CLI uses this automatically for all API calls including PR creation
-      GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+      GH_TOKEN: ${{ secrets.GH_PAT }}
 
     steps:
 
@@ -377,7 +377,7 @@ jobs:
         id: raise-pr
         shell: bash
         env:
-          GH_TOKEN:       ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+          GH_TOKEN:       ${{ secrets.GH_PAT }}
           FEATURE_BRANCH: ${{ steps.resolve.outputs.FEATURE_BRANCH }}
           TARGET_BRANCH:  ${{ steps.resolve.outputs.TARGET_BRANCH }}
           ENVIRONMENT:    ${{ steps.resolve.outputs.ENVIRONMENT }}
@@ -392,6 +392,13 @@ jobs:
           RUN_ID:         ${{ github.run_id }}
           REPO:           ${{ github.repository }}
         run: |
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo "❌ GH_PAT secret is not set. Cannot create PR."
+            echo "   → Repo Settings → Secrets → Actions → add GH_PAT"
+            echo "   → Fine-grained PAT with Contents + Pull Requests read/write"
+            exit 1
+          fi
+
           RETRIEVE_TIME=$(TZ='Asia/Kolkata' date +'%d-%m-%Y %H:%M IST')
           RUN_URL="https://github.com/${REPO}/actions/runs/${RUN_ID}"
           TRIGGER="Scheduled"
