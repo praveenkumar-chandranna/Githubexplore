@@ -1,0 +1,226 @@
+name: Lodha Rollback Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit_id:
+        type: string
+        description: >
+          Commit SHA to rollback to (full or short). Find it in GitHub commit history or release tags.
+        required: true
+      package_path:
+        type: string
+        description: >
+          Relative path to package.xml from repo root. Example: manifest/feature/LODHA-123_package.xml
+        required: true
+      environment:
+        type: choice
+        description: Target environment to rollback
+        options:
+          - DEV
+          - QA
+          - UAT
+          - PRODUCTION
+          - HOTFIX
+        default: DEV
+        required: true
+      testlevel:
+        type: choice
+        description: Test class run level
+        options:
+          - RunLocalTests
+          - RunSpecifiedTests
+          - RunAllTestsInOrg
+          - NoTestRun
+        default: RunLocalTests
+        required: true
+      test_classes:
+        type: string
+        description: >
+          Space-separated test class names (only required if testlevel is RunSpecifiedTests)
+        required: false
+
+jobs:
+  Rollback_Build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    env:
+      SF_LOGIN_URL_TEST: ${{ secrets.SANDBOX_URL }}
+      SF_LOGIN_URL_PROD: ${{ secrets.LOGIN_URL }}
+      SF_ALIAS: lodhaOrg
+
+    if: >
+      (github.event_name == 'workflow_dispatch' &&
+       (
+         (github.ref == 'refs/heads/DEV'  && github.event.inputs.environment == 'DEV') ||
+         (github.ref == 'refs/heads/QA'   && github.event.inputs.environment == 'QA') ||
+         (github.ref == 'refs/heads/UAT'  && github.event.inputs.environment == 'UAT') ||
+         (github.ref == 'refs/heads/main' && github.event.inputs.environment == 'PRODUCTION') ||
+         (github.ref == 'refs/heads/main' && github.event.inputs.environment == 'HOTFIX')
+       ))
+
+    steps:
+      - name: Print Rollback Info
+        shell: bash
+        env:
+          COMMIT_ID: ${{ github.event.inputs.commit_id }}
+          ENVIRONMENT: ${{ github.event.inputs.environment }}
+          PACKAGE_PATH: ${{ github.event.inputs.package_path }}
+          TEST_LEVEL: ${{ github.event.inputs.testlevel }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          echo "=========================================="
+          echo "ROLLBACK INITIATED"
+          echo "=========================================="
+          echo "  Commit ID   : $COMMIT_ID"
+          echo "  Environment : $ENVIRONMENT"
+          echo "  Package     : $PACKAGE_PATH"
+          echo "  Test Level  : $TEST_LEVEL"
+          echo "  Triggered by: $ACTOR"
+          echo "=========================================="
+
+      - name: Checkout repo at commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.inputs.commit_id }}
+          fetch-depth: 0
+
+      - name: Verify commit and package.xml exist
+        shell: bash
+        env:
+          COMMIT_ID: ${{ github.event.inputs.commit_id }}
+          PACKAGE_PATH: ${{ github.event.inputs.package_path }}
+          WORKSPACE: ${{ github.workspace }}
+        run: |
+          RESOLVED=$(git rev-parse HEAD)
+          echo "✅ Checked out commit: $RESOLVED"
+
+          MANIFEST="${WORKSPACE}/${PACKAGE_PATH}"
+          if [[ ! -f "$MANIFEST" ]]; then
+            echo "❌ package.xml not found at commit $RESOLVED: $MANIFEST"
+            exit 1
+          fi
+          echo "✅ package.xml found: $MANIFEST"
+          echo ""
+          echo "📦 Package contents:"
+          cat "$MANIFEST"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Install Salesforce CLI
+        run: |
+          npm install -g @salesforce/cli@latest
+          sf --version
+
+      - name: Generate JWT private key file
+        run: |
+          echo "${{ secrets.SALESFORCE_JWT_SECRET_KEY }}" > server.key
+          chmod 600 server.key
+
+      - name: Set org credentials based on environment
+        id: set-org
+        shell: bash
+        env:
+          ENVIRONMENT: ${{ github.event.inputs.environment }}
+          SF_LOGIN_URL_TEST_VAL: ${{ env.SF_LOGIN_URL_TEST }}
+          SF_LOGIN_URL_PROD_VAL: ${{ env.SF_LOGIN_URL_PROD }}
+          KEY_DEV: ${{ secrets.SALESFORCE_CONSUMER_KEY_DEV }}
+          KEY_QA: ${{ secrets.SALESFORCE_CONSUMER_KEY_QA }}
+          KEY_UAT: ${{ secrets.SALESFORCE_CONSUMER_KEY_UAT }}
+          KEY_PROD: ${{ secrets.SALESFORCE_CONSUMER_KEY_PROD }}
+          KEY_HOTFIX: ${{ secrets.SALESFORCE_CONSUMER_KEY_HOTFIX }}
+          USER_DEV: ${{ secrets.SFDX_AUTH_DEV_USERNAME }}
+          USER_QA: ${{ secrets.SFDX_AUTH_QA_USERNAME }}
+          USER_UAT: ${{ secrets.SFDX_AUTH_UAT_USERNAME }}
+          USER_PROD: ${{ secrets.SFDX_AUTH_PROD_USERNAME }}
+          USER_HOTFIX: ${{ secrets.SFDX_AUTH_HOTFIX_USERNAME }}
+        run: |
+          case "$ENVIRONMENT" in
+            DEV)        echo "CLIENT_ID=$KEY_DEV"    >> $GITHUB_OUTPUT; echo "USERNAME=$USER_DEV"    >> $GITHUB_OUTPUT; echo "LOGIN_URL=$SF_LOGIN_URL_TEST_VAL" >> $GITHUB_OUTPUT ;;
+            QA)         echo "CLIENT_ID=$KEY_QA"     >> $GITHUB_OUTPUT; echo "USERNAME=$USER_QA"     >> $GITHUB_OUTPUT; echo "LOGIN_URL=$SF_LOGIN_URL_TEST_VAL" >> $GITHUB_OUTPUT ;;
+            UAT)        echo "CLIENT_ID=$KEY_UAT"    >> $GITHUB_OUTPUT; echo "USERNAME=$USER_UAT"    >> $GITHUB_OUTPUT; echo "LOGIN_URL=$SF_LOGIN_URL_TEST_VAL" >> $GITHUB_OUTPUT ;;
+            PRODUCTION) echo "CLIENT_ID=$KEY_PROD"   >> $GITHUB_OUTPUT; echo "USERNAME=$USER_PROD"   >> $GITHUB_OUTPUT; echo "LOGIN_URL=$SF_LOGIN_URL_PROD_VAL" >> $GITHUB_OUTPUT ;;
+            HOTFIX)     echo "CLIENT_ID=$KEY_HOTFIX" >> $GITHUB_OUTPUT; echo "USERNAME=$USER_HOTFIX" >> $GITHUB_OUTPUT; echo "LOGIN_URL=$SF_LOGIN_URL_TEST_VAL" >> $GITHUB_OUTPUT ;;
+            *) echo "Unsupported environment $ENVIRONMENT"; exit 1 ;;
+          esac
+
+      - name: Clear Prior Salesforce Sessions
+        shell: bash
+        run: sf org logout --all --no-prompt || true
+
+      - name: Authenticate to ${{ github.event.inputs.environment }} Org
+        env:
+          CLIENT_ID: ${{ steps.set-org.outputs.CLIENT_ID }}
+          USERNAME: ${{ steps.set-org.outputs.USERNAME }}
+          LOGIN_URL: ${{ steps.set-org.outputs.LOGIN_URL }}
+        run: |
+          sf org login jwt \
+            --client-id "$CLIENT_ID" \
+            --jwt-key-file server.key \
+            --username "$USERNAME" \
+            --instance-url "$LOGIN_URL" \
+            --set-default
+
+      - name: Validate Rollback Deployment
+        shell: bash
+        env:
+          WORKSPACE: ${{ github.workspace }}
+          PACKAGE_PATH: ${{ github.event.inputs.package_path }}
+          TEST_LEVEL: ${{ github.event.inputs.testlevel }}
+          TEST_CLASSES: ${{ github.event.inputs.test_classes }}
+          ORG_USERNAME: ${{ steps.set-org.outputs.USERNAME }}
+        run: |
+          MANIFEST="${WORKSPACE}/${PACKAGE_PATH}"
+          echo "🔍 Validating rollback: $MANIFEST"
+          CMD=(sf project deploy validate --manifest "$MANIFEST" --target-org "$ORG_USERNAME" --test-level "$TEST_LEVEL" --wait 30 --ignore-warnings --verbose)
+          if [[ "$TEST_LEVEL" == "RunSpecifiedTests" && -n "$TEST_CLASSES" ]]; then
+            CMD+=(--tests $TEST_CLASSES)
+          fi
+          "${CMD[@]}"
+
+      - name: Deploy Rollback to ${{ github.event.inputs.environment }}
+        shell: bash
+        env:
+          WORKSPACE: ${{ github.workspace }}
+          PACKAGE_PATH: ${{ github.event.inputs.package_path }}
+          TEST_LEVEL: ${{ github.event.inputs.testlevel }}
+          TEST_CLASSES: ${{ github.event.inputs.test_classes }}
+          ORG_USERNAME: ${{ steps.set-org.outputs.USERNAME }}
+        run: |
+          MANIFEST="${WORKSPACE}/${PACKAGE_PATH}"
+          echo "🔄 Deploying rollback: $MANIFEST"
+          CMD=(sf project deploy start --manifest "$MANIFEST" --target-org "$ORG_USERNAME" --test-level "$TEST_LEVEL" --wait 30 --ignore-conflicts --coverage-formatters json --results-dir coverage-results)
+          if [[ "$TEST_LEVEL" == "RunSpecifiedTests" && -n "$TEST_CLASSES" ]]; then
+            CMD+=(--tests $TEST_CLASSES)
+          fi
+          "${CMD[@]}"
+
+      - name: Cleanup JWT key
+        if: always()
+        run: rm -f server.key
+
+      - name: Rollback Summary
+        if: success()
+        shell: bash
+        env:
+          COMMIT_ID: ${{ github.event.inputs.commit_id }}
+          ENVIRONMENT: ${{ github.event.inputs.environment }}
+          PACKAGE_PATH: ${{ github.event.inputs.package_path }}
+          ACTOR: ${{ github.actor }}
+          RUN_ID: ${{ github.run_id }}
+          REPO: ${{ github.repository }}
+        run: |
+          echo "=========================================="
+          echo "✅ ROLLBACK SUCCESSFUL"
+          echo "=========================================="
+          echo "  Environment : $ENVIRONMENT"
+          echo "  Rolled back to commit: $COMMIT_ID"
+          echo "  Package     : $PACKAGE_PATH"
+          echo "  Rolled back by: $ACTOR"
+          echo "  Run: https://github.com/${REPO}/actions/runs/${RUN_ID}"
+          echo "=========================================="
