@@ -14,9 +14,9 @@ name: Lodha Salesforce Code Retrieval Pipeline
 
 on:
   schedule:
-    - cron: '0 1 * * *'      # DEV       — 06:30 IST daily
-    - cron: '30 1 * * *'     # QA        — 07:00 IST daily
-    - cron: '0 2 * * *'      # UAT       — 07:30 IST daily
+    - cron: '0 1 * * *'      # DEV        — 06:30 IST daily
+    - cron: '30 1 * * *'     # QA         — 07:00 IST daily
+    - cron: '0 2 * * *'      # UAT        — 07:30 IST daily
     - cron: '30 2 * * *'     # PRODUCTION — 08:00 IST daily
 
   workflow_dispatch:
@@ -35,7 +35,7 @@ on:
       package_path:
         type: string
         description: >
-          Relative path to package.xml. Defaults to manifest/package.xml if left blank.
+          Relative path to retrieval package.xml. Defaults to manifest/package.xml if blank.
         required: false
 
 jobs:
@@ -50,9 +50,8 @@ jobs:
       SF_LOGIN_URL_PROD: ${{ secrets.LOGIN_URL }}
 
     steps:
-      # ── Step 1: Resolve environment ─────────────────────────────────────────
-      # For scheduled runs, map the cron trigger time → environment.
-      # For manual runs, use the selected input.
+
+      # ── Step 1: Resolve environment, branch name, package path ──────────────
       - name: Resolve environment and branch
         id: resolve
         shell: bash
@@ -62,10 +61,10 @@ jobs:
           INPUT_PKG: ${{ github.event.inputs.package_path }}
           GITHUB_SCHEDULE: ${{ github.event.schedule }}
         run: |
+          # ── Determine environment ──────────────────────────────────────────
           if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
             ENVIRONMENT="$INPUT_ENV"
           else
-            # Map cron expression → environment
             case "$GITHUB_SCHEDULE" in
               '0 1 * * *')   ENVIRONMENT="DEV"        ;;
               '30 1 * * *')  ENVIRONMENT="QA"         ;;
@@ -75,7 +74,7 @@ jobs:
             esac
           fi
 
-          # Map environment → repo branch
+          # ── Map environment → repo branch ──────────────────────────────────
           case "$ENVIRONMENT" in
             DEV)        TARGET_BRANCH="DEV"  ;;
             QA)         TARGET_BRANCH="QA"   ;;
@@ -85,40 +84,42 @@ jobs:
             *) echo "❌ Unknown environment: $ENVIRONMENT"; exit 1 ;;
           esac
 
-          # Package path — use input if provided, else default
-          if [[ -n "$INPUT_PKG" ]]; then
-            PACKAGE_PATH="$INPUT_PKG"
-          else
-            PACKAGE_PATH="manifest/package.xml"
-          fi
+          # ── Package path ───────────────────────────────────────────────────
+          PACKAGE_PATH="${INPUT_PKG:-manifest/package.xml}"
 
+          # ── Branch name: feature/{ENV}Code_{ddmmyyyy}_{HHMM} ──────────────
           RETRIEVE_DATE=$(TZ='Asia/Kolkata' date +'%d%m%Y_%H%M')
-          RETRIEVE_BRANCH="retrieve/${ENVIRONMENT}/${RETRIEVE_DATE}"
+          FEATURE_BRANCH="feature/${ENVIRONMENT}Code_${RETRIEVE_DATE}"
 
-          echo "ENVIRONMENT=${ENVIRONMENT}"         >> $GITHUB_OUTPUT
-          echo "TARGET_BRANCH=${TARGET_BRANCH}"     >> $GITHUB_OUTPUT
-          echo "RETRIEVE_BRANCH=${RETRIEVE_BRANCH}" >> $GITHUB_OUTPUT
-          echo "RETRIEVE_DATE=${RETRIEVE_DATE}"     >> $GITHUB_OUTPUT
-          echo "PACKAGE_PATH=${PACKAGE_PATH}"       >> $GITHUB_OUTPUT
+          # ── Generated package.xml output path ─────────────────────────────
+          GENERATED_PKG="manifest/feature/${ENVIRONMENT}Code_${RETRIEVE_DATE}_package.xml"
+
+          echo "ENVIRONMENT=${ENVIRONMENT}"       >> $GITHUB_OUTPUT
+          echo "TARGET_BRANCH=${TARGET_BRANCH}"   >> $GITHUB_OUTPUT
+          echo "FEATURE_BRANCH=${FEATURE_BRANCH}" >> $GITHUB_OUTPUT
+          echo "RETRIEVE_DATE=${RETRIEVE_DATE}"   >> $GITHUB_OUTPUT
+          echo "PACKAGE_PATH=${PACKAGE_PATH}"     >> $GITHUB_OUTPUT
+          echo "GENERATED_PKG=${GENERATED_PKG}"   >> $GITHUB_OUTPUT
 
           echo "=========================================="
           echo "RETRIEVAL CONFIGURATION"
           echo "=========================================="
-          echo "  Trigger         : $EVENT_NAME"
-          echo "  Environment     : $ENVIRONMENT"
-          echo "  Target Branch   : $TARGET_BRANCH"
-          echo "  Retrieve Branch : $RETRIEVE_BRANCH"
-          echo "  Package         : $PACKAGE_PATH"
-          echo "  Triggered by    : ${{ github.actor }}"
+          echo "  Trigger        : $EVENT_NAME"
+          echo "  Environment    : $ENVIRONMENT"
+          echo "  Target Branch  : $TARGET_BRANCH"
+          echo "  Feature Branch : $FEATURE_BRANCH"
+          echo "  Retrieve Pkg   : $PACKAGE_PATH"
+          echo "  Generated Pkg  : $GENERATED_PKG"
+          echo "  Triggered by   : ${{ github.actor }}"
           echo "=========================================="
 
-      # ── Step 2: Checkout target env branch ──────────────────────────────────
+      # ── Step 2: Checkout target env branch using PAT ────────────────────────
       - name: Checkout ${{ steps.resolve.outputs.TARGET_BRANCH }} branch
         uses: actions/checkout@v7
         with:
           ref: ${{ steps.resolve.outputs.TARGET_BRANCH }}
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.GH_PAT }}
 
       # ── Step 3: Tooling setup ────────────────────────────────────────────────
       - name: Setup Node.js
@@ -144,15 +145,15 @@ jobs:
           ENVIRONMENT: ${{ steps.resolve.outputs.ENVIRONMENT }}
           SF_LOGIN_URL_TEST_VAL: ${{ env.SF_LOGIN_URL_TEST }}
           SF_LOGIN_URL_PROD_VAL: ${{ env.SF_LOGIN_URL_PROD }}
-          KEY_DEV: ${{ secrets.SALESFORCE_CONSUMER_KEY_DEV }}
-          KEY_QA: ${{ secrets.SALESFORCE_CONSUMER_KEY_QA }}
-          KEY_UAT: ${{ secrets.SALESFORCE_CONSUMER_KEY_UAT }}
-          KEY_PROD: ${{ secrets.SALESFORCE_CONSUMER_KEY_PROD }}
+          KEY_DEV:    ${{ secrets.SALESFORCE_CONSUMER_KEY_DEV }}
+          KEY_QA:     ${{ secrets.SALESFORCE_CONSUMER_KEY_QA }}
+          KEY_UAT:    ${{ secrets.SALESFORCE_CONSUMER_KEY_UAT }}
+          KEY_PROD:   ${{ secrets.SALESFORCE_CONSUMER_KEY_PROD }}
           KEY_HOTFIX: ${{ secrets.SALESFORCE_CONSUMER_KEY_HOTFIX }}
-          USER_DEV: ${{ secrets.SFDX_AUTH_DEV_USERNAME }}
-          USER_QA: ${{ secrets.SFDX_AUTH_QA_USERNAME }}
-          USER_UAT: ${{ secrets.SFDX_AUTH_UAT_USERNAME }}
-          USER_PROD: ${{ secrets.SFDX_AUTH_PROD_USERNAME }}
+          USER_DEV:    ${{ secrets.SFDX_AUTH_DEV_USERNAME }}
+          USER_QA:     ${{ secrets.SFDX_AUTH_QA_USERNAME }}
+          USER_UAT:    ${{ secrets.SFDX_AUTH_UAT_USERNAME }}
+          USER_PROD:   ${{ secrets.SFDX_AUTH_PROD_USERNAME }}
           USER_HOTFIX: ${{ secrets.SFDX_AUTH_HOTFIX_USERNAME }}
         run: |
           case "$ENVIRONMENT" in
@@ -169,18 +170,18 @@ jobs:
       - name: Authenticate to ${{ steps.resolve.outputs.ENVIRONMENT }} Org
         env:
           CLIENT_ID: ${{ steps.set-org.outputs.CLIENT_ID }}
-          USERNAME: ${{ steps.set-org.outputs.USERNAME }}
+          USERNAME:  ${{ steps.set-org.outputs.USERNAME }}
           LOGIN_URL: ${{ steps.set-org.outputs.LOGIN_URL }}
         run: |
           sf org login jwt \
-            --client-id "$CLIENT_ID" \
+            --client-id  "$CLIENT_ID" \
             --jwt-key-file server.key \
-            --username "$USERNAME" \
+            --username   "$USERNAME" \
             --instance-url "$LOGIN_URL" \
             --set-default
 
-      # ── Step 5: Retrieve metadata ────────────────────────────────────────────
-      - name: Validate package.xml exists
+      # ── Step 5: Validate retrieval package.xml ───────────────────────────────
+      - name: Validate retrieval package.xml exists
         shell: bash
         env:
           PACKAGE_PATH: ${{ steps.resolve.outputs.PACKAGE_PATH }}
@@ -192,93 +193,153 @@ jobs:
           echo "✅ Using package: $PACKAGE_PATH"
           cat "$PACKAGE_PATH"
 
+      # ── Step 6: Retrieve metadata ────────────────────────────────────────────
       - name: Retrieve metadata from ${{ steps.resolve.outputs.ENVIRONMENT }} Org
         shell: bash
         env:
           PACKAGE_PATH: ${{ steps.resolve.outputs.PACKAGE_PATH }}
           ORG_USERNAME: ${{ steps.set-org.outputs.USERNAME }}
         run: |
-          echo "⬇️  Retrieving metadata..."
+          echo "⬇️  Retrieving metadata using: $PACKAGE_PATH"
           sf project retrieve start \
-            --manifest "$PACKAGE_PATH" \
-            --target-org "$ORG_USERNAME" \
+            --manifest    "$PACKAGE_PATH" \
+            --target-org  "$ORG_USERNAME" \
             --wait 30
           echo "✅ Retrieval complete"
+
+      # ── Step 7: Generate package.xml from retrieved files ────────────────────
+      - name: Generate package.xml for retrieved metadata
+        id: gen-pkg
+        shell: bash
+        env:
+          GENERATED_PKG: ${{ steps.resolve.outputs.GENERATED_PKG }}
+          ORG_USERNAME:  ${{ steps.set-org.outputs.USERNAME }}
+        run: |
+          mkdir -p "$(dirname "$GENERATED_PKG")"
+
+          echo "📦 Generating package.xml from retrieved source..."
+          sf project generate manifest \
+            --source-dir force-app \
+            --output-dir "$(dirname "$GENERATED_PKG")" \
+            --name "$(basename "$GENERATED_PKG" .xml)"
+
+          # sf generates as <name>.xml — verify it exists
+          if [[ -f "$GENERATED_PKG" ]]; then
+            echo "✅ Generated: $GENERATED_PKG"
+            echo ""
+            echo "=========================================="
+            echo "📦 GENERATED PACKAGE.XML"
+            echo "=========================================="
+            cat "$GENERATED_PKG"
+            echo "=========================================="
+          else
+            echo "⚠️  sf generate manifest did not produce expected file."
+            echo "    Falling back to building package.xml from changed files..."
+
+            # Fallback: build package.xml by scanning retrieved file paths
+            API_VERSION=$(grep -oP '(?<=sourceApiVersion": ")[^"]+' sfdx-project.json || echo "67.0")
+
+            declare -A TYPE_MEMBERS
+
+            while IFS= read -r FPATH; do
+              [[ -z "$FPATH" ]] && continue
+              # Extract metadata type from path: force-app/main/default/{type}/...
+              META_TYPE=$(echo "$FPATH" | grep -oP 'force-app/main/default/\K[^/]+')
+              MEMBER=$(basename "$FPATH" | sed 's/\.[^.]*$//' | sed 's/-meta$//')
+              [[ -z "$META_TYPE" || -z "$MEMBER" ]] && continue
+              TYPE_MEMBERS["$META_TYPE"]+="${MEMBER}"$'\n'
+            done < <(git diff --name-only HEAD 2>/dev/null; git ls-files --others --exclude-standard force-app/)
+
+            {
+              printf '<?xml version="1.0" encoding="UTF-8"?>\n'
+              printf '<Package xmlns="http://soap.sforce.com/2006/04/metadata">\n'
+              for TYPE in $(echo "${!TYPE_MEMBERS[@]}" | tr ' ' '\n' | sort); do
+                printf '    <types>\n'
+                echo "${TYPE_MEMBERS[$TYPE]}" | sort -u | grep -v '^$' | while read -r M; do
+                  printf '        <members>%s</members>\n' "$M"
+                done
+                printf '        <name>%s</name>\n' "$TYPE"
+                printf '    </types>\n'
+              done
+              printf '    <version>%s</version>\n' "$API_VERSION"
+              printf '</Package>\n'
+            } > "$GENERATED_PKG"
+
+            echo "✅ Fallback package.xml generated: $GENERATED_PKG"
+            cat "$GENERATED_PKG"
+          fi
 
       - name: Cleanup JWT key
         if: always()
         run: rm -f server.key
 
-      # ── Step 6: Detect changes ───────────────────────────────────────────────
+      # ── Step 8: Detect changes ───────────────────────────────────────────────
       - name: Check for changes
         id: check-changes
         shell: bash
         run: |
           git add -A
           CHANGED=$(git diff --cached --name-only | wc -l | xargs)
-
           echo "changed_count=${CHANGED}" >> $GITHUB_OUTPUT
 
           if [[ "$CHANGED" -eq 0 ]]; then
             echo "has_changes=false" >> $GITHUB_OUTPUT
-            echo "⚠️  No metadata changes detected — org is in sync with branch."
+            echo "⚠️  No metadata changes — org is already in sync with branch."
           else
             echo "has_changes=true" >> $GITHUB_OUTPUT
-            echo "✅ ${CHANGED} file(s) changed:"
+            echo "✅ ${CHANGED} file(s) staged:"
             echo "=========================================="
             git diff --cached --name-status
             echo "=========================================="
           fi
 
-      # ── Step 7: Create branch, commit, push ─────────────────────────────────
-      - name: Create retrieve branch and push
+      # ── Step 9: Create feature branch, commit, push ──────────────────────────
+      - name: Create feature branch and push
         if: steps.check-changes.outputs.has_changes == 'true'
-        id: push
         shell: bash
         env:
-          RETRIEVE_BRANCH: ${{ steps.resolve.outputs.RETRIEVE_BRANCH }}
-          TARGET_BRANCH: ${{ steps.resolve.outputs.TARGET_BRANCH }}
-          ENVIRONMENT: ${{ steps.resolve.outputs.ENVIRONMENT }}
-          RETRIEVE_DATE: ${{ steps.resolve.outputs.RETRIEVE_DATE }}
-          GIT_USER_NAME: ${{ secrets.GIT_USER_NAME }}
+          FEATURE_BRANCH: ${{ steps.resolve.outputs.FEATURE_BRANCH }}
+          ENVIRONMENT:    ${{ steps.resolve.outputs.ENVIRONMENT }}
+          RETRIEVE_DATE:  ${{ steps.resolve.outputs.RETRIEVE_DATE }}
+          GIT_USER_NAME:  ${{ secrets.GIT_USER_NAME }}
           GIT_USER_EMAIL: ${{ secrets.GIT_USER_EMAIL }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-          ACTOR: ${{ github.actor }}
-          EVENT_NAME: ${{ github.event_name }}
+          GH_PAT:         ${{ secrets.GH_PAT }}
+          REPO:           ${{ github.repository }}
+          ACTOR:          ${{ github.actor }}
+          EVENT_NAME:     ${{ github.event_name }}
         run: |
-          git config user.name "$GIT_USER_NAME"
+          git config user.name  "$GIT_USER_NAME"
           git config user.email "$GIT_USER_EMAIL"
-          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+          git remote set-url origin "https://x-access-token:${GH_PAT}@github.com/${REPO}.git"
 
-          # Branch from target env branch
-          git checkout -b "$RETRIEVE_BRANCH"
+          git checkout -b "$FEATURE_BRANCH"
 
           TRIGGER="scheduled"
           [[ "$EVENT_NAME" == "workflow_dispatch" ]] && TRIGGER="manual by ${ACTOR}"
 
           git commit -m "retrieve(${ENVIRONMENT}): org sync ${RETRIEVE_DATE} [${TRIGGER}] [skip ci]"
-          git push origin "$RETRIEVE_BRANCH"
+          git push origin "$FEATURE_BRANCH"
 
-          echo "✅ Pushed: $RETRIEVE_BRANCH"
+          echo "✅ Pushed: $FEATURE_BRANCH"
 
-      # ── Step 8: Raise PR ─────────────────────────────────────────────────────
+      # ── Step 10: Raise PR → target env branch ────────────────────────────────
       - name: Raise Pull Request → ${{ steps.resolve.outputs.TARGET_BRANCH }}
         if: steps.check-changes.outputs.has_changes == 'true'
         id: raise-pr
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-          RETRIEVE_BRANCH: ${{ steps.resolve.outputs.RETRIEVE_BRANCH }}
-          TARGET_BRANCH: ${{ steps.resolve.outputs.TARGET_BRANCH }}
-          ENVIRONMENT: ${{ steps.resolve.outputs.ENVIRONMENT }}
-          PACKAGE_PATH: ${{ steps.resolve.outputs.PACKAGE_PATH }}
-          RETRIEVE_DATE: ${{ steps.resolve.outputs.RETRIEVE_DATE }}
-          CHANGED_COUNT: ${{ steps.check-changes.outputs.changed_count }}
-          ACTOR: ${{ github.actor }}
-          EVENT_NAME: ${{ github.event_name }}
-          RUN_ID: ${{ github.run_id }}
+          GH_PAT:          ${{ secrets.GH_PAT }}
+          REPO:            ${{ github.repository }}
+          FEATURE_BRANCH:  ${{ steps.resolve.outputs.FEATURE_BRANCH }}
+          TARGET_BRANCH:   ${{ steps.resolve.outputs.TARGET_BRANCH }}
+          ENVIRONMENT:     ${{ steps.resolve.outputs.ENVIRONMENT }}
+          PACKAGE_PATH:    ${{ steps.resolve.outputs.PACKAGE_PATH }}
+          GENERATED_PKG:   ${{ steps.resolve.outputs.GENERATED_PKG }}
+          RETRIEVE_DATE:   ${{ steps.resolve.outputs.RETRIEVE_DATE }}
+          CHANGED_COUNT:   ${{ steps.check-changes.outputs.changed_count }}
+          ACTOR:           ${{ github.actor }}
+          EVENT_NAME:      ${{ github.event_name }}
+          RUN_ID:          ${{ github.run_id }}
         run: |
           RETRIEVE_TIME=$(TZ='Asia/Kolkata' date +'%d-%m-%Y %H:%M IST')
           RUN_URL="https://github.com/${REPO}/actions/runs/${RUN_ID}"
@@ -290,28 +351,30 @@ jobs:
           PR_BODY="## ⬇️ Salesforce Metadata Retrieval — ${ENVIRONMENT}\n\n"
           PR_BODY+="| Field | Value |\n|---|---|\n"
           PR_BODY+="| **Environment** | \`${ENVIRONMENT}\` |\n"
-          PR_BODY+="| **Retrieve Branch** | \`${RETRIEVE_BRANCH}\` |\n"
+          PR_BODY+="| **Feature Branch** | \`${FEATURE_BRANCH}\` |\n"
           PR_BODY+="| **Target Branch** | \`${TARGET_BRANCH}\` |\n"
-          PR_BODY+="| **Package Used** | \`${PACKAGE_PATH}\` |\n"
+          PR_BODY+="| **Retrieval Package** | \`${PACKAGE_PATH}\` |\n"
+          PR_BODY+="| **Generated Package** | \`${GENERATED_PKG}\` |\n"
           PR_BODY+="| **Files Changed** | ${CHANGED_COUNT} |\n"
           PR_BODY+="| **Retrieved at** | ${RETRIEVE_TIME} |\n"
           PR_BODY+="| **Trigger** | ${TRIGGER} |\n"
           PR_BODY+="| **Workflow Run** | [${RUN_ID}](${RUN_URL}) |\n\n"
           PR_BODY+="### ✅ Review Checklist\n"
           PR_BODY+="- [ ] Verify retrieved metadata matches expected org changes\n"
+          PR_BODY+="- [ ] Review generated package.xml in \`manifest/feature/\`\n"
           PR_BODY+="- [ ] Confirm no unintended config or sensitive data was pulled\n"
           PR_BODY+="- [ ] Approve and merge to keep \`${TARGET_BRANCH}\` in sync with \`${ENVIRONMENT}\` org\n"
 
           PR_RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Authorization: Bearer ${GH_PAT}" \
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
             "https://api.github.com/repos/${REPO}/pulls" \
             -d "$(jq -n \
               --arg title "$PR_TITLE" \
-              --arg body "$(printf '%b' "$PR_BODY")" \
-              --arg head "$RETRIEVE_BRANCH" \
-              --arg base "$TARGET_BRANCH" \
+              --arg body  "$(printf '%b' "$PR_BODY")" \
+              --arg head  "$FEATURE_BRANCH" \
+              --arg base  "$TARGET_BRANCH" \
               '{title: $title, body: $body, head: $head, base: $base, draft: false}')")
 
           PR_HTTP=$(echo "$PR_RESPONSE" | tail -1)
@@ -329,12 +392,12 @@ jobs:
             exit 1
           fi
 
-      # ── Step 9: Summary ──────────────────────────────────────────────────────
+      # ── Step 11: Summary ─────────────────────────────────────────────────────
       - name: Summary — No Changes
         if: steps.check-changes.outputs.has_changes == 'false'
         shell: bash
         env:
-          ENVIRONMENT: ${{ steps.resolve.outputs.ENVIRONMENT }}
+          ENVIRONMENT:   ${{ steps.resolve.outputs.ENVIRONMENT }}
           TARGET_BRANCH: ${{ steps.resolve.outputs.TARGET_BRANCH }}
         run: |
           echo "=========================================="
@@ -342,27 +405,28 @@ jobs:
           echo "=========================================="
           echo "  Environment : $ENVIRONMENT"
           echo "  Branch      : $TARGET_BRANCH"
-          echo "  The org metadata matches the branch."
-          echo "  No branch created. No PR raised."
+          echo "  Org metadata matches branch. No PR raised."
           echo "=========================================="
 
       - name: Summary — Retrieval Complete
         if: steps.check-changes.outputs.has_changes == 'true'
         shell: bash
         env:
-          ENVIRONMENT: ${{ steps.resolve.outputs.ENVIRONMENT }}
-          TARGET_BRANCH: ${{ steps.resolve.outputs.TARGET_BRANCH }}
-          RETRIEVE_BRANCH: ${{ steps.resolve.outputs.RETRIEVE_BRANCH }}
-          CHANGED_COUNT: ${{ steps.check-changes.outputs.changed_count }}
-          PR_URL: ${{ steps.raise-pr.outputs.pr_url }}
-          PR_NUMBER: ${{ steps.raise-pr.outputs.pr_number }}
+          ENVIRONMENT:    ${{ steps.resolve.outputs.ENVIRONMENT }}
+          TARGET_BRANCH:  ${{ steps.resolve.outputs.TARGET_BRANCH }}
+          FEATURE_BRANCH: ${{ steps.resolve.outputs.FEATURE_BRANCH }}
+          GENERATED_PKG:  ${{ steps.resolve.outputs.GENERATED_PKG }}
+          CHANGED_COUNT:  ${{ steps.check-changes.outputs.changed_count }}
+          PR_URL:         ${{ steps.raise-pr.outputs.pr_url }}
+          PR_NUMBER:      ${{ steps.raise-pr.outputs.pr_number }}
         run: |
           echo "=========================================="
           echo "✅ RETRIEVAL COMPLETE"
           echo "=========================================="
           echo "  Environment     : $ENVIRONMENT"
-          echo "  Retrieve Branch : $RETRIEVE_BRANCH"
+          echo "  Feature Branch  : $FEATURE_BRANCH"
           echo "  PR Target       : $TARGET_BRANCH"
           echo "  Files Changed   : $CHANGED_COUNT"
+          echo "  Generated Pkg   : $GENERATED_PKG"
           echo "  PR #${PR_NUMBER}        : $PR_URL"
           echo "=========================================="
