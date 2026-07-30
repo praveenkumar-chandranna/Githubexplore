@@ -75,14 +75,37 @@ jobs:
             esac
           fi
 
+          # ── Org → Branch map ─────────────────────────────────────────────
           case "$ENVIRONMENT" in
-            DEV)        TARGET_BRANCH="DEV"  ;;
-            QA)         TARGET_BRANCH="QA"   ;;
-            UAT)        TARGET_BRANCH="UAT"  ;;
-            PRODUCTION) TARGET_BRANCH="main" ;;
-            HOTFIX)     TARGET_BRANCH="main" ;;
+            DEV)        TARGET_BRANCH="DEV"  ; ORG_LABEL="DEV sandbox"    ;;
+            QA)         TARGET_BRANCH="QA"   ; ORG_LABEL="QA sandbox"     ;;
+            UAT)        TARGET_BRANCH="UAT"  ; ORG_LABEL="UAT sandbox"    ;;
+            PRODUCTION) TARGET_BRANCH="main" ; ORG_LABEL="Production org" ;;
+            HOTFIX)     TARGET_BRANCH="main" ; ORG_LABEL="Production org" ;;
             *) echo "❌ Unknown environment: $ENVIRONMENT"; exit 1 ;;
           esac
+
+          # ── Branch ↔ Org mismatch guard ──────────────────────────────────
+          # Prevents running UAT retrieval from QA branch, etc.
+          CURRENT_BRANCH="${{ github.ref_name }}"
+          case "$CURRENT_BRANCH" in
+            DEV)  EXPECTED_ENV="DEV"        ;;
+            QA)   EXPECTED_ENV="QA"         ;;
+            UAT)  EXPECTED_ENV="UAT"        ;;
+            main) EXPECTED_ENV="PRODUCTION" ;;
+            *)    EXPECTED_ENV=""           ;;
+          esac
+
+          if [[ -n "$EXPECTED_ENV" && "$ENVIRONMENT" != "$EXPECTED_ENV" ]]; then
+            echo "❌ Branch/Org mismatch detected!"
+            echo "   Current branch : ${CURRENT_BRANCH}"
+            echo "   Expected org   : ${EXPECTED_ENV}"
+            echo "   Selected org   : ${ENVIRONMENT}"
+            echo "   → Switch to the '${TARGET_BRANCH}' branch to retrieve from ${ENVIRONMENT} org."
+            exit 1
+          fi
+
+          echo "✅ Org map validated: ${ENVIRONMENT} (${ORG_LABEL}) → branch '${TARGET_BRANCH}'"
 
           PACKAGE_PATH="${INPUT_PKG:-manifest/package.xml}"
           RETRIEVE_DATE=$(TZ='Asia/Kolkata' date +'%d%m%Y_%H%M')
