@@ -48,20 +48,21 @@ jobs:
     env:
       SF_LOGIN_URL_TEST: ${{ secrets.SANDBOX_URL }}
       SF_LOGIN_URL_PROD: ${{ secrets.LOGIN_URL }}
+      # gh CLI uses this automatically for all API calls including PR creation
+      GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
 
     steps:
 
-      # ── Step 1: Resolve environment, branch name, package path ──────────────
+      # ── Step 1: Resolve environment, branch name, paths ─────────────────────
       - name: Resolve environment and branch
         id: resolve
         shell: bash
         env:
-          EVENT_NAME: ${{ github.event_name }}
-          INPUT_ENV: ${{ github.event.inputs.environment }}
-          INPUT_PKG: ${{ github.event.inputs.package_path }}
+          EVENT_NAME:      ${{ github.event_name }}
+          INPUT_ENV:       ${{ github.event.inputs.environment }}
+          INPUT_PKG:       ${{ github.event.inputs.package_path }}
           GITHUB_SCHEDULE: ${{ github.event.schedule }}
         run: |
-          # ── Determine environment ──────────────────────────────────────────
           if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
             ENVIRONMENT="$INPUT_ENV"
           else
@@ -74,7 +75,6 @@ jobs:
             esac
           fi
 
-          # ── Map environment → repo branch ──────────────────────────────────
           case "$ENVIRONMENT" in
             DEV)        TARGET_BRANCH="DEV"  ;;
             QA)         TARGET_BRANCH="QA"   ;;
@@ -84,15 +84,11 @@ jobs:
             *) echo "❌ Unknown environment: $ENVIRONMENT"; exit 1 ;;
           esac
 
-          # ── Package path ───────────────────────────────────────────────────
           PACKAGE_PATH="${INPUT_PKG:-manifest/package.xml}"
-
-          # ── Branch name: feature/{ENV}Code_{ddmmyyyy}_{HHMM} ──────────────
           RETRIEVE_DATE=$(TZ='Asia/Kolkata' date +'%d%m%Y_%H%M')
           FEATURE_BRANCH="feature/${ENVIRONMENT}Code_${RETRIEVE_DATE}"
-
-          # ── Generated package.xml output path ─────────────────────────────
           GENERATED_PKG="manifest/feature/${ENVIRONMENT}Code_${RETRIEVE_DATE}_package.xml"
+          GENERATED_TEST="manifest/feature/${ENVIRONMENT}Code_${RETRIEVE_DATE}_TestClass.txt"
 
           echo "ENVIRONMENT=${ENVIRONMENT}"       >> $GITHUB_OUTPUT
           echo "TARGET_BRANCH=${TARGET_BRANCH}"   >> $GITHUB_OUTPUT
@@ -100,6 +96,7 @@ jobs:
           echo "RETRIEVE_DATE=${RETRIEVE_DATE}"   >> $GITHUB_OUTPUT
           echo "PACKAGE_PATH=${PACKAGE_PATH}"     >> $GITHUB_OUTPUT
           echo "GENERATED_PKG=${GENERATED_PKG}"   >> $GITHUB_OUTPUT
+          echo "GENERATED_TEST=${GENERATED_TEST}" >> $GITHUB_OUTPUT
 
           echo "=========================================="
           echo "RETRIEVAL CONFIGURATION"
@@ -110,10 +107,11 @@ jobs:
           echo "  Feature Branch : $FEATURE_BRANCH"
           echo "  Retrieve Pkg   : $PACKAGE_PATH"
           echo "  Generated Pkg  : $GENERATED_PKG"
+          echo "  Generated Test : $GENERATED_TEST"
           echo "  Triggered by   : ${{ github.actor }}"
           echo "=========================================="
 
-      # ── Step 2: Checkout target env branch using PAT ────────────────────────
+      # ── Step 2: Checkout target env branch ──────────────────────────────────
       - name: Checkout ${{ steps.resolve.outputs.TARGET_BRANCH }} branch
         uses: actions/checkout@v7
         with:
@@ -142,7 +140,7 @@ jobs:
         id: set-org
         shell: bash
         env:
-          ENVIRONMENT: ${{ steps.resolve.outputs.ENVIRONMENT }}
+          ENVIRONMENT:           ${{ steps.resolve.outputs.ENVIRONMENT }}
           SF_LOGIN_URL_TEST_VAL: ${{ env.SF_LOGIN_URL_TEST }}
           SF_LOGIN_URL_PROD_VAL: ${{ env.SF_LOGIN_URL_PROD }}
           KEY_DEV:    ${{ secrets.SALESFORCE_CONSUMER_KEY_DEV }}
@@ -174,9 +172,9 @@ jobs:
           LOGIN_URL: ${{ steps.set-org.outputs.LOGIN_URL }}
         run: |
           sf org login jwt \
-            --client-id  "$CLIENT_ID" \
+            --client-id    "$CLIENT_ID" \
             --jwt-key-file server.key \
-            --username   "$USERNAME" \
+            --username     "$USERNAME" \
             --instance-url "$LOGIN_URL" \
             --set-default
 
@@ -202,50 +200,44 @@ jobs:
         run: |
           echo "⬇️  Retrieving metadata using: $PACKAGE_PATH"
           sf project retrieve start \
-            --manifest    "$PACKAGE_PATH" \
-            --target-org  "$ORG_USERNAME" \
+            --manifest   "$PACKAGE_PATH" \
+            --target-org "$ORG_USERNAME" \
             --wait 30
           echo "✅ Retrieval complete"
 
-      # ── Step 7: Generate package.xml from retrieved files ────────────────────
-      - name: Generate package.xml for retrieved metadata
-        id: gen-pkg
+      - name: Cleanup JWT key
+        if: always()
+        run: rm -f server.key
+
+      # ── Step 7: Generate package.xml and TestClass.txt ───────────────────────
+      - name: Generate package.xml and TestClass.txt
+        id: gen-artifacts
         shell: bash
         env:
-          GENERATED_PKG: ${{ steps.resolve.outputs.GENERATED_PKG }}
-          ORG_USERNAME:  ${{ steps.set-org.outputs.USERNAME }}
+          GENERATED_PKG:  ${{ steps.resolve.outputs.GENERATED_PKG }}
+          GENERATED_TEST: ${{ steps.resolve.outputs.GENERATED_TEST }}
+          ORG_USERNAME:   ${{ steps.set-org.outputs.USERNAME }}
         run: |
           mkdir -p "$(dirname "$GENERATED_PKG")"
 
-          echo "📦 Generating package.xml from retrieved source..."
+          API_VERSION=$(grep -oP '(?<=sourceApiVersion": ")[^"]+' sfdx-project.json 2>/dev/null || echo "67.0")
+
+          # ── Generate package.xml ─────────────────────────────────────────
+          echo "📦 Generating package.xml..."
+
           sf project generate manifest \
             --source-dir force-app \
             --output-dir "$(dirname "$GENERATED_PKG")" \
-            --name "$(basename "$GENERATED_PKG" .xml)"
+            --name "$(basename "$GENERATED_PKG" .xml)" 2>/dev/null || true
 
-          # sf generates as <name>.xml — verify it exists
-          if [[ -f "$GENERATED_PKG" ]]; then
-            echo "✅ Generated: $GENERATED_PKG"
-            echo ""
-            echo "=========================================="
-            echo "📦 GENERATED PACKAGE.XML"
-            echo "=========================================="
-            cat "$GENERATED_PKG"
-            echo "=========================================="
-          else
-            echo "⚠️  sf generate manifest did not produce expected file."
-            echo "    Falling back to building package.xml from changed files..."
-
-            # Fallback: build package.xml by scanning retrieved file paths
-            API_VERSION=$(grep -oP '(?<=sourceApiVersion": ")[^"]+' sfdx-project.json || echo "67.0")
+          if [[ ! -f "$GENERATED_PKG" ]]; then
+            echo "⚠️  sf generate manifest fallback — building from changed files..."
 
             declare -A TYPE_MEMBERS
-
             while IFS= read -r FPATH; do
               [[ -z "$FPATH" ]] && continue
-              # Extract metadata type from path: force-app/main/default/{type}/...
               META_TYPE=$(echo "$FPATH" | grep -oP 'force-app/main/default/\K[^/]+')
-              MEMBER=$(basename "$FPATH" | sed 's/\.[^.]*$//' | sed 's/-meta$//')
+              MEMBER=$(basename "$FPATH" | sed 's/\.\(cls\|trigger\|js\|html\|css\|xml\|json\|resource\).*$//' | sed 's/-meta$//')
               [[ -z "$META_TYPE" || -z "$MEMBER" ]] && continue
               TYPE_MEMBERS["$META_TYPE"]+="${MEMBER}"$'\n'
             done < <(git diff --name-only HEAD 2>/dev/null; git ls-files --others --exclude-standard force-app/)
@@ -264,14 +256,48 @@ jobs:
               printf '    <version>%s</version>\n' "$API_VERSION"
               printf '</Package>\n'
             } > "$GENERATED_PKG"
-
-            echo "✅ Fallback package.xml generated: $GENERATED_PKG"
-            cat "$GENERATED_PKG"
           fi
 
-      - name: Cleanup JWT key
-        if: always()
-        run: rm -f server.key
+          echo "✅ package.xml ready: $GENERATED_PKG"
+          echo ""
+          echo "=========================================="
+          echo "📦 GENERATED PACKAGE.XML"
+          echo "=========================================="
+          cat "$GENERATED_PKG"
+          echo "=========================================="
+
+          # ── Generate TestClass.txt ───────────────────────────────────────
+          # Scan retrieved Apex classes — any class ending in Test or starting
+          # with Test is a test class
+          echo ""
+          echo "🧪 Scanning for test classes..."
+
+          TEST_CLASSES=""
+          while IFS= read -r FPATH; do
+            CLASSNAME=$(basename "$FPATH" .cls)
+            # Match: ends with Test/Tests/_Test or starts with Test
+            if [[ "$CLASSNAME" =~ (Test|Tests|_Test|_test)$ ]] || \
+               [[ "$CLASSNAME" =~ ^(Test|test) ]]; then
+              TEST_CLASSES+="${CLASSNAME} "
+            fi
+          done < <(find force-app -name "*.cls" ! -name "*-meta.xml" 2>/dev/null)
+
+          TEST_CLASSES=$(echo "$TEST_CLASSES" | xargs)
+
+          if [[ -n "$TEST_CLASSES" ]]; then
+            echo "$TEST_CLASSES" > "$GENERATED_TEST"
+            echo "✅ TestClass.txt generated: $GENERATED_TEST"
+            echo ""
+            echo "=========================================="
+            echo "🧪 GENERATED TESTCLASS.TXT"
+            echo "=========================================="
+            cat "$GENERATED_TEST"
+            echo "=========================================="
+            echo "test_file_created=true" >> $GITHUB_OUTPUT
+          else
+            echo "⚠️  No test classes found in retrieved metadata"
+            echo "test_file_created=false" >> $GITHUB_OUTPUT
+          fi
 
       # ── Step 8: Detect changes ───────────────────────────────────────────────
       - name: Check for changes
@@ -322,75 +348,69 @@ jobs:
 
           echo "✅ Pushed: $FEATURE_BRANCH"
 
-      # ── Step 10: Raise PR → target env branch ────────────────────────────────
+      # ── Step 10: Raise PR using gh CLI (fixes 403) ───────────────────────────
       - name: Raise Pull Request → ${{ steps.resolve.outputs.TARGET_BRANCH }}
         if: steps.check-changes.outputs.has_changes == 'true'
         id: raise-pr
         shell: bash
         env:
-          GH_PAT:          ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
-          REPO:            ${{ github.repository }}
-          FEATURE_BRANCH:  ${{ steps.resolve.outputs.FEATURE_BRANCH }}
-          TARGET_BRANCH:   ${{ steps.resolve.outputs.TARGET_BRANCH }}
-          ENVIRONMENT:     ${{ steps.resolve.outputs.ENVIRONMENT }}
-          PACKAGE_PATH:    ${{ steps.resolve.outputs.PACKAGE_PATH }}
-          GENERATED_PKG:   ${{ steps.resolve.outputs.GENERATED_PKG }}
-          RETRIEVE_DATE:   ${{ steps.resolve.outputs.RETRIEVE_DATE }}
-          CHANGED_COUNT:   ${{ steps.check-changes.outputs.changed_count }}
-          ACTOR:           ${{ github.actor }}
-          EVENT_NAME:      ${{ github.event_name }}
-          RUN_ID:          ${{ github.run_id }}
+          GH_TOKEN:       ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+          FEATURE_BRANCH: ${{ steps.resolve.outputs.FEATURE_BRANCH }}
+          TARGET_BRANCH:  ${{ steps.resolve.outputs.TARGET_BRANCH }}
+          ENVIRONMENT:    ${{ steps.resolve.outputs.ENVIRONMENT }}
+          PACKAGE_PATH:   ${{ steps.resolve.outputs.PACKAGE_PATH }}
+          GENERATED_PKG:  ${{ steps.resolve.outputs.GENERATED_PKG }}
+          GENERATED_TEST: ${{ steps.resolve.outputs.GENERATED_TEST }}
+          RETRIEVE_DATE:  ${{ steps.resolve.outputs.RETRIEVE_DATE }}
+          CHANGED_COUNT:  ${{ steps.check-changes.outputs.changed_count }}
+          TEST_CREATED:   ${{ steps.gen-artifacts.outputs.test_file_created }}
+          ACTOR:          ${{ github.actor }}
+          EVENT_NAME:     ${{ github.event_name }}
+          RUN_ID:         ${{ github.run_id }}
+          REPO:           ${{ github.repository }}
         run: |
           RETRIEVE_TIME=$(TZ='Asia/Kolkata' date +'%d-%m-%Y %H:%M IST')
           RUN_URL="https://github.com/${REPO}/actions/runs/${RUN_ID}"
           TRIGGER="Scheduled"
           [[ "$EVENT_NAME" == "workflow_dispatch" ]] && TRIGGER="Manual (${ACTOR})"
 
+          TEST_LINE=""
+          [[ "$TEST_CREATED" == "true" ]] && TEST_LINE="| **Test Classes** | \`${GENERATED_TEST}\` |"
+
           PR_TITLE="⬇️ [Retrieve] ${ENVIRONMENT} org sync | ${RETRIEVE_DATE}"
 
-          PR_BODY="## ⬇️ Salesforce Metadata Retrieval — ${ENVIRONMENT}\n\n"
-          PR_BODY+="| Field | Value |\n|---|---|\n"
-          PR_BODY+="| **Environment** | \`${ENVIRONMENT}\` |\n"
-          PR_BODY+="| **Feature Branch** | \`${FEATURE_BRANCH}\` |\n"
-          PR_BODY+="| **Target Branch** | \`${TARGET_BRANCH}\` |\n"
-          PR_BODY+="| **Retrieval Package** | \`${PACKAGE_PATH}\` |\n"
-          PR_BODY+="| **Generated Package** | \`${GENERATED_PKG}\` |\n"
-          PR_BODY+="| **Files Changed** | ${CHANGED_COUNT} |\n"
-          PR_BODY+="| **Retrieved at** | ${RETRIEVE_TIME} |\n"
-          PR_BODY+="| **Trigger** | ${TRIGGER} |\n"
-          PR_BODY+="| **Workflow Run** | [${RUN_ID}](${RUN_URL}) |\n\n"
-          PR_BODY+="### ✅ Review Checklist\n"
-          PR_BODY+="- [ ] Verify retrieved metadata matches expected org changes\n"
-          PR_BODY+="- [ ] Review generated package.xml in \`manifest/feature/\`\n"
-          PR_BODY+="- [ ] Confirm no unintended config or sensitive data was pulled\n"
-          PR_BODY+="- [ ] Approve and merge to keep \`${TARGET_BRANCH}\` in sync with \`${ENVIRONMENT}\` org\n"
+          PR_BODY="## ⬇️ Salesforce Metadata Retrieval — ${ENVIRONMENT}
 
-          PR_RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
-            -H "Authorization: Bearer ${GH_PAT}" \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/${REPO}/pulls" \
-            -d "$(jq -n \
-              --arg title "$PR_TITLE" \
-              --arg body  "$(printf '%b' "$PR_BODY")" \
-              --arg head  "$FEATURE_BRANCH" \
-              --arg base  "$TARGET_BRANCH" \
-              '{title: $title, body: $body, head: $head, base: $base, draft: false}')")
+| Field | Value |
+|---|---|
+| **Environment** | \`${ENVIRONMENT}\` |
+| **Feature Branch** | \`${FEATURE_BRANCH}\` |
+| **Target Branch** | \`${TARGET_BRANCH}\` |
+| **Retrieval Package** | \`${PACKAGE_PATH}\` |
+| **Generated Package** | \`${GENERATED_PKG}\` |
+${TEST_LINE}
+| **Files Changed** | ${CHANGED_COUNT} |
+| **Retrieved at** | ${RETRIEVE_TIME} |
+| **Trigger** | ${TRIGGER} |
+| **Workflow Run** | [${RUN_ID}](${RUN_URL}) |
 
-          PR_HTTP=$(echo "$PR_RESPONSE" | tail -1)
-          PR_JSON=$(echo "$PR_RESPONSE" | sed '$d')
+### ✅ Review Checklist
+- [ ] Verify retrieved metadata matches expected org changes
+- [ ] Review generated package.xml in \`manifest/feature/\`
+- [ ] Review generated TestClass.txt in \`manifest/feature/\`
+- [ ] Confirm no unintended config or sensitive data was pulled
+- [ ] Approve and merge to keep \`${TARGET_BRANCH}\` in sync with \`${ENVIRONMENT}\` org"
 
-          if [[ "$PR_HTTP" == "201" ]]; then
-            PR_URL=$(echo "$PR_JSON" | jq -r '.html_url')
-            PR_NUMBER=$(echo "$PR_JSON" | jq -r '.number')
-            echo "pr_url=${PR_URL}"       >> $GITHUB_OUTPUT
-            echo "pr_number=${PR_NUMBER}" >> $GITHUB_OUTPUT
-            echo "✅ PR #${PR_NUMBER} created: $PR_URL"
-          else
-            echo "❌ PR creation failed (HTTP $PR_HTTP)"
-            echo "$PR_JSON" | jq '.' || echo "$PR_JSON"
-            exit 1
-          fi
+          # gh CLI handles auth via GH_TOKEN env var — no 403 issues
+          PR_URL=$(gh pr create \
+            --title "$PR_TITLE" \
+            --body  "$PR_BODY" \
+            --head  "$FEATURE_BRANCH" \
+            --base  "$TARGET_BRANCH" \
+            --repo  "$REPO")
+
+          echo "pr_url=${PR_URL}" >> $GITHUB_OUTPUT
+          echo "✅ PR created: $PR_URL"
 
       # ── Step 11: Summary ─────────────────────────────────────────────────────
       - name: Summary — No Changes
@@ -416,9 +436,10 @@ jobs:
           TARGET_BRANCH:  ${{ steps.resolve.outputs.TARGET_BRANCH }}
           FEATURE_BRANCH: ${{ steps.resolve.outputs.FEATURE_BRANCH }}
           GENERATED_PKG:  ${{ steps.resolve.outputs.GENERATED_PKG }}
+          GENERATED_TEST: ${{ steps.resolve.outputs.GENERATED_TEST }}
           CHANGED_COUNT:  ${{ steps.check-changes.outputs.changed_count }}
+          TEST_CREATED:   ${{ steps.gen-artifacts.outputs.test_file_created }}
           PR_URL:         ${{ steps.raise-pr.outputs.pr_url }}
-          PR_NUMBER:      ${{ steps.raise-pr.outputs.pr_number }}
         run: |
           echo "=========================================="
           echo "✅ RETRIEVAL COMPLETE"
@@ -428,5 +449,6 @@ jobs:
           echo "  PR Target       : $TARGET_BRANCH"
           echo "  Files Changed   : $CHANGED_COUNT"
           echo "  Generated Pkg   : $GENERATED_PKG"
-          echo "  PR #${PR_NUMBER}        : $PR_URL"
+          echo "  Test Classes    : $( [[ "$TEST_CREATED" == "true" ]] && echo "$GENERATED_TEST" || echo "none found" )"
+          echo "  PR              : $PR_URL"
           echo "=========================================="
