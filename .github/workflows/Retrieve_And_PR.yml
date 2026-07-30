@@ -119,7 +119,7 @@ jobs:
         with:
           ref: ${{ steps.resolve.outputs.TARGET_BRANCH }}
           fetch-depth: 0
-          token: ${{ secrets.GH_PAT }}
+          token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
 
       # ── Step 3: Tooling setup ────────────────────────────────────────────────
       - name: Setup Node.js
@@ -303,7 +303,7 @@ jobs:
           RETRIEVE_DATE:  ${{ steps.resolve.outputs.RETRIEVE_DATE }}
           GIT_USER_NAME:  ${{ secrets.GIT_USER_NAME }}
           GIT_USER_EMAIL: ${{ secrets.GIT_USER_EMAIL }}
-          GH_PAT:         ${{ secrets.GH_PAT }}
+          GH_PAT:         ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
           REPO:           ${{ github.repository }}
           ACTOR:          ${{ github.actor }}
           EVENT_NAME:     ${{ github.event_name }}
@@ -328,7 +328,7 @@ jobs:
         id: raise-pr
         shell: bash
         env:
-          GH_PAT:          ${{ secrets.GH_PAT }}
+          GH_PAT:          ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
           REPO:            ${{ github.repository }}
           FEATURE_BRANCH:  ${{ steps.resolve.outputs.FEATURE_BRANCH }}
           TARGET_BRANCH:   ${{ steps.resolve.outputs.TARGET_BRANCH }}
