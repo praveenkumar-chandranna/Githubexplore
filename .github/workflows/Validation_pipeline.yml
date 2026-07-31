@@ -205,7 +205,7 @@ jobs:
             if git diff --cached --quiet; then
               echo "⚠️ No changes to commit"
             else
-              git commit -m "chore: consolidated package ${OUTPUT_NAME} [skip ci]"
+              git commit -m "Consolidated package ${OUTPUT_NAME} [skip ci]"
               git push origin "$REF_NAME"
             fi
 
