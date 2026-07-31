@@ -6,7 +6,7 @@ on:
       commit_id:
         type: string
         description: >
-          Commit SHA to rollback to. Find from: release tags, git log, or Actions run history.
+          Commit SHA to rollback to. Branch will be force-reset to this commit.
           Example: a3f9c12  or full 40-char SHA
         required: true
       package_path:
@@ -46,7 +46,7 @@ jobs:
   Rollback_Build:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
 
     env:
       SF_LOGIN_URL_TEST: ${{ secrets.SANDBOX_URL }}
@@ -64,35 +64,82 @@ jobs:
 
     steps:
 
-      # ── Step 1: Checkout at given commit ID ──────────────────────────────────
-      - name: Checkout repo at commit ${{ github.event.inputs.commit_id }}
-        uses: actions/checkout@v7
+      # ── Step 1: Checkout full branch history ─────────────────────────────────
+      - name: Checkout branch
+        uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.commit_id }}
+          ref: ${{ github.ref_name }}
           fetch-depth: 0
+          token: ${{ secrets.GH_PAT }}
 
-      # ── Step 2: Auto-resolve package.xml from commit ─────────────────────────
-      # If package_path is provided → use it directly
-      # If blank → scan manifest/ at this commit and pick the most relevant one
-      - name: Resolve package.xml from commit
+      # ── Step 2: Validate commit exists, reset branch to it ───────────────────
+      - name: Reset branch to commit ${{ github.event.inputs.commit_id }}
+        id: git-reset
+        shell: bash
+        env:
+          COMMIT_ID:    ${{ github.event.inputs.commit_id }}
+          REF_NAME:     ${{ github.ref_name }}
+          ACTOR:        ${{ github.actor }}
+          GIT_USER_NAME:  ${{ secrets.GIT_USER_NAME }}
+          GIT_USER_EMAIL: ${{ secrets.GIT_USER_EMAIL }}
+          GH_PAT:       ${{ secrets.GH_PAT }}
+          REPO:         ${{ github.repository }}
+        run: |
+          if [[ -z "$GH_PAT" ]]; then
+            echo "❌ GH_PAT secret is not set — required for force push"
+            exit 1
+          fi
+
+          if ! git cat-file -e "${COMMIT_ID}^{commit}" 2>/dev/null; then
+            echo "❌ Commit '$COMMIT_ID' not found in this repository"
+            exit 1
+          fi
+
+          COMMIT_MSG=$(git log -1 --pretty=format:"%s" "$COMMIT_ID")
+          COMMIT_DATE=$(git log -1 --pretty=format:"%ci" "$COMMIT_ID")
+          CURRENT_HEAD=$(git rev-parse HEAD)
+
+          echo "=========================================="
+          echo "GIT RESET SUMMARY"
+          echo "=========================================="
+          echo "  Branch       : $REF_NAME"
+          echo "  Current HEAD : $CURRENT_HEAD"
+          echo "  Reset to     : $COMMIT_ID"
+          echo "  Commit Msg   : $COMMIT_MSG"
+          echo "  Commit Date  : $COMMIT_DATE"
+          echo "  Triggered by : $ACTOR"
+          echo "=========================================="
+
+          echo "Commits that will be removed from branch:"
+          git log --oneline "${COMMIT_ID}..HEAD"
+          echo ""
+
+          git config user.name "$GIT_USER_NAME"
+          git config user.email "$GIT_USER_EMAIL"
+          git remote set-url origin "https://x-access-token:${GH_PAT}@github.com/${REPO}.git"
+
+          ORIGINAL_HEAD=$(git rev-parse HEAD)
+          git reset --hard "$COMMIT_ID"
+          git push origin "$REF_NAME" --force
+
+          echo "✅ Branch '$REF_NAME' force-reset to commit $COMMIT_ID"
+          echo "resolved_commit=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+          echo "original_head=${ORIGINAL_HEAD}" >> $GITHUB_OUTPUT
+
+      # ── Step 3: Resolve package.xml at the reset commit ──────────────────────
+      - name: Resolve package.xml
         id: resolve-pkg
         shell: bash
         env:
           INPUT_PKG:   ${{ github.event.inputs.package_path }}
           ENVIRONMENT: ${{ github.event.inputs.environment }}
-          COMMIT_ID:   ${{ github.event.inputs.commit_id }}
           WORKSPACE:   ${{ github.workspace }}
         run: |
-          RESOLVED_COMMIT=$(git rev-parse HEAD)
-          echo "✅ Checked out commit: $RESOLVED_COMMIT"
-          echo ""
-
-          # ── Case 1: package_path explicitly provided ───────────────────────
+          # ── Case 1: package_path explicitly provided ─────────────────────
           if [[ -n "$INPUT_PKG" ]]; then
             MANIFEST="${WORKSPACE}/${INPUT_PKG}"
             if [[ ! -f "$MANIFEST" ]]; then
-              echo "❌ Provided package.xml not found at this commit: $MANIFEST"
-              echo ""
+              echo "❌ Provided package.xml not found: $MANIFEST"
               echo "💡 Available packages at this commit:"
               find "${WORKSPACE}/manifest" -name "*.xml" | sed "s|${WORKSPACE}/||"
               exit 1
@@ -100,16 +147,13 @@ jobs:
             echo "✅ Using provided package: $INPUT_PKG"
             echo "resolved_pkg=${INPUT_PKG}" >> $GITHUB_OUTPUT
 
-          # ── Case 2: auto-detect from commit ───────────────────────────────
+          # ── Case 2: auto-detect ──────────────────────────────────────────
           else
-            echo "🔍 No package_path given — auto-detecting from commit..."
-            echo ""
-
-            # List all package.xml files present at this commit
+            echo "🔍 Auto-detecting package.xml..."
             ALL_PKGS=$(find "${WORKSPACE}/manifest" -name "*.xml" | sort)
 
             if [[ -z "$ALL_PKGS" ]]; then
-              echo "❌ No package.xml files found in manifest/ at commit $RESOLVED_COMMIT"
+              echo "❌ No package.xml files found in manifest/"
               exit 1
             fi
 
@@ -117,73 +161,32 @@ jobs:
             echo "$ALL_PKGS" | sed "s|${WORKSPACE}/||"
             echo ""
 
-            # Priority 1: manifest/feature/ packages matching environment name
             ENV_PKG=$(echo "$ALL_PKGS" | grep -i "manifest/feature/.*${ENVIRONMENT}" | tail -1 || true)
-
-            # Priority 2: manifest/ root Release packages matching environment
-            if [[ -z "$ENV_PKG" ]]; then
-              ENV_PKG=$(echo "$ALL_PKGS" | grep -i "manifest/Release.*${ENVIRONMENT}" | tail -1 || true)
-            fi
-
-            # Priority 3: any manifest/ root Release package (most recent by name sort)
-            if [[ -z "$ENV_PKG" ]]; then
-              ENV_PKG=$(echo "$ALL_PKGS" | grep -i "manifest/Release" | tail -1 || true)
-            fi
-
-            # Priority 4: manifest/package.xml (full org package fallback)
-            if [[ -z "$ENV_PKG" ]]; then
-              ENV_PKG="${WORKSPACE}/manifest/package.xml"
-            fi
-
-            RELATIVE_PKG=$(echo "$ENV_PKG" | sed "s|${WORKSPACE}/||")
+            [[ -z "$ENV_PKG" ]] && ENV_PKG=$(echo "$ALL_PKGS" | grep -i "manifest/Release.*${ENVIRONMENT}" | tail -1 || true)
+            [[ -z "$ENV_PKG" ]] && ENV_PKG=$(echo "$ALL_PKGS" | grep -i "manifest/Release" | tail -1 || true)
+            [[ -z "$ENV_PKG" ]] && ENV_PKG="${WORKSPACE}/manifest/package.xml"
 
             if [[ ! -f "$ENV_PKG" ]]; then
-              echo "❌ Could not resolve a valid package.xml at this commit."
+              echo "❌ Could not resolve a valid package.xml"
               exit 1
             fi
 
+            RELATIVE_PKG=$(echo "$ENV_PKG" | sed "s|${WORKSPACE}/||")
             echo "✅ Auto-resolved package: $RELATIVE_PKG"
             echo "resolved_pkg=${RELATIVE_PKG}" >> $GITHUB_OUTPUT
           fi
 
-          # ── Print resolved package contents ───────────────────────────────
-          FINAL_PKG="${WORKSPACE}/$(cat $GITHUB_OUTPUT | grep resolved_pkg | cut -d= -f2)"
+          RESOLVED_PKG=$(grep 'resolved_pkg=' "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2)
           echo ""
           echo "=========================================="
           echo "📦 ROLLBACK PACKAGE.XML"
           echo "=========================================="
-          cat "${WORKSPACE}/$(grep resolved_pkg $GITHUB_OUTPUT | cut -d= -f2)"
+          cat "${WORKSPACE}/${RESOLVED_PKG}"
           echo "=========================================="
 
-      # ── Step 3: Print rollback summary ───────────────────────────────────────
-      - name: Print Rollback Info
-        shell: bash
-        env:
-          COMMIT_ID:    ${{ github.event.inputs.commit_id }}
-          ENVIRONMENT:  ${{ github.event.inputs.environment }}
-          PACKAGE_PATH: ${{ steps.resolve-pkg.outputs.resolved_pkg }}
-          TEST_LEVEL:   ${{ github.event.inputs.testlevel }}
-          ACTOR:        ${{ github.actor }}
-        run: |
-          RESOLVED_COMMIT=$(git rev-parse HEAD)
-          COMMIT_MSG=$(git log -1 --pretty=format:"%s")
-          COMMIT_DATE=$(git log -1 --pretty=format:"%ci")
-
-          echo "=========================================="
-          echo "ROLLBACK INITIATED"
-          echo "=========================================="
-          echo "  Commit SHA   : $RESOLVED_COMMIT"
-          echo "  Commit Msg   : $COMMIT_MSG"
-          echo "  Commit Date  : $COMMIT_DATE"
-          echo "  Environment  : $ENVIRONMENT"
-          echo "  Package      : $PACKAGE_PATH"
-          echo "  Test Level   : $TEST_LEVEL"
-          echo "  Triggered by : $ACTOR"
-          echo "=========================================="
-
-      # ── Step 4: Tooling setup ────────────────────────────────────────────────
+      # ── Step 4: Tooling setup ─────────────────────────────────────────────────
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v4
         with:
           node-version: 22
 
@@ -192,7 +195,7 @@ jobs:
           npm install -g @salesforce/cli@latest
           sf --version
 
-      # ── Step 5: JWT Auth ─────────────────────────────────────────────────────
+      # ── Step 5: JWT Auth ──────────────────────────────────────────────────────
       - name: Generate JWT private key file
         run: |
           echo "${{ secrets.SALESFORCE_JWT_SECRET_KEY }}" > server.key
@@ -202,7 +205,7 @@ jobs:
         id: set-org
         shell: bash
         env:
-          ENVIRONMENT:          ${{ github.event.inputs.environment }}
+          ENVIRONMENT:           ${{ github.event.inputs.environment }}
           SF_LOGIN_URL_TEST_VAL: ${{ env.SF_LOGIN_URL_TEST }}
           SF_LOGIN_URL_PROD_VAL: ${{ env.SF_LOGIN_URL_PROD }}
           KEY_DEV:    ${{ secrets.SALESFORCE_CONSUMER_KEY_DEV }}
@@ -241,7 +244,7 @@ jobs:
             --instance-url "$LOGIN_URL" \
             --set-default
 
-      # ── Step 6: Validate rollback ────────────────────────────────────────────
+      # ── Step 6: Validate rollback deployment ─────────────────────────────────
       - name: Validate Rollback Deployment
         shell: bash
         env:
@@ -263,7 +266,7 @@ jobs:
           [[ "$TEST_LEVEL" == "RunSpecifiedTests" && -n "$TEST_CLASSES" ]] && CMD+=(--tests $TEST_CLASSES)
           "${CMD[@]}"
 
-      # ── Step 7: Deploy rollback ──────────────────────────────────────────────
+      # ── Step 7: Deploy rollback ───────────────────────────────────────────────
       - name: Deploy Rollback to ${{ github.event.inputs.environment }}
         shell: bash
         env:
@@ -290,9 +293,9 @@ jobs:
         if: always()
         run: rm -f server.key
 
-      # ── Step 8: Rollback summary ─────────────────────────────────────────────
+      # ── Step 8: Rollback summary ──────────────────────────────────────────────
       - name: Rollback Summary
-        if: success()
+        if: always()
         shell: bash
         env:
           COMMIT_ID:    ${{ github.event.inputs.commit_id }}
@@ -301,16 +304,48 @@ jobs:
           ACTOR:        ${{ github.actor }}
           RUN_ID:       ${{ github.run_id }}
           REPO:         ${{ github.repository }}
+          REF_NAME:     ${{ github.ref_name }}
+          PREV_HEAD:    ${{ steps.git-reset.outputs.original_head }}
         run: |
-          RESOLVED_COMMIT=$(git rev-parse HEAD)
-          COMMIT_MSG=$(git log -1 --pretty=format:"%s")
+          ROLLBACK_STATUS="✅ SUCCESSFUL"
+          [[ "${{ job.status }}" != "success" ]] && ROLLBACK_STATUS="❌ FAILED"
+
+          RESET_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+          RESET_MSG=$(git log -1 --pretty=format:"%s" 2>/dev/null || echo "")
+          RESET_DATE=$(git log -1 --pretty=format:"%ci" 2>/dev/null || echo "")
+          RESET_AUTHOR=$(git log -1 --pretty=format:"%an" 2>/dev/null || echo "")
+
+          echo ""
           echo "=========================================="
-          echo "✅ ROLLBACK SUCCESSFUL"
+          echo "ROLLBACK ${ROLLBACK_STATUS}"
           echo "=========================================="
-          echo "  Environment  : $ENVIRONMENT"
-          echo "  Commit SHA   : $RESOLVED_COMMIT"
-          echo "  Commit Msg   : $COMMIT_MSG"
-          echo "  Package used : $PACKAGE_PATH"
-          echo "  Rolled back by: $ACTOR"
-          echo "  Run: https://github.com/${REPO}/actions/runs/${RUN_ID}"
+          echo "  Environment   : $ENVIRONMENT"
+          echo "  Branch        : $REF_NAME"
+          echo "  Triggered by  : $ACTOR"
+          echo "  Run URL       : https://github.com/${REPO}/actions/runs/${RUN_ID}"
+          echo ""
+          echo "── Branch State ──────────────────────────"
+          echo "  Reset to commit : $RESET_COMMIT"
+          echo "  Commit message  : $RESET_MSG"
+          echo "  Committed on    : $RESET_DATE"
+          echo "  Committed by    : $RESET_AUTHOR"
+          echo ""
+          echo "── Commits Removed from Branch ───────────"
+          REMOVED=$(git log --oneline "${RESET_COMMIT}..${PREV_HEAD}" 2>/dev/null || true)
+          if [[ -n "$REMOVED" ]]; then
+            COUNT=$(echo "$REMOVED" | wc -l | xargs)
+            echo "  Total removed : $COUNT commit(s)"
+            echo ""
+            while IFS= read -r LINE; do
+              SHA=$(echo "$LINE" | cut -d' ' -f1)
+              MSG=$(echo "$LINE" | cut -d' ' -f2-)
+              echo "  - [$SHA] $MSG"
+            done <<< "$REMOVED"
+          else
+            echo "  None (already at target commit)"
+          fi
+          echo ""
+          echo "── Salesforce Deployment ─────────────────"
+          echo "  Package       : $PACKAGE_PATH"
+          echo "  Status        : $ROLLBACK_STATUS"
           echo "=========================================="
