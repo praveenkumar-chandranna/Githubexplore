@@ -34,7 +34,7 @@ on:
           - RunSpecifiedTests
           - RunAllTestsInOrg
           - NoTestRun
-        default: RunLocalTests
+        default: RunSpecifiedTests
         required: true
       test_classes:
         type: string
