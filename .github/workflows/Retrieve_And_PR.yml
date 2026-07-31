@@ -112,9 +112,9 @@ jobs:
 
           PACKAGE_PATH="${INPUT_PKG:-manifest/package.xml}"
           RETRIEVE_DATE=$(TZ='Asia/Kolkata' date +'%d%m%Y_%H%M')
-          FEATURE_BRANCH="feature/${ENVIRONMENT}Code_${RETRIEVE_DATE}"
-          GENERATED_PKG="manifest/feature/${ENVIRONMENT}Code_${RETRIEVE_DATE}_package.xml"
-          GENERATED_TEST="manifest/feature/${ENVIRONMENT}Code_${RETRIEVE_DATE}_TestClass.txt"
+          FEATURE_BRANCH="retrieve/${ENVIRONMENT}Code_${RETRIEVE_DATE}"
+          GENERATED_PKG="manifest/retrieve/${ENVIRONMENT}Code_${RETRIEVE_DATE}_package.xml"
+          GENERATED_TEST="manifest/retrieve/${ENVIRONMENT}Code_${RETRIEVE_DATE}_TestClass.txt"
 
           echo "ENVIRONMENT=${ENVIRONMENT}"       >> $GITHUB_OUTPUT
           echo "TARGET_BRANCH=${TARGET_BRANCH}"   >> $GITHUB_OUTPUT
@@ -439,8 +439,8 @@ jobs:
           printf '| **Workflow Run** | [%s](%s) |\n\n' "$RUN_ID" "$RUN_URL" >> "$PR_BODY_FILE"
           echo '### Review Checklist' >> "$PR_BODY_FILE"
           echo '- [ ] Verify retrieved metadata matches expected org changes' >> "$PR_BODY_FILE"
-          echo '- [ ] Review generated package.xml in `manifest/feature/`' >> "$PR_BODY_FILE"
-          echo '- [ ] Review generated TestClass.txt in `manifest/feature/`' >> "$PR_BODY_FILE"
+          echo '- [ ] Review generated package.xml in `manifest/retrive/`' >> "$PR_BODY_FILE"
+          echo '- [ ] Review generated TestClass.txt in `manifest/retrive/`' >> "$PR_BODY_FILE"
           echo '- [ ] Confirm no unintended config or sensitive data was pulled' >> "$PR_BODY_FILE"
           echo "- [ ] Approve and merge to keep \`${TARGET_BRANCH}\` in sync with \`${ENVIRONMENT}\` org" >> "$PR_BODY_FILE"
 
