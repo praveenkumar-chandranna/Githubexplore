@@ -1,0 +1,231 @@
+name: Lodha Destructive Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      Feature_Branch:
+        type: string
+        description: >
+          Branch name with destructive package. e.g. feature/LODHA-123
+        required: true
+      environment:
+        type: choice
+        description: Target environment
+        options:
+          - DEV
+          - QA
+          - UAT
+          - PRODUCTION
+          - HOTFIX
+        default: DEV
+        required: true
+      destructive_type:
+        type: choice
+        description: "Pre = delete before deploy | Post = delete after deploy"
+        options:
+          - pre
+          - post
+        default: post
+        required: true
+      testlevel:
+        type: choice
+        description: Test class run level
+        options:
+          - RunLocalTests
+          - RunSpecifiedTests
+          - NoTestRun
+        default: NoTestRun
+        required: true
+
+jobs:
+  Destructive_Build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    env:
+      SF_LOGIN_URL_TEST: ${{ secrets.SANDBOX_URL }}
+      SF_LOGIN_URL_PROD: ${{ secrets.LOGIN_URL }}
+      SF_ALIAS: lodhaOrg
+
+    if: >
+      (github.event_name == 'workflow_dispatch' &&
+       (
+         (github.ref == 'refs/heads/DEV'  && github.event.inputs.environment == 'DEV') ||
+         (github.ref == 'refs/heads/QA'   && github.event.inputs.environment == 'QA') ||
+         (github.ref == 'refs/heads/UAT'  && github.event.inputs.environment == 'UAT') ||
+         (github.ref == 'refs/heads/main' && github.event.inputs.environment == 'PRODUCTION') ||
+         (github.ref == 'refs/heads/main' && github.event.inputs.environment == 'HOTFIX')
+       ))
+
+    steps:
+      - name: Set environment variables
+        id: set-env
+        shell: bash
+        env:
+          INPUT_ENV: ${{ github.event.inputs.environment }}
+          INPUT_TESTLEVEL: ${{ github.event.inputs.testlevel }}
+          INPUT_FEATURE: ${{ github.event.inputs.Feature_Branch }}
+          INPUT_DTYPE: ${{ github.event.inputs.destructive_type }}
+        run: |
+          FEATURE_INPUT=$(echo "$INPUT_FEATURE" | xargs | sed 's|^feature/||')
+          echo "ENVIRONMENT=$INPUT_ENV"             >> $GITHUB_ENV
+          echo "TEST_LEVEL=$INPUT_TESTLEVEL"        >> $GITHUB_ENV
+          echo "FEATURE_BRANCH=feature/${FEATURE_INPUT}" >> $GITHUB_ENV
+          echo "DESTRUCTIVE_TYPE=$INPUT_DTYPE"      >> $GITHUB_ENV
+
+      - name: Checkout source code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Salesforce CLI
+        run: |
+          npm install -g @salesforce/cli@latest
+          sf --version
+
+      - name: Generate JWT private key file
+        run: |
+          echo "${{ secrets.SALESFORCE_JWT_SECRET_KEY }}" > server.key
+          chmod 600 server.key
+
+      - name: Set org credentials based on environment
+        id: set-org
+        shell: bash
+        env:
+          ENVIRONMENT: ${{ env.ENVIRONMENT }}
+          SF_LOGIN_URL_TEST_VAL: ${{ env.SF_LOGIN_URL_TEST }}
+          SF_LOGIN_URL_PROD_VAL: ${{ env.SF_LOGIN_URL_PROD }}
+          KEY_DEV: ${{ secrets.SALESFORCE_CONSUMER_KEY_DEV }}
+          KEY_QA: ${{ secrets.SALESFORCE_CONSUMER_KEY_QA }}
+          KEY_UAT: ${{ secrets.SALESFORCE_CONSUMER_KEY_UAT }}
+          KEY_PROD: ${{ secrets.SALESFORCE_CONSUMER_KEY_PROD }}
+          KEY_HOTFIX: ${{ secrets.SALESFORCE_CONSUMER_KEY_HOTFIX }}
+          USER_DEV: ${{ secrets.SFDX_AUTH_DEV_USERNAME }}
+          USER_QA: ${{ secrets.SFDX_AUTH_QA_USERNAME }}
+          USER_UAT: ${{ secrets.SFDX_AUTH_UAT_USERNAME }}
+          USER_PROD: ${{ secrets.SFDX_AUTH_PROD_USERNAME }}
+          USER_HOTFIX: ${{ secrets.SFDX_AUTH_HOTFIX_USERNAME }}
+        run: |
+          case "$ENVIRONMENT" in
+            DEV)        echo "CLIENT_ID=$KEY_DEV"    >> $GITHUB_OUTPUT; echo "USERNAME=$USER_DEV"    >> $GITHUB_OUTPUT; echo "LOGIN_URL=$SF_LOGIN_URL_TEST_VAL" >> $GITHUB_OUTPUT ;;
+            QA)         echo "CLIENT_ID=$KEY_QA"     >> $GITHUB_OUTPUT; echo "USERNAME=$USER_QA"     >> $GITHUB_OUTPUT; echo "LOGIN_URL=$SF_LOGIN_URL_TEST_VAL" >> $GITHUB_OUTPUT ;;
+            UAT)        echo "CLIENT_ID=$KEY_UAT"    >> $GITHUB_OUTPUT; echo "USERNAME=$USER_UAT"    >> $GITHUB_OUTPUT; echo "LOGIN_URL=$SF_LOGIN_URL_TEST_VAL" >> $GITHUB_OUTPUT ;;
+            PRODUCTION) echo "CLIENT_ID=$KEY_PROD"   >> $GITHUB_OUTPUT; echo "USERNAME=$USER_PROD"   >> $GITHUB_OUTPUT; echo "LOGIN_URL=$SF_LOGIN_URL_PROD_VAL" >> $GITHUB_OUTPUT ;;
+            HOTFIX)     echo "CLIENT_ID=$KEY_HOTFIX" >> $GITHUB_OUTPUT; echo "USERNAME=$USER_HOTFIX" >> $GITHUB_OUTPUT; echo "LOGIN_URL=$SF_LOGIN_URL_TEST_VAL" >> $GITHUB_OUTPUT ;;
+            *) echo "Unsupported environment $ENVIRONMENT"; exit 1 ;;
+          esac
+
+      - name: Authenticate to ${{ github.event.inputs.environment }} Org
+        env:
+          CLIENT_ID: ${{ steps.set-org.outputs.CLIENT_ID }}
+          USERNAME: ${{ steps.set-org.outputs.USERNAME }}
+          LOGIN_URL: ${{ steps.set-org.outputs.LOGIN_URL }}
+        run: |
+          sf org login jwt \
+            --client-id "$CLIENT_ID" \
+            --jwt-key-file server.key \
+            --username "$USERNAME" \
+            --instance-url "$LOGIN_URL" \
+            --set-default
+
+      - name: Validate destructive manifest files
+        id: prepare
+        shell: bash
+        env:
+          WORKSPACE: ${{ github.workspace }}
+          FEATURE_BRANCH: ${{ env.FEATURE_BRANCH }}
+          TEST_LEVEL: ${{ env.TEST_LEVEL }}
+        run: |
+          BRANCH_NAME=$(echo "$FEATURE_BRANCH" | sed 's|^feature/||')
+          MANIFEST_DIR="${WORKSPACE}/manifest/feature"
+
+          EMPTY_PKG="${MANIFEST_DIR}/${BRANCH_NAME}_package.xml"
+          DESTRUCTIVE_XML="${MANIFEST_DIR}/${BRANCH_NAME}_destructiveChanges.xml"
+
+          # Empty package.xml is required by SF CLI — auto-create if missing
+          if [[ ! -f "$EMPTY_PKG" ]]; then
+            echo "⚠️  No package.xml found — creating empty one (required by SF CLI)"
+            cat > "$EMPTY_PKG" <<'XMLEOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <Package xmlns="http://soap.sforce.com/2006/04/metadata">
+              <version>66.0</version>
+          </Package>
+          XMLEOF
+          fi
+
+          if [[ ! -f "$DESTRUCTIVE_XML" ]]; then
+            echo "❌ destructiveChanges.xml not found: $DESTRUCTIVE_XML"
+            exit 1
+          fi
+
+          echo "✅ package.xml   : $EMPTY_PKG"
+          echo "✅ destructive   : $DESTRUCTIVE_XML"
+          echo ""
+          echo "📄 destructiveChanges.xml contents:"
+          cat "$DESTRUCTIVE_XML"
+
+          echo "empty_pkg=$EMPTY_PKG"       >> $GITHUB_OUTPUT
+          echo "destructive_xml=$DESTRUCTIVE_XML" >> $GITHUB_OUTPUT
+
+          if [[ "$TEST_LEVEL" == "RunSpecifiedTests" ]]; then
+            TEST_FILE="${MANIFEST_DIR}/${BRANCH_NAME}_TestClass.txt"
+            if [[ ! -f "$TEST_FILE" ]]; then
+              echo "❌ TestClass.txt not found: $TEST_FILE"
+              exit 1
+            fi
+            echo "test_classes=$(paste -sd ' ' "$TEST_FILE")" >> $GITHUB_OUTPUT
+          else
+            echo "test_classes=" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run Destructive Deployment - ${{ github.event.inputs.environment }}
+        shell: bash
+        env:
+          WORKSPACE: ${{ github.workspace }}
+          FEATURE_BRANCH: ${{ env.FEATURE_BRANCH }}
+          TEST_LEVEL: ${{ env.TEST_LEVEL }}
+          DESTRUCTIVE_TYPE: ${{ env.DESTRUCTIVE_TYPE }}
+          TEST_CLASSES: ${{ steps.prepare.outputs.test_classes }}
+          ORG_USERNAME: ${{ steps.set-org.outputs.USERNAME }}
+          EMPTY_PKG: ${{ steps.prepare.outputs.empty_pkg }}
+          DESTRUCTIVE_XML: ${{ steps.prepare.outputs.destructive_xml }}
+        run: |
+          echo "=========================================="
+          echo "DESTRUCTIVE DEPLOYMENT"
+          echo "=========================================="
+          echo "  Environment  : $ENVIRONMENT"
+          echo "  Branch       : $FEATURE_BRANCH"
+          echo "  Type         : ${DESTRUCTIVE_TYPE}-destructive"
+          echo "  Test Level   : $TEST_LEVEL"
+          echo "=========================================="
+
+          CMD=(sf project deploy start
+            --manifest "$EMPTY_PKG"
+            --target-org "$ORG_USERNAME"
+            --test-level "$TEST_LEVEL"
+            --wait 30
+            --ignore-conflicts
+            --verbose)
+
+          if [[ "$DESTRUCTIVE_TYPE" == "pre" ]]; then
+            CMD+=(--pre-destructive-changes "$DESTRUCTIVE_XML")
+          else
+            CMD+=(--post-destructive-changes "$DESTRUCTIVE_XML")
+          fi
+
+          if [[ "$TEST_LEVEL" == "RunSpecifiedTests" && -n "$TEST_CLASSES" ]]; then
+            CMD+=(--tests $TEST_CLASSES)
+          fi
+
+          "${CMD[@]}"
+
+      - name: Cleanup JWT key
+        if: always()
+        run: rm -f server.key
