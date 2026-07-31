@@ -85,24 +85,27 @@ jobs:
             *) echo "❌ Unknown environment: $ENVIRONMENT"; exit 1 ;;
           esac
 
-          # ── Branch ↔ Org mismatch guard ──────────────────────────────────
-          # Prevents running UAT retrieval from QA branch, etc.
-          CURRENT_BRANCH="${{ github.ref_name }}"
-          case "$CURRENT_BRANCH" in
-            DEV)  EXPECTED_ENV="DEV"        ;;
-            QA)   EXPECTED_ENV="QA"         ;;
-            UAT)  EXPECTED_ENV="UAT"        ;;
-            main) EXPECTED_ENV="PRODUCTION" ;;
-            *)    EXPECTED_ENV=""           ;;
-          esac
+          # ── Branch ↔ Org mismatch guard (workflow_dispatch only) ────────────
+          # Scheduled runs always execute on default branch (main) regardless
+          # of target env, so the guard only applies to manual triggers.
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            CURRENT_BRANCH="${{ github.ref_name }}"
+            case "$CURRENT_BRANCH" in
+              DEV)  EXPECTED_ENV="DEV"        ;;
+              QA)   EXPECTED_ENV="QA"         ;;
+              UAT)  EXPECTED_ENV="UAT"        ;;
+              main) EXPECTED_ENV="PRODUCTION" ;;
+              *)    EXPECTED_ENV=""           ;;
+            esac
 
-          if [[ -n "$EXPECTED_ENV" && "$ENVIRONMENT" != "$EXPECTED_ENV" ]]; then
-            echo "❌ Branch/Org mismatch detected!"
-            echo "   Current branch : ${CURRENT_BRANCH}"
-            echo "   Expected org   : ${EXPECTED_ENV}"
-            echo "   Selected org   : ${ENVIRONMENT}"
-            echo "   → Switch to the '${TARGET_BRANCH}' branch to retrieve from ${ENVIRONMENT} org."
-            exit 1
+            if [[ -n "$EXPECTED_ENV" && "$ENVIRONMENT" != "$EXPECTED_ENV" ]]; then
+              echo "❌ Branch/Org mismatch detected!"
+              echo "   Current branch : ${CURRENT_BRANCH}"
+              echo "   Expected org   : ${EXPECTED_ENV}"
+              echo "   Selected org   : ${ENVIRONMENT}"
+              echo "   → Switch to the '${TARGET_BRANCH}' branch to retrieve from ${ENVIRONMENT} org."
+              exit 1
+            fi
           fi
 
           echo "✅ Org map validated: ${ENVIRONMENT} (${ORG_LABEL}) → branch '${TARGET_BRANCH}'"
@@ -136,15 +139,27 @@ jobs:
 
       # ── Step 2: Checkout target env branch ──────────────────────────────────
       - name: Checkout ${{ steps.resolve.outputs.TARGET_BRANCH }} branch
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
         with:
           ref: ${{ steps.resolve.outputs.TARGET_BRANCH }}
           fetch-depth: 0
           token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
 
+      - name: Ensure manifest/package.xml exists
+        shell: bash
+        run: |
+          if [[ ! -f "manifest/package.xml" ]]; then
+            echo "⚠️  manifest/package.xml not found — fetching from main..."
+            git fetch origin main
+            git checkout origin/main -- manifest/package.xml
+            echo "✅ manifest/package.xml restored from main"
+          else
+            echo "✅ manifest/package.xml found"
+          fi
+
       # ── Step 3: Tooling setup ────────────────────────────────────────────────
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v4
         with:
           node-version: 22
 
