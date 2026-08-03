@@ -1,24 +1,13 @@
 name: Lodha Salesforce Code Retrieval Pipeline
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SCHEDULE CONFIGURATION (all times are UTC)
-#
-#   DEV        → runs daily at 04:00 UTC  (09:30 IST)
-#   QA         → runs daily at 04:10 UTC  (09:40 IST)
-#   UAT        → runs daily at 04:20 UTC  (09:50 IST)
-#   PRODUCTION → runs daily at 04:30 UTC  (10:00 IST)
-#
-# To change schedule: edit the cron expressions below.
-# To disable a schedule: comment out that cron line.
+# TRIGGER: workflow_dispatch only.
+# Scheduled runs are handled by Retrieve_Scheduler.yml which dispatches
+# this workflow on the correct branch (DEV/QA/UAT/main) at the right time.
+# Manual runs: Actions → Run workflow → select branch → Run
 # ─────────────────────────────────────────────────────────────────────────────
 
 on:
-  schedule:
-    - cron: '0 4 * * *'      # DEV        — 09:30 IST daily
-    - cron: '10 4 * * *'     # QA         — 09:40 IST daily
-    - cron: '20 4 * * *'     # UAT        — 09:50 IST daily
-    - cron: '30 4 * * *'     # PRODUCTION — 10:00 IST daily
-
   workflow_dispatch:
     inputs:
       package_path:
