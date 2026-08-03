@@ -1,14 +1,14 @@
-name: Retrieval Scheduler
+name: Salesforce Code Retrieval Scheduler
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Runs on main (default branch) — GitHub schedules always run on default branch.
 # Dispatches Retrieve_And_PR.yml on each env branch at staggered times so
 # each branch runs against its own org.
 #
-#   DEV  branch → 12:45 IST  (07:15 UTC)
-#   QA   branch → 12:55 IST  (07:25 UTC)
-#   UAT  branch → 13:05 IST  (07:35 UTC)
-#   main branch → 13:15 IST  (07:45 UTC)
+#   DEV  branch → 12:45 IST  (07:15 UTC)  |  13:25 IST  (07:55 UTC)
+#   QA   branch → 12:55 IST  (07:25 UTC)  |  13:35 IST  (08:05 UTC)
+#   UAT  branch → 13:05 IST  (07:35 UTC)  |  13:45 IST  (08:15 UTC)
+#   main branch → 13:15 IST  (07:45 UTC)  |  13:55 IST  (08:25 UTC)
 # ─────────────────────────────────────────────────────────────────────────────
 
 on:
@@ -17,6 +17,10 @@ on:
     - cron: '25 7 * * *'     # QA         — 12:55 IST daily
     - cron: '35 7 * * *'     # UAT        — 13:05 IST daily
     - cron: '45 7 * * *'     # PRODUCTION — 13:15 IST daily
+    - cron: '55 7 * * *'     # DEV        — 13:25 IST daily
+    - cron: '5 8 * * *'      # QA         — 13:35 IST daily
+    - cron: '15 8 * * *'     # UAT        — 13:45 IST daily
+    - cron: '25 8 * * *'     # PRODUCTION — 13:55 IST daily
 
 jobs:
   dispatch:
@@ -35,6 +39,10 @@ jobs:
             '25 7 * * *')   BRANCH="QA"   ;;
             '35 7 * * *')   BRANCH="UAT"  ;;
             '45 7 * * *')   BRANCH="main" ;;
+            '55 7 * * *')   BRANCH="DEV"  ;;
+            '5 8 * * *')    BRANCH="QA"   ;;
+            '15 8 * * *')   BRANCH="UAT"  ;;
+            '25 8 * * *')   BRANCH="main" ;;
             *) echo "❌ Unknown schedule: $GITHUB_SCHEDULE"; exit 1 ;;
           esac
 
