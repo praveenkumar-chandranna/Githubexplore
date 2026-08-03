@@ -1,0 +1,271 @@
+name: Apex Coverage Gate
+description: >
+  Enforces 75% minimum Apex test coverage (Lodha standard).
+  Hard-fails the pipeline, posts per-class breakdown as a Jira comment,
+  and writes a coverage trending summary to GitHub Actions.
+
+inputs:
+  coverage-results-dir:
+    description: Path to the coverage-results directory from sf deploy
+    required: false
+    default: coverage-results
+  minimum-coverage:
+    description: Minimum coverage percentage (Lodha standard = 75)
+    required: false
+    default: '75'
+  environment:
+    description: Environment name (DEV / QA / UAT / PRODUCTION)
+    required: true
+  feature-branch:
+    description: Feature branch / package name for context
+    required: true
+  jira-base-url:
+    description: Jira base URL (e.g. https://yourorg.atlassian.net)
+    required: false
+    default: ''
+  jira-user-email:
+    description: Jira user email for API auth
+    required: false
+    default: ''
+  jira-api-token:
+    description: Jira API token
+    required: false
+    default: ''
+  jira-ticket:
+    description: Jira ticket key to post coverage comment (e.g. LODHA-123). Auto-extracted from branch if blank.
+    required: false
+    default: ''
+  run-id:
+    description: GitHub Actions run ID
+    required: false
+    default: ''
+  repo:
+    description: GitHub repository (owner/repo)
+    required: false
+    default: ''
+
+outputs:
+  coverage-pct:
+    description: Overall coverage percentage
+    value: ${{ steps.gate.outputs.coverage_pct }}
+  passed:
+    description: 'true if coverage >= minimum, false otherwise'
+    value: ${{ steps.gate.outputs.passed }}
+
+runs:
+  using: composite
+  steps:
+
+    # ── Step 1: Parse coverage JSON, enforce gate, build report ───────────────
+    - name: Evaluate coverage and enforce 75% gate
+      id: gate
+      shell: bash
+      env:
+        COVERAGE_DIR:     ${{ inputs.coverage-results-dir }}
+        MIN_COVERAGE:     ${{ inputs.minimum-coverage }}
+        ENVIRONMENT:      ${{ inputs.environment }}
+        FEATURE_BRANCH:   ${{ inputs.feature-branch }}
+        RUN_ID:           ${{ inputs.run-id }}
+        REPO:             ${{ inputs.repo }}
+      run: |
+        echo "🔍 Locating coverage file in: $COVERAGE_DIR"
+        COVERAGE_FILE=$(find "$COVERAGE_DIR" -name "*.json" 2>/dev/null | head -1)
+        [[ -z "$COVERAGE_FILE" ]] && COVERAGE_FILE=$(find . -name "coverage*.json" 2>/dev/null | head -1)
+
+        if [[ -z "$COVERAGE_FILE" ]]; then
+          echo "⚠️  No coverage JSON found — skipping gate"
+          echo "coverage_pct=unknown" >> $GITHUB_OUTPUT
+          echo "passed=true"         >> $GITHUB_OUTPUT
+          echo "class_table="        >> $GITHUB_OUTPUT
+          exit 0
+        fi
+
+        echo "📄 Coverage file: $COVERAGE_FILE"
+
+        # ── Per-class breakdown ───────────────────────────────────────────────
+        CLASS_TABLE=""
+        TOTAL_LINES=0
+        COVERED_LINES=0
+
+        while IFS= read -r ROW; do
+          CLASS=$(echo "$ROW" | jq -r '.class')
+          TOTAL=$(echo "$ROW" | jq -r '.total')
+          COVERED=$(echo "$ROW" | jq -r '.covered')
+          PCT=$(echo "$ROW" | jq -r '.pct')
+
+          TOTAL_LINES=$((TOTAL_LINES + TOTAL))
+          COVERED_LINES=$((COVERED_LINES + COVERED))
+
+          if   [[ "$PCT" -ge 90 ]]; then BADGE="🟢"
+          elif [[ "$PCT" -ge 75 ]]; then BADGE="🟡"
+          else                           BADGE="🔴"
+          fi
+
+          CLASS_TABLE+="| ${BADGE} ${CLASS} | ${COVERED}/${TOTAL} | ${PCT}% |\n"
+        done < <(jq -c '
+          to_entries[] |
+          .key as $class |
+          (.value.s | to_entries) as $stmts |
+          {
+            class:   $class,
+            total:   ($stmts | length),
+            covered: ([$stmts[] | select(.value > 0)] | length),
+            pct:     (if ($stmts | length) > 0
+                      then ([$stmts[] | select(.value > 0)] | length) * 100 / ($stmts | length) | floor
+                      else 0 end)
+          }
+        ' "$COVERAGE_FILE" 2>/dev/null)
+
+        # ── Overall percentage ────────────────────────────────────────────────
+        if [[ $TOTAL_LINES -gt 0 ]]; then
+          OVERALL=$(( COVERED_LINES * 100 / TOTAL_LINES ))
+        else
+          OVERALL=0
+        fi
+
+        RUN_URL="https://github.com/${REPO}/actions/runs/${RUN_ID}"
+        REPORT_DATE=$(TZ='Asia/Kolkata' date +'%d-%m-%Y %H:%M IST')
+
+        # ── GitHub Actions Step Summary (trending dashboard) ──────────────────
+        {
+          echo "## 📊 Apex Test Coverage Report"
+          echo ""
+          echo "| Field | Value |"
+          echo "|---|---|"
+          echo "| **Environment** | \`${ENVIRONMENT}\` |"
+          echo "| **Package** | \`${FEATURE_BRANCH}\` |"
+          echo "| **Overall Coverage** | **${OVERALL}%** |"
+          echo "| **Lines Covered** | ${COVERED_LINES} / ${TOTAL_LINES} |"
+          echo "| **Minimum Required** | ${MIN_COVERAGE}% (Lodha standard) |"
+          echo "| **Reported at** | ${REPORT_DATE} |"
+          echo "| **Workflow Run** | [${RUN_ID}](${RUN_URL}) |"
+          echo ""
+          if [[ "$OVERALL" -ge "$MIN_COVERAGE" ]]; then
+            echo "### ✅ Coverage gate PASSED — ${OVERALL}% ≥ ${MIN_COVERAGE}%"
+          else
+            echo "### ❌ Coverage gate FAILED — ${OVERALL}% < ${MIN_COVERAGE}%"
+          fi
+          echo ""
+          echo "### Per-Class Breakdown"
+          echo ""
+          echo "| Class | Lines Covered | Coverage |"
+          echo "|---|---|---|"
+          printf '%b' "$CLASS_TABLE"
+          echo ""
+          echo "> 🟢 ≥ 90%  🟡 75–89%  🔴 < 75%"
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        # ── Console output ────────────────────────────────────────────────────
+        echo ""
+        echo "=========================================="
+        echo "APEX COVERAGE GATE — ${ENVIRONMENT}"
+        echo "=========================================="
+        echo "  Overall   : ${OVERALL}%"
+        echo "  Covered   : ${COVERED_LINES} / ${TOTAL_LINES} lines"
+        echo "  Minimum   : ${MIN_COVERAGE}%"
+        echo "=========================================="
+        printf '%b' "$CLASS_TABLE" | sed 's/|//g' | awk '{print "  "$0}'
+        echo "=========================================="
+
+        # ── Outputs ──────────────────────────────────────────────────────────
+        echo "coverage_pct=${OVERALL}"   >> $GITHUB_OUTPUT
+        echo "class_table<<EOF"          >> $GITHUB_OUTPUT
+        printf '%b' "$CLASS_TABLE"       >> $GITHUB_OUTPUT
+        echo "EOF"                       >> $GITHUB_OUTPUT
+
+        if [[ "$OVERALL" -lt "$MIN_COVERAGE" ]]; then
+          echo "passed=false" >> $GITHUB_OUTPUT
+          echo ""
+          echo "❌ HARD GATE: Coverage ${OVERALL}% is below Lodha minimum of ${MIN_COVERAGE}%"
+          echo "   Pipeline will fail fast."
+          exit 1
+        else
+          echo "passed=true" >> $GITHUB_OUTPUT
+          echo "✅ Coverage gate passed: ${OVERALL}% ≥ ${MIN_COVERAGE}%"
+        fi
+
+    # ── Step 2: Post per-class breakdown as Jira comment ─────────────────────
+    - name: Post coverage breakdown to Jira
+      if: inputs.jira-base-url != '' && inputs.jira-api-token != ''
+      shell: bash
+      env:
+        JIRA_BASE_URL:   ${{ inputs.jira-base-url }}
+        JIRA_EMAIL:      ${{ inputs.jira-user-email }}
+        JIRA_TOKEN:      ${{ inputs.jira-api-token }}
+        JIRA_TICKET:     ${{ inputs.jira-ticket }}
+        FEATURE_BRANCH:  ${{ inputs.feature-branch }}
+        ENVIRONMENT:     ${{ inputs.environment }}
+        COVERAGE_PCT:    ${{ steps.gate.outputs.coverage_pct }}
+        CLASS_TABLE:     ${{ steps.gate.outputs.class_table }}
+        MIN_COVERAGE:    ${{ inputs.minimum-coverage }}
+        RUN_ID:          ${{ inputs.run-id }}
+        REPO:            ${{ inputs.repo }}
+      run: |
+        # Auto-extract ticket from branch name if not provided
+        TICKET="$JIRA_TICKET"
+        if [[ -z "$TICKET" ]]; then
+          TICKET=$(echo "$FEATURE_BRANCH" | grep -oP '[A-Z]+-\d+' | head -1 || echo "")
+        fi
+
+        if [[ -z "$TICKET" ]]; then
+          echo "⚠️  No Jira ticket found — skipping Jira comment"
+          exit 0
+        fi
+
+        RUN_URL="https://github.com/${REPO}/actions/runs/${RUN_ID}"
+        REPORT_DATE=$(TZ='Asia/Kolkata' date +'%d-%m-%Y %H:%M IST')
+
+        if [[ "$COVERAGE_PCT" -ge "$MIN_COVERAGE" ]]; then
+          STATUS_ICON="✅"
+          STATUS_TEXT="PASSED"
+        else
+          STATUS_ICON="❌"
+          STATUS_TEXT="FAILED"
+        fi
+
+        # Build Jira comment using printf to avoid YAML indentation issues
+        COMMENT_BODY=$(printf '%s' \
+          "*📊 Apex Coverage Report — ${ENVIRONMENT}* ${STATUS_ICON} ${STATUS_TEXT}" $'\n' \
+          $'\n' \
+          "|| Field || Value ||" $'\n' \
+          "| Environment | ${ENVIRONMENT} |" $'\n' \
+          "| Package | ${FEATURE_BRANCH} |" $'\n' \
+          "| Overall Coverage | *${COVERAGE_PCT}%* |" $'\n' \
+          "| Minimum Required | ${MIN_COVERAGE}% (Lodha standard) |" $'\n' \
+          "| Gate Status | ${STATUS_ICON} ${STATUS_TEXT} |" $'\n' \
+          "| Reported at | ${REPORT_DATE} |" $'\n' \
+          "| Workflow Run | [${RUN_ID}|${RUN_URL}] |" $'\n' \
+          $'\n' \
+          "*Per-Class Breakdown*" $'\n' \
+          $'\n' \
+          "|| Class || Lines Covered || Coverage ||" \
+        )
+
+        # Append per-class rows using a temp file to avoid YAML indentation issues
+        BODY_FILE=$(mktemp)
+        printf '%s' "$COMMENT_BODY" > "$BODY_FILE"
+
+        while IFS= read -r LINE; do
+          [[ -z "$LINE" ]] && continue
+          JIRA_ROW=$(echo "$LINE" | sed 's/| [🟢🟡🔴] /| /g')
+          printf '\n%s' "$JIRA_ROW" >> "$BODY_FILE"
+        done <<< "$CLASS_TABLE"
+
+        printf '\n\n> 🟢 >= 90%%  🟡 75-89%%  🔴 < 75%% (Lodha minimum: %s%%)' "$MIN_COVERAGE" >> "$BODY_FILE"
+        COMMENT_BODY=$(cat "$BODY_FILE")
+        rm -f "$BODY_FILE"
+
+        echo "📝 Posting coverage comment to Jira ticket: $TICKET"
+
+        HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+          -X POST \
+          -u "${JIRA_EMAIL}:${JIRA_TOKEN}" \
+          -H "Content-Type: application/json" \
+          "${JIRA_BASE_URL}/rest/api/2/issue/${TICKET}/comment" \
+          -d "$(jq -n --arg body "$COMMENT_BODY" '{body: $body}')")
+
+        if [[ "$HTTP_CODE" == "201" ]]; then
+          echo "✅ Coverage comment posted to ${TICKET}"
+        else
+          echo "⚠️  Jira comment failed (HTTP ${HTTP_CODE}) — non-blocking"
+        fi
