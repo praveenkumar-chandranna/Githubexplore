@@ -5,22 +5,18 @@ name: Salesforce Code Retrieval Scheduler
 # Dispatches Retrieve_And_PR.yml on each env branch at staggered times so
 # each branch runs against its own org.
 #
-#   DEV  branch → 12:45 IST  (07:15 UTC)  |  13:25 IST  (07:55 UTC)
-#   QA   branch → 12:55 IST  (07:25 UTC)  |  13:35 IST  (08:05 UTC)
-#   UAT  branch → 13:05 IST  (07:35 UTC)  |  13:45 IST  (08:15 UTC)
-#   main branch → 13:15 IST  (07:45 UTC)  |  13:55 IST  (08:25 UTC)
+#   DEV  branch → 22:30 IST  (17:00 UTC)  |  23:10 IST  (17:40 UTC)
+#   QA   branch → 22:40 IST  (17:10 UTC)  |  23:20 IST  (17:50 UTC)
+#   UAT  branch → 22:50 IST  (17:20 UTC)  |  23:30 IST  (18:00 UTC)
+#   main branch → 23:00 IST  (17:30 UTC)  |  23:40 IST  (18:10 UTC)
 # ─────────────────────────────────────────────────────────────────────────────
 
 on:
   schedule:
-    - cron: '15 7 * * *'     # DEV        — 12:45 IST daily
-    - cron: '25 7 * * *'     # QA         — 12:55 IST daily
-    - cron: '35 7 * * *'     # UAT        — 13:05 IST daily
-    - cron: '45 7 * * *'     # PRODUCTION — 13:15 IST daily
-    - cron: '55 7 * * *'     # DEV        — 13:25 IST daily
-    - cron: '5 8 * * *'      # QA         — 13:35 IST daily
-    - cron: '15 8 * * *'     # UAT        — 13:45 IST daily
-    - cron: '25 8 * * *'     # PRODUCTION — 13:55 IST daily
+    - cron: '0 17 * * *'     # DEV        — 22:30 IST daily
+    - cron: '10 17 * * *'    # QA         — 22:40 IST daily
+    - cron: '20 17 * * *'    # UAT        — 22:50 IST daily
+    - cron: '30 17 * * *'    # PRODUCTION — 23:00 IST daily
 
 jobs:
   dispatch:
@@ -35,14 +31,10 @@ jobs:
           REPO:            ${{ github.repository }}
         run: |
           case "$GITHUB_SCHEDULE" in
-            '15 7 * * *')   BRANCH="DEV"  ;;
-            '25 7 * * *')   BRANCH="QA"   ;;
-            '35 7 * * *')   BRANCH="UAT"  ;;
-            '45 7 * * *')   BRANCH="main" ;;
-            '55 7 * * *')   BRANCH="DEV"  ;;
-            '5 8 * * *')    BRANCH="QA"   ;;
-            '15 8 * * *')   BRANCH="UAT"  ;;
-            '25 8 * * *')   BRANCH="main" ;;
+            '0 17 * * *')    BRANCH="DEV"  ;;
+            '10 17 * * *')   BRANCH="QA"   ;;
+            '20 17 * * *')   BRANCH="UAT"  ;;
+            '30 17 * * *')   BRANCH="main" ;;
             *) echo "❌ Unknown schedule: $GITHUB_SCHEDULE"; exit 1 ;;
           esac
 
