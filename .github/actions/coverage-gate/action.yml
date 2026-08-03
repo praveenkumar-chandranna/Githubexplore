@@ -88,7 +88,7 @@ runs:
         COVERED_LINES=0
 
         while IFS= read -r ROW; do
-          CLASS=$(echo "$ROW" | jq -r '.class')
+          CLASS=$(echo "$ROW" | jq -r '.class' | sed 's|^no-map/||')
           TOTAL=$(echo "$ROW" | jq -r '.total')
           COVERED=$(echo "$ROW" | jq -r '.covered')
           PCT=$(echo "$ROW" | jq -r '.pct')
