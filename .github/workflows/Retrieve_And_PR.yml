@@ -21,21 +21,10 @@ on:
 
   workflow_dispatch:
     inputs:
-      environment:
-        type: choice
-        description: Org to retrieve metadata from
-        options:
-          - DEV
-          - QA
-          - UAT
-          - PRODUCTION
-          - HOTFIX
-        default: DEV
-        required: true
       package_path:
         type: string
         description: >
-          Relative path to retrieval package.xml. Defaults to manifest/package.xml if blank.
+          Relative path to retrieval package.xml. Defaults to manifest/package_retive.xml if blank.
         required: false
 
 jobs:
@@ -58,59 +47,23 @@ jobs:
         id: resolve
         shell: bash
         env:
-          EVENT_NAME:      ${{ github.event_name }}
-          INPUT_ENV:       ${{ github.event.inputs.environment }}
-          INPUT_PKG:       ${{ github.event.inputs.package_path }}
-          GITHUB_SCHEDULE: ${{ github.event.schedule }}
+          EVENT_NAME:    ${{ github.event_name }}
+          INPUT_PKG:     ${{ github.event.inputs.package_path }}
+          CURRENT_BRANCH: ${{ github.ref_name }}
         run: |
-          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
-            ENVIRONMENT="$INPUT_ENV"
-          else
-            case "$GITHUB_SCHEDULE" in
-              '0 4 * * *')   ENVIRONMENT="DEV"        ;;
-              '10 4 * * *')  ENVIRONMENT="QA"         ;;
-              '20 4 * * *')  ENVIRONMENT="UAT"        ;;
-              '30 4 * * *')  ENVIRONMENT="PRODUCTION" ;;
-              *) echo "❌ Unknown schedule: $GITHUB_SCHEDULE"; exit 1 ;;
-            esac
-          fi
-
-          # ── Org → Branch map ─────────────────────────────────────────────
-          case "$ENVIRONMENT" in
-            DEV)        TARGET_BRANCH="DEV"  ; ORG_LABEL="DEV sandbox"    ;;
-            QA)         TARGET_BRANCH="QA"   ; ORG_LABEL="QA sandbox"     ;;
-            UAT)        TARGET_BRANCH="UAT"  ; ORG_LABEL="UAT sandbox"    ;;
-            PRODUCTION) TARGET_BRANCH="main" ; ORG_LABEL="Production org" ;;
-            HOTFIX)     TARGET_BRANCH="main" ; ORG_LABEL="Production org" ;;
-            *) echo "❌ Unknown environment: $ENVIRONMENT"; exit 1 ;;
+          # Derive ENVIRONMENT from the branch this workflow is running on
+          case "$CURRENT_BRANCH" in
+            DEV)  ENVIRONMENT="DEV"        ; ORG_LABEL="DEV sandbox"    ;;
+            QA)   ENVIRONMENT="QA"         ; ORG_LABEL="QA sandbox"     ;;
+            UAT)  ENVIRONMENT="UAT"        ; ORG_LABEL="UAT sandbox"    ;;
+            main) ENVIRONMENT="PRODUCTION" ; ORG_LABEL="Production org" ;;
+            *) echo "❌ Cannot derive environment from branch: $CURRENT_BRANCH"; exit 1 ;;
           esac
 
-          # ── Branch ↔ Org mismatch guard (workflow_dispatch only) ────────────
-          # Scheduled runs always execute on default branch (main) regardless
-          # of target env, so the guard only applies to manual triggers.
-          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
-            CURRENT_BRANCH="${{ github.ref_name }}"
-            case "$CURRENT_BRANCH" in
-              DEV)  EXPECTED_ENV="DEV"        ;;
-              QA)   EXPECTED_ENV="QA"         ;;
-              UAT)  EXPECTED_ENV="UAT"        ;;
-              main) EXPECTED_ENV="PRODUCTION" ;;
-              *)    EXPECTED_ENV=""           ;;
-            esac
+          TARGET_BRANCH="$CURRENT_BRANCH"
+          echo "✅ Branch '${TARGET_BRANCH}' → ${ENVIRONMENT} (${ORG_LABEL})"
 
-            if [[ -n "$EXPECTED_ENV" && "$ENVIRONMENT" != "$EXPECTED_ENV" ]]; then
-              echo "❌ Branch/Org mismatch detected!"
-              echo "   Current branch : ${CURRENT_BRANCH}"
-              echo "   Expected org   : ${EXPECTED_ENV}"
-              echo "   Selected org   : ${ENVIRONMENT}"
-              echo "   → Switch to the '${TARGET_BRANCH}' branch to retrieve from ${ENVIRONMENT} org."
-              exit 1
-            fi
-          fi
-
-          echo "✅ Org map validated: ${ENVIRONMENT} (${ORG_LABEL}) → branch '${TARGET_BRANCH}'"
-
-          PACKAGE_PATH="${INPUT_PKG:-manifest/package.xml}"
+          PACKAGE_PATH="${INPUT_PKG:-manifest/package_retive.xml}"
           RETRIEVE_DATE=$(TZ='Asia/Kolkata' date +'%d%m%Y_%H%M')
           FEATURE_BRANCH="retrieve/${ENVIRONMENT}Code_${RETRIEVE_DATE}"
           GENERATED_PKG="manifest/retrieve/${ENVIRONMENT}Code_${RETRIEVE_DATE}_package.xml"
@@ -141,20 +94,20 @@ jobs:
       - name: Checkout ${{ steps.resolve.outputs.TARGET_BRANCH }} branch
         uses: actions/checkout@v4
         with:
-          ref: ${{ steps.resolve.outputs.TARGET_BRANCH }}
+          ref: ${{ github.ref }}
           fetch-depth: 0
           token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
 
-      - name: Ensure manifest/package.xml exists
+      - name: Ensure manifest/package_retive.xml exists
         shell: bash
         run: |
-          if [[ ! -f "manifest/package.xml" ]]; then
-            echo "⚠️  manifest/package.xml not found — fetching from main..."
+          if [[ ! -f "manifest/package_retive.xml" ]]; then
+            echo "⚠️  manifest/package_retive.xml not found — fetching from main..."
             git fetch origin main
-            git checkout origin/main -- manifest/package.xml
-            echo "✅ manifest/package.xml restored from main"
+            git checkout origin/main -- manifest/package_retive.xml
+            echo "✅ manifest/package_retive.xml restored from main"
           else
-            echo "✅ manifest/package.xml found"
+            echo "✅ manifest/package_retive.xml found"
           fi
 
       # ── Step 3: Tooling setup ────────────────────────────────────────────────
