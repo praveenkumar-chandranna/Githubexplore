@@ -128,6 +128,7 @@ jobs:
 
       # ── Step 3: Resolve package.xml at the reset commit ──────────────────────
       - name: Resolve package.xml
+        if: github.event.inputs.package_path != ''
         id: resolve-pkg
         shell: bash
         env:
@@ -184,24 +185,28 @@ jobs:
           cat "${WORKSPACE}/${RESOLVED_PKG}"
           echo "=========================================="
 
-      # ── Step 4: Tooling setup ─────────────────────────────────────────────────
+      # ── Step 4: Tooling setup (only if package_path provided) ─────────────────
       - name: Setup Node.js
+        if: github.event.inputs.package_path != ''
         uses: actions/setup-node@v4
         with:
           node-version: 22
 
       - name: Install Salesforce CLI
+        if: github.event.inputs.package_path != ''
         run: |
           npm install -g @salesforce/cli@latest
           sf --version
 
-      # ── Step 5: JWT Auth ──────────────────────────────────────────────────────
+      # ── Step 5: JWT Auth (only if package_path provided) ─────────────────────
       - name: Generate JWT private key file
+        if: github.event.inputs.package_path != ''
         run: |
           echo "${{ secrets.SALESFORCE_JWT_SECRET_KEY }}" > server.key
           chmod 600 server.key
 
       - name: Set org credentials
+        if: github.event.inputs.package_path != ''
         id: set-org
         shell: bash
         env:
@@ -229,9 +234,11 @@ jobs:
           esac
 
       - name: Clear Prior Salesforce Sessions
+        if: github.event.inputs.package_path != ''
         run: sf org logout --all --no-prompt || true
 
       - name: Authenticate to ${{ github.event.inputs.environment }} Org
+        if: github.event.inputs.package_path != ''
         env:
           CLIENT_ID: ${{ steps.set-org.outputs.CLIENT_ID }}
           USERNAME:  ${{ steps.set-org.outputs.USERNAME }}
@@ -244,8 +251,9 @@ jobs:
             --instance-url "$LOGIN_URL" \
             --set-default
 
-      # ── Step 6: Validate rollback deployment ─────────────────────────────────
+      # ── Step 6: Validate rollback deployment (only if package_path provided) ──
       - name: Validate Rollback Deployment
+        if: github.event.inputs.package_path != ''
         shell: bash
         env:
           WORKSPACE:    ${{ github.workspace }}
@@ -266,8 +274,9 @@ jobs:
           [[ "$TEST_LEVEL" == "RunSpecifiedTests" && -n "$TEST_CLASSES" ]] && CMD+=(--tests $TEST_CLASSES)
           "${CMD[@]}"
 
-      # ── Step 7: Deploy rollback ───────────────────────────────────────────────
+      # ── Step 7: Deploy rollback (only if package_path provided) ──────────────
       - name: Deploy Rollback to ${{ github.event.inputs.environment }}
+        if: github.event.inputs.package_path != ''
         shell: bash
         env:
           WORKSPACE:    ${{ github.workspace }}
