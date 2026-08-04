@@ -236,28 +236,33 @@ jobs:
             TYPE_MEMBERS["$META_TYPE"]+="${MEMBER}"$'\n'
           done < <(git diff --cached --name-only)
 
-          {
-            printf '<?xml version="1.0" encoding="UTF-8"?>\n'
-            printf '<Package xmlns="http://soap.sforce.com/2006/04/metadata">\n'
-            for TYPE in $(echo "${!TYPE_MEMBERS[@]}" | tr ' ' '\n' | sort); do
-              printf '    <types>\n'
-              echo "${TYPE_MEMBERS[$TYPE]}" | sort -u | grep -v '^$' | while read -r M; do
-                printf '        <members>%s</members>\n' "$M"
+          if [[ ${#TYPE_MEMBERS[@]} -eq 0 ]]; then
+            echo "⚠️  No force-app changes in staged files — skipping package.xml"
+            echo "📋 All staged files:"
+            git diff --cached --name-only
+          else
+            {
+              printf '<?xml version="1.0" encoding="UTF-8"?>\n'
+              printf '<Package xmlns="http://soap.sforce.com/2006/04/metadata">\n'
+              for TYPE in $(echo "${!TYPE_MEMBERS[@]}" | tr ' ' '\n' | sort); do
+                printf '    <types>\n'
+                echo "${TYPE_MEMBERS[$TYPE]}" | sort -u | grep -v '^$' | while read -r M; do
+                  printf '        <members>%s</members>\n' "$M"
+                done
+                printf '        <name>%s</name>\n' "$TYPE"
+                printf '    </types>\n'
               done
-              printf '        <name>%s</name>\n' "$TYPE"
-              printf '    </types>\n'
-            done
-            printf '    <version>%s</version>\n' "$API_VERSION"
-            printf '</Package>\n'
-          } > "$GENERATED_PKG"
-
-          echo "✅ package.xml ready: $GENERATED_PKG"
-          echo ""
-          echo "=========================================="
-          echo "📦 GENERATED PACKAGE.XML"
-          echo "=========================================="
-          cat "$GENERATED_PKG"
-          echo "=========================================="
+              printf '    <version>%s</version>\n' "$API_VERSION"
+              printf '</Package>\n'
+            } > "$GENERATED_PKG"
+            echo "✅ package.xml ready: $GENERATED_PKG"
+            echo ""
+            echo "=========================================="
+            echo "📦 GENERATED PACKAGE.XML"
+            echo "=========================================="
+            cat "$GENERATED_PKG"
+            echo "=========================================="
+          fi
 
           # ── Generate TestClass.txt ───────────────────────────────────────
           # Scan retrieved Apex classes — any class ending in Test or starting
