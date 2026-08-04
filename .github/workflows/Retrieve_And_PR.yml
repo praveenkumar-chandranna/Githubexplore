@@ -81,7 +81,7 @@ jobs:
 
       # ── Step 2: Checkout target env branch ──────────────────────────────────
       - name: Checkout ${{ steps.resolve.outputs.TARGET_BRANCH }} branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.ref }}
           fetch-depth: 0
