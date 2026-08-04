@@ -36,12 +36,6 @@ on:
           - NoTestRun
         default: RunSpecifiedTests
         required: true
-      test_classes:
-        type: string
-        description: >
-          Space-separated test class names (only if testlevel is RunSpecifiedTests)
-        required: false
-
 jobs:
   Rollback_Build:
     runs-on: ubuntu-latest
@@ -195,6 +189,18 @@ jobs:
           cat "${WORKSPACE}/${RESOLVED_PKG}"
           echo "=========================================="
 
+          # ── Auto-resolve TestClass.txt from package path ──────────────────
+          TEST_FILE=$(echo "${WORKSPACE}/${RESOLVED_PKG}" | sed 's/_package\.xml$/_TestClass.txt/')
+          if [[ -f "$TEST_FILE" ]]; then
+            TEST_CLASSES=$(cat "$TEST_FILE" | tr '\n' ' ' | xargs)
+            echo "✅ TestClass.txt found: $TEST_FILE"
+            echo "✅ Test classes: $TEST_CLASSES"
+            echo "resolved_tests=${TEST_CLASSES}" >> $GITHUB_OUTPUT
+          else
+            echo "⚠️  No TestClass.txt found for this package"
+            echo "resolved_tests=" >> $GITHUB_OUTPUT
+          fi
+
       # ── Step 4: Tooling setup (only if package_path provided) ─────────────────
       - name: Setup Node.js
         if: github.event.inputs.package_path != ''
@@ -269,7 +275,7 @@ jobs:
           WORKSPACE:    ${{ github.workspace }}
           PACKAGE_PATH: ${{ steps.resolve-pkg.outputs.resolved_pkg }}
           TEST_LEVEL:   ${{ github.event.inputs.testlevel }}
-          TEST_CLASSES: ${{ github.event.inputs.test_classes }}
+          TEST_CLASSES: ${{ steps.resolve-pkg.outputs.resolved_tests }}
           ORG_USERNAME: ${{ steps.set-org.outputs.USERNAME }}
         run: |
           MANIFEST="${WORKSPACE}/${PACKAGE_PATH}"
@@ -292,7 +298,7 @@ jobs:
           WORKSPACE:    ${{ github.workspace }}
           PACKAGE_PATH: ${{ steps.resolve-pkg.outputs.resolved_pkg }}
           TEST_LEVEL:   ${{ github.event.inputs.testlevel }}
-          TEST_CLASSES: ${{ github.event.inputs.test_classes }}
+          TEST_CLASSES: ${{ steps.resolve-pkg.outputs.resolved_tests }}
           ORG_USERNAME: ${{ steps.set-org.outputs.USERNAME }}
         run: |
           MANIFEST="${WORKSPACE}/${PACKAGE_PATH}"
