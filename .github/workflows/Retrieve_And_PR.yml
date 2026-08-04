@@ -226,13 +226,50 @@ jobs:
           # ── Generate package.xml from staged changed files ────────────────
           echo "📦 Generating package.xml from changed files..."
 
+          declare -A TYPE_MAP
+          TYPE_MAP["lwc"]="LightningComponentBundle"
+          TYPE_MAP["aura"]="AuraDefinitionBundle"
+          TYPE_MAP["classes"]="ApexClass"
+          TYPE_MAP["triggers"]="ApexTrigger"
+          TYPE_MAP["objects"]="CustomObject"
+          TYPE_MAP["fields"]="CustomField"
+          TYPE_MAP["layouts"]="Layout"
+          TYPE_MAP["permissionsets"]="PermissionSet"
+          TYPE_MAP["profiles"]="Profile"
+          TYPE_MAP["flows"]="Flow"
+          TYPE_MAP["flexipages"]="FlexiPage"
+          TYPE_MAP["tabs"]="CustomTab"
+          TYPE_MAP["staticresources"]="StaticResource"
+          TYPE_MAP["contentassets"]="ContentAsset"
+          TYPE_MAP["applications"]="CustomApplication"
+          TYPE_MAP["labels"]="CustomLabels"
+          TYPE_MAP["email"]="EmailTemplate"
+          TYPE_MAP["reportTypes"]="ReportType"
+          TYPE_MAP["reports"]="Report"
+          TYPE_MAP["dashboards"]="Dashboard"
+          TYPE_MAP["pages"]="ApexPage"
+          TYPE_MAP["components"]="ApexComponent"
+          TYPE_MAP["workflows"]="Workflow"
+          TYPE_MAP["assignmentRules"]="AssignmentRules"
+          TYPE_MAP["autoResponseRules"]="AutoResponseRules"
+          TYPE_MAP["escalationRules"]="EscalationRules"
+          TYPE_MAP["sharingRules"]="SharingRules"
+          TYPE_MAP["validationRules"]="ValidationRule"
+          TYPE_MAP["customMetadata"]="CustomMetadata"
+          TYPE_MAP["namedCredentials"]="NamedCredential"
+          TYPE_MAP["remoteSiteSettings"]="RemoteSiteSetting"
+          TYPE_MAP["queues"]="Queue"
+          TYPE_MAP["roles"]="Role"
+          TYPE_MAP["groups"]="Group"
+
           declare -A TYPE_MEMBERS
           while IFS= read -r FPATH; do
             [[ -z "$FPATH" ]] && continue
             [[ ! "$FPATH" =~ ^force-app/ ]] && continue
-            META_TYPE=$(echo "$FPATH" | grep -oP 'force-app/main/default/\K[^/]+')
+            FOLDER=$(echo "$FPATH" | grep -oP 'force-app/main/default/\K[^/]+')
+            META_TYPE="${TYPE_MAP[$FOLDER]:-$FOLDER}"
             MEMBER=$(basename "$FPATH" | sed 's/\..*$//' | sed 's/-meta$//')
-            [[ -z "$META_TYPE" || -z "$MEMBER" ]] && continue
+            [[ -z "$FOLDER" || -z "$MEMBER" ]] && continue
             TYPE_MEMBERS["$META_TYPE"]+="${MEMBER}"$'\n'
           done < <(git diff --cached --name-only)
 
