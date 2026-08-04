@@ -189,8 +189,29 @@ jobs:
         if: always()
         run: rm -f server.key
 
-      # ── Step 7: Generate package.xml and TestClass.txt ───────────────────────
+      # ── Step 7: Detect changes ───────────────────────────────────────────────
+      - name: Check for changes
+        id: check-changes
+        shell: bash
+        run: |
+          git add -A
+          CHANGED=$(git diff --cached --name-only | wc -l | xargs)
+          echo "changed_count=${CHANGED}" >> $GITHUB_OUTPUT
+
+          if [[ "$CHANGED" -eq 0 ]]; then
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "⚠️  No metadata changes — org is already in sync with branch."
+          else
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            echo "✅ ${CHANGED} file(s) staged:"
+            echo "=========================================="
+            git diff --cached --name-status
+            echo "=========================================="
+          fi
+
+      # ── Step 8: Generate package.xml and TestClass.txt ───────────────────────
       - name: Generate package.xml and TestClass.txt
+        if: steps.check-changes.outputs.has_changes == 'true'
         id: gen-artifacts
         shell: bash
         env:
@@ -277,26 +298,6 @@ jobs:
           else
             echo "⚠️  No test classes found in retrieved metadata"
             echo "test_file_created=false" >> $GITHUB_OUTPUT
-          fi
-
-      # ── Step 8: Detect changes ───────────────────────────────────────────────
-      - name: Check for changes
-        id: check-changes
-        shell: bash
-        run: |
-          git add -A
-          CHANGED=$(git diff --cached --name-only | wc -l | xargs)
-          echo "changed_count=${CHANGED}" >> $GITHUB_OUTPUT
-
-          if [[ "$CHANGED" -eq 0 ]]; then
-            echo "has_changes=false" >> $GITHUB_OUTPUT
-            echo "⚠️  No metadata changes — org is already in sync with branch."
-          else
-            echo "has_changes=true" >> $GITHUB_OUTPUT
-            echo "✅ ${CHANGED} file(s) staged:"
-            echo "=========================================="
-            git diff --cached --name-status
-            echo "=========================================="
           fi
 
       # ── Step 9: Create feature branch, commit, push ──────────────────────────
