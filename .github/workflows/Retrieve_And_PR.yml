@@ -81,7 +81,7 @@ jobs:
 
       # ── Step 2: Checkout target env branch ──────────────────────────────────
       - name: Checkout ${{ steps.resolve.outputs.TARGET_BRANCH }} branch
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
         with:
           ref: ${{ github.ref }}
           fetch-depth: 0
@@ -101,7 +101,7 @@ jobs:
 
       # ── Step 3: Tooling setup ────────────────────────────────────────────────
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@v4
         with:
           node-version: 22
 
@@ -189,8 +189,29 @@ jobs:
         if: always()
         run: rm -f server.key
 
-      # ── Step 7: Generate package.xml and TestClass.txt ───────────────────────
+      # ── Step 7: Detect changes ───────────────────────────────────────────────
+      - name: Check for changes
+        id: check-changes
+        shell: bash
+        run: |
+          git add force-app
+          CHANGED=$(git diff --cached --name-only | wc -l | xargs)
+          echo "changed_count=${CHANGED}" >> $GITHUB_OUTPUT
+
+          if [[ "$CHANGED" -eq 0 ]]; then
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "⚠️  No metadata changes — org is already in sync with branch."
+          else
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            echo "✅ ${CHANGED} file(s) staged:"
+            echo "=========================================="
+            git diff --cached --name-status
+            echo "=========================================="
+          fi
+
+      # ── Step 8: Generate package.xml and TestClass.txt ───────────────────────
       - name: Generate package.xml and TestClass.txt
+        if: steps.check-changes.outputs.has_changes == 'true'
         id: gen-artifacts
         shell: bash
         env:
@@ -202,26 +223,24 @@ jobs:
 
           API_VERSION=$(grep -oP '(?<=sourceApiVersion": ")[^"]+' sfdx-project.json 2>/dev/null || echo "67.0")
 
-          # ── Generate package.xml ─────────────────────────────────────────
-          echo "📦 Generating package.xml..."
+          # ── Generate package.xml from staged changed files ────────────────
+          echo "📦 Generating package.xml from changed files..."
 
-          sf project generate manifest \
-            --source-dir force-app \
-            --output-dir "$(dirname "$GENERATED_PKG")" \
-            --name "$(basename "$GENERATED_PKG" .xml)" 2>/dev/null || true
+          declare -A TYPE_MEMBERS
+          while IFS= read -r FPATH; do
+            [[ -z "$FPATH" ]] && continue
+            [[ ! "$FPATH" =~ ^force-app/ ]] && continue
+            META_TYPE=$(echo "$FPATH" | grep -oP 'force-app/main/default/\K[^/]+')
+            MEMBER=$(basename "$FPATH" | sed 's/\..*$//' | sed 's/-meta$//')
+            [[ -z "$META_TYPE" || -z "$MEMBER" ]] && continue
+            TYPE_MEMBERS["$META_TYPE"]+="${MEMBER}"$'\n'
+          done < <(git diff --cached --name-only)
 
-          if [[ ! -f "$GENERATED_PKG" ]]; then
-            echo "⚠️  sf generate manifest fallback — building from changed files..."
-
-            declare -A TYPE_MEMBERS
-            while IFS= read -r FPATH; do
-              [[ -z "$FPATH" ]] && continue
-              META_TYPE=$(echo "$FPATH" | grep -oP 'force-app/main/default/\K[^/]+')
-              MEMBER=$(basename "$FPATH" | sed 's/\.\(cls\|trigger\|js\|html\|css\|xml\|json\|resource\).*$//' | sed 's/-meta$//')
-              [[ -z "$META_TYPE" || -z "$MEMBER" ]] && continue
-              TYPE_MEMBERS["$META_TYPE"]+="${MEMBER}"$'\n'
-            done < <(git diff --name-only HEAD 2>/dev/null; git ls-files --others --exclude-standard force-app/)
-
+          if [[ ${#TYPE_MEMBERS[@]} -eq 0 ]]; then
+            echo "⚠️  No force-app changes in staged files — skipping package.xml"
+            echo "📋 All staged files:"
+            git diff --cached --name-only
+          else
             {
               printf '<?xml version="1.0" encoding="UTF-8"?>\n'
               printf '<Package xmlns="http://soap.sforce.com/2006/04/metadata">\n'
@@ -236,15 +255,14 @@ jobs:
               printf '    <version>%s</version>\n' "$API_VERSION"
               printf '</Package>\n'
             } > "$GENERATED_PKG"
+            echo "✅ package.xml ready: $GENERATED_PKG"
+            echo ""
+            echo "=========================================="
+            echo "📦 GENERATED PACKAGE.XML"
+            echo "=========================================="
+            cat "$GENERATED_PKG"
+            echo "=========================================="
           fi
-
-          echo "✅ package.xml ready: $GENERATED_PKG"
-          echo ""
-          echo "=========================================="
-          echo "📦 GENERATED PACKAGE.XML"
-          echo "=========================================="
-          cat "$GENERATED_PKG"
-          echo "=========================================="
 
           # ── Generate TestClass.txt ───────────────────────────────────────
           # Scan retrieved Apex classes — any class ending in Test or starting
@@ -279,26 +297,6 @@ jobs:
             echo "test_file_created=false" >> $GITHUB_OUTPUT
           fi
 
-      # ── Step 8: Detect changes ───────────────────────────────────────────────
-      - name: Check for changes
-        id: check-changes
-        shell: bash
-        run: |
-          git add -A
-          CHANGED=$(git diff --cached --name-only | wc -l | xargs)
-          echo "changed_count=${CHANGED}" >> $GITHUB_OUTPUT
-
-          if [[ "$CHANGED" -eq 0 ]]; then
-            echo "has_changes=false" >> $GITHUB_OUTPUT
-            echo "⚠️  No metadata changes — org is already in sync with branch."
-          else
-            echo "has_changes=true" >> $GITHUB_OUTPUT
-            echo "✅ ${CHANGED} file(s) staged:"
-            echo "=========================================="
-            git diff --cached --name-status
-            echo "=========================================="
-          fi
-
       # ── Step 9: Create feature branch, commit, push ──────────────────────────
       - name: Create feature branch and push
         if: steps.check-changes.outputs.has_changes == 'true'
@@ -319,6 +317,7 @@ jobs:
           git remote set-url origin "https://x-access-token:${GH_PAT}@github.com/${REPO}.git"
 
           git checkout -b "$FEATURE_BRANCH"
+          git add -A
 
           TRIGGER="scheduled"
           [[ "$EVENT_NAME" == "workflow_dispatch" ]] && TRIGGER="manual by ${ACTOR}"
