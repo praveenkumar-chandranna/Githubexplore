@@ -314,92 +314,48 @@ jobs:
 
       # ── Step 8: Rollback summary ──────────────────────────────────────────────
       - name: Rollback Summary
-        if: always()
-        shell: bash
-        env:
-          COMMIT_ID:    ${{ github.event.inputs.commit_id }}
-          ENVIRONMENT:  ${{ github.event.inputs.environment }}
-          PACKAGE_PATH: ${{ steps.resolve-pkg.outputs.resolved_pkg }}
-          ACTOR:        ${{ github.actor }}
-          RUN_ID:       ${{ github.run_id }}
-          REPO:         ${{ github.repository }}
-          REF_NAME:     ${{ github.ref_name }}
-          PREV_HEAD:    ${{ steps.git-reset.outputs.original_head }}
-        run: |
-          ROLLBACK_STATUS="✅ SUCCESSFUL"
-          [[ "${{ job.status }}" != "success" ]] && ROLLBACK_STATUS="❌ FAILED"
 
-          RESET_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
-          RESET_MSG=$(git log -1 --pretty=format:"%s" 2>/dev/null || echo "")
-          RESET_DATE=$(git log -1 --pretty=format:"%ci" 2>/dev/null || echo "")
-          RESET_AUTHOR=$(git log -1 --pretty=format:"%an" 2>/dev/null || echo "")
 
-          echo ""
-          echo "=========================================="
-          echo "ROLLBACK ${ROLLBACK_STATUS}"
-          echo "=========================================="
-          echo "  Environment   : $ENVIRONMENT"
-          echo "  Branch        : $REF_NAME"
-          echo "  Triggered by  : $ACTOR"
-          echo "  Run URL       : https://github.com/${REPO}/actions/runs/${RUN_ID}"
-          echo ""
-          echo "── Branch State ──────────────────────────"
-          echo "  Reset to commit : $RESET_COMMIT"
-          echo "  Commit message  : $RESET_MSG"
-          echo "  Committed on    : $RESET_DATE"
-          echo "  Committed by    : $RESET_AUTHOR"
-          echo ""
-          echo "── Commits Removed from Branch ───────────"
-          REMOVED=$(git log --oneline "${RESET_COMMIT}..${PREV_HEAD}" 2>/dev/null || true)
-          if [[ -n "$REMOVED" ]]; then
-            COUNT=$(echo "$REMOVED" | wc -l | xargs)
-            echo "  Total removed : $COUNT commit(s)"
-            echo ""
-            while IFS= read -r LINE; do
-              SHA=$(echo "$LINE" | cut -d' ' -f1)
-              MSG=$(echo "$LINE" | cut -d' ' -f2-)
-              echo "  - [$SHA] $MSG"
-            done <<< "$REMOVED"
-          else
-            echo "  None (already at target commit)"
-          fi
-          echo ""
-          echo "── Salesforce Deployment ─────────────────"
-          echo "  Package       : $PACKAGE_PATH"
-          echo "  Status        : $ROLLBACK_STATUS"
-          echo "=========================================="
+  Publish_To_Confluence:
+    runs-on: ubuntu-latest
+    needs: Rollback_Build
+    if: always()
+    env:
+      JIRA_USER_EMAIL:     ${{ secrets.JIRA_USER_EMAIL }}
+      ATLASSIAN_API_TOKEN: ${{ secrets.ATLASSIAN_API_TOKEN }}
+      CONFLUENCE_BASE_URL: ${{ secrets.CONFLUENCE_BASE_URL }}
+      CONFLUENCE_PAGE_ID:  ${{ secrets.CONFLUENCE_PAGE_ID }}
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.Rollback_Build.outputs.ref_name }}
+          fetch-depth: 0
+          token: ${{ secrets.GH_PAT }}
 
-      # ── Step 9: Publish Rollback Result to Confluence ──────────────────────
       - name: Publish Rollback Result to Confluence
-        if: always()
         shell: bash
         env:
-          JIRA_USER_EMAIL:      ${{ secrets.JIRA_USER_EMAIL }}
-          ATLASSIAN_API_TOKEN:  ${{ secrets.ATLASSIAN_API_TOKEN }}
-          CONFLUENCE_BASE_URL:  ${{ secrets.CONFLUENCE_BASE_URL }}
-          CONFLUENCE_PAGE_ID:   ${{ secrets.CONFLUENCE_PAGE_ID }}
-          COMMIT_ID:    ${{ github.event.inputs.commit_id }}
-          ENVIRONMENT:  ${{ github.event.inputs.environment }}
-          PACKAGE_PATH: ${{ steps.resolve-pkg.outputs.resolved_pkg }}
-          ACTOR:        ${{ github.actor }}
-          RUN_ID:       ${{ github.run_id }}
-          REPO:         ${{ github.repository }}
-          REF_NAME:     ${{ github.ref_name }}
-          PREV_HEAD:    ${{ steps.git-reset.outputs.original_head }}
-          JOB_STATUS:   ${{ job.status }}
+          ENVIRONMENT:     ${{ needs.Rollback_Build.outputs.environment }}
+          PACKAGE_PATH:    ${{ needs.Rollback_Build.outputs.package_path }}
+          REF_NAME:        ${{ needs.Rollback_Build.outputs.ref_name }}
+          ACTOR:           ${{ needs.Rollback_Build.outputs.actor }}
+          RUN_ID:          ${{ needs.Rollback_Build.outputs.run_id }}
+          REPO:            ${{ needs.Rollback_Build.outputs.repo }}
+          PREV_HEAD:       ${{ needs.Rollback_Build.outputs.original_head }}
+          RESET_COMMIT:    ${{ needs.Rollback_Build.outputs.resolved_commit }}
+          ROLLBACK_RESULT: ${{ needs.Rollback_Build.result }}
         run: |
           ROLLBACK_STATUS="✅ SUCCESSFUL"
           STATUS_COLOR="green"
-          [[ "$JOB_STATUS" != "success" ]] && ROLLBACK_STATUS="❌ FAILED" && STATUS_COLOR="red"
+          [[ "$ROLLBACK_RESULT" != "success" ]] && ROLLBACK_STATUS="❌ FAILED" && STATUS_COLOR="red"
 
           ROLLBACK_DATE=$(TZ='Asia/Kolkata' date +'%d-%m-%Y %H:%M IST')
           RUN_URL="https://github.com/${REPO}/actions/runs/${RUN_ID}"
-          RESET_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
-          RESET_MSG=$(git log -1 --pretty=format:"%s" 2>/dev/null || echo "")
-          RESET_DATE=$(git log -1 --pretty=format:"%ci" 2>/dev/null || echo "")
-          RESET_AUTHOR=$(git log -1 --pretty=format:"%an" 2>/dev/null || echo "")
+          RESET_MSG=$(git log -1 --pretty=format:"%s" "$RESET_COMMIT" 2>/dev/null || echo "")
+          RESET_DATE=$(git log -1 --pretty=format:"%ci" "$RESET_COMMIT" 2>/dev/null || echo "")
+          RESET_AUTHOR=$(git log -1 --pretty=format:"%an" "$RESET_COMMIT" 2>/dev/null || echo "")
 
-          # Build removed commits list
           REMOVED_HTML="<em>None (already at target commit)</em>"
           REMOVED=$(git log --oneline "${RESET_COMMIT}..${PREV_HEAD}" 2>/dev/null || true)
           if [[ -n "$REMOVED" ]]; then
@@ -417,8 +373,7 @@ jobs:
           [[ -n "$PACKAGE_PATH" ]] && DEPLOY_ROW="<tr><td><strong>Package Deployed</strong></td><td><code>${PACKAGE_PATH}</code></td></tr>"
 
           RELEASE_HTML="<h2>🔄 Rollback — ${ENVIRONMENT} | ${ROLLBACK_DATE}</h2>"
-          RELEASE_HTML+="<table>"
-          RELEASE_HTML+="<tr><th>Field</th><th>Details</th></tr>"
+          RELEASE_HTML+="<table><tr><th>Field</th><th>Details</th></tr>"
           RELEASE_HTML+="<tr><td><strong>Status</strong></td><td><span style='color:${STATUS_COLOR}'><strong>${ROLLBACK_STATUS}</strong></span></td></tr>"
           RELEASE_HTML+="<tr><td><strong>Environment</strong></td><td>${ENVIRONMENT}</td></tr>"
           RELEASE_HTML+="<tr><td><strong>Branch</strong></td><td>${REF_NAME}</td></tr>"
@@ -434,7 +389,6 @@ jobs:
           RELEASE_HTML+="</table>"
           RELEASE_HTML+="<h3>🗑️ Commits Removed from Branch</h3>${REMOVED_HTML}<hr/>"
 
-          echo "📄 Fetching current Confluence page..."
           PAGE_RESPONSE=$(curl -s \
             -u "${JIRA_USER_EMAIL}:${ATLASSIAN_API_TOKEN}" \
             -H "Content-Type: application/json" \
@@ -451,29 +405,16 @@ jobs:
           fi
 
           NEW_VERSION=$((CURRENT_VERSION + 1))
-          NEW_BODY="${RELEASE_HTML}${CURRENT_BODY}"
-          NEW_BODY_ESCAPED=$(echo "$NEW_BODY" | jq -Rs .)
+          NEW_BODY_ESCAPED=$(echo "${RELEASE_HTML}${CURRENT_BODY}" | jq -Rs .)
 
-          UPDATE_PAYLOAD=$(cat <<EOF
-          {
-            "version": { "number": ${NEW_VERSION} },
-            "title": "${PAGE_TITLE}",
-            "type": "page",
-            "body": {
-              "storage": {
-                "value": ${NEW_BODY_ESCAPED},
-                "representation": "storage"
-              }
-            }
-          }
-          EOF
-          )
-
-          UPDATE_RESPONSE=$(curl -s -w "\n%{http_code}" \
-            -X PUT \
+          UPDATE_RESPONSE=$(curl -s -w "\n%{http_code}" -X PUT \
             -u "${JIRA_USER_EMAIL}:${ATLASSIAN_API_TOKEN}" \
             -H "Content-Type: application/json" \
-            -d "$UPDATE_PAYLOAD" \
+            -d "$(jq -n \
+              --argjson version "{\"number\": ${NEW_VERSION}}" \
+              --arg title "$PAGE_TITLE" \
+              --argjson body "{\"storage\": {\"value\": ${NEW_BODY_ESCAPED}, \"representation\": \"storage\"}}" \
+              '{version: $version, title: $title, type: "page", body: $body}')" \
             "${CONFLUENCE_BASE_URL}/rest/api/content/${CONFLUENCE_PAGE_ID}")
 
           UPDATE_CODE=$(echo "$UPDATE_RESPONSE" | tail -1)
@@ -481,6 +422,7 @@ jobs:
             echo "✅ Confluence page updated successfully!"
             echo "🔗 ${CONFLUENCE_BASE_URL}/pages/viewpage.action?pageId=${CONFLUENCE_PAGE_ID}"
           else
-            echo "⚠️ Confluence update failed (HTTP $UPDATE_CODE) — non-blocking"
+            echo "⚠️ Confluence update failed (HTTP $UPDATE_CODE)"
             echo "$UPDATE_RESPONSE" | sed '$d'
+            exit 1
           fi
