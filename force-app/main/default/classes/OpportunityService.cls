@@ -43,6 +43,24 @@ public with sharing class OpportunityService {
         Opportunity opp = [SELECT Id, CloseDate FROM Opportunity WHERE Id = :oppId LIMIT 1];
         opp.CloseDate = newCloseDate;
         update opp;
+         System.debug('Data');
+          System.debug('Data');
+           System.debug('Data');
+            System.debug('Data'); System.debug('Data');
+             System.debug('Data');
+              System.debug('Data'); System.debug('Data');
+               System.debug('Data');
+                System.debug('Data');
+                 System.debug('Data');
+                  System.debug('Data');
+                   System.debug('Data');
+                    System.debug('Data'); System.debug('Data');
+                     System.debug('Data');
+                      System.debug('Data');
+                       System.debug('Data');
+                        System.debug('Data');
+                         System.debug('Data');
+                         
     }
 
     public static void updateAmount(Id oppId, Decimal newAmount) {
