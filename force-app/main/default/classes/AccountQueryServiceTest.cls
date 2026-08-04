@@ -4,7 +4,7 @@ private class AccountQueryServiceTest {
     static void setup() {
         insert new List<Account>{
             new Account(Name = 'Test Account 1', Industry = 'Technology'),
-            new Account(Name = 'Test Account 2', Industry = 'Finance')
+            new Account(Name = 'Test Account 2', Industry = 'Finance')  
         };
     }
 
