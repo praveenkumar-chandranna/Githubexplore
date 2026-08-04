@@ -5,18 +5,18 @@ name: Salesforce Code Retrieval Scheduler
 # Dispatches Retrieve_And_PR.yml on each env branch at staggered times so
 # each branch runs against its own org.
 #
-#   DEV  branch → 22:30 IST  (17:00 UTC)  |  23:10 IST  (17:40 UTC)
-#   QA   branch → 22:40 IST  (17:10 UTC)  |  23:20 IST  (17:50 UTC)
-#   UAT  branch → 22:50 IST  (17:20 UTC)  |  23:30 IST  (18:00 UTC)
-#   main branch → 23:00 IST  (17:30 UTC)  |  23:40 IST  (18:10 UTC)
+#   DEV  branch → 09:30 IST  (04:00 UTC)
+#   QA   branch → 09:40 IST  (04:10 UTC)
+#   UAT  branch → 09:50 IST  (04:20 UTC)
+#   main branch → 10:00 IST  (04:30 UTC)
 # ─────────────────────────────────────────────────────────────────────────────
 
 on:
   schedule:
-    - cron: '0 17 * * *'     # DEV        — 22:30 IST daily
-    - cron: '10 17 * * *'    # QA         — 22:40 IST daily
-    - cron: '20 17 * * *'    # UAT        — 22:50 IST daily
-    - cron: '30 17 * * *'    # PRODUCTION — 23:00 IST daily
+    - cron: '0 4 * * *'      # DEV        — 09:30 IST daily
+    - cron: '10 4 * * *'     # QA         — 09:40 IST daily
+    - cron: '20 4 * * *'     # UAT        — 09:50 IST daily
+    - cron: '30 4 * * *'     # PRODUCTION — 10:00 IST daily
 
 jobs:
   dispatch:
@@ -31,10 +31,10 @@ jobs:
           REPO:            ${{ github.repository }}
         run: |
           case "$GITHUB_SCHEDULE" in
-            '0 17 * * *')    BRANCH="DEV"  ;;
-            '10 17 * * *')   BRANCH="QA"   ;;
-            '20 17 * * *')   BRANCH="UAT"  ;;
-            '30 17 * * *')   BRANCH="main" ;;
+            '0 4 * * *')     BRANCH="DEV"  ;;
+            '10 4 * * *')    BRANCH="QA"   ;;
+            '20 4 * * *')    BRANCH="UAT"  ;;
+            '30 4 * * *')    BRANCH="main" ;;
             *) echo "❌ Unknown schedule: $GITHUB_SCHEDULE"; exit 1 ;;
           esac
 
