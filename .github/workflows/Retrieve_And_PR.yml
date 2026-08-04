@@ -323,7 +323,7 @@ jobs:
           TRIGGER="scheduled"
           [[ "$EVENT_NAME" == "workflow_dispatch" ]] && TRIGGER="manual by ${ACTOR}"
 
-          git commit -m "retrieve(${ENVIRONMENT}): org sync ${RETRIEVE_DATE} [${TRIGGER}] [skip ci]"
+          git commit -m "retrieve(${ENVIRONMENT}): org sync ${RETRIEVE_DATE} [${TRIGGER}]"
           git push origin "$FEATURE_BRANCH"
 
           echo "✅ Pushed: $FEATURE_BRANCH"

@@ -229,7 +229,7 @@ jobs:
             if git diff --cached --quiet; then
               echo "⚠️ No changes to commit"
             else
-              git commit -m "consolidated package ${OUTPUT_NAME} [skip ci]"
+              git commit -m "consolidated package ${OUTPUT_NAME}"
               git push origin "$REF_NAME"
             fi
 
