@@ -57,6 +57,7 @@ jobs:
       actor: ${{ steps.set-run-meta.outputs.actor }}
       ref_name: ${{ steps.set-run-meta.outputs.ref_name }}
       repo: ${{ steps.set-run-meta.outputs.repo }}
+      source_branches: ${{ steps.resolve-package.outputs.source_branches }}
 
     steps:
       - name: Validate branch-environment consistency
@@ -101,9 +102,6 @@ jobs:
           ENVIRONMENT: ${{ github.event.inputs.environment }}
           MANIFEST_DIR: ${{ github.workspace }}/manifest/feature
           OUTPUT_DIR: ${{ github.workspace }}/manifest
-          GIT_USER_NAME: ${{ secrets.GIT_USER_NAME }}
-          GIT_USER_EMAIL: ${{ secrets.GIT_USER_EMAIL }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           REF_NAME: ${{ github.ref_name }}
         run: |
@@ -221,21 +219,19 @@ jobs:
               cat "$OUTPUT_TEST"
             fi
 
-            git config user.name "$GIT_USER_NAME"
-            git config user.email "$GIT_USER_EMAIL"
-            git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
-            git add "${OUTPUT_DIR}/${OUTPUT_NAME}_package.xml"
-            [[ -f "$OUTPUT_TEST" ]] && git add "${OUTPUT_DIR}/${OUTPUT_NAME}_TestClass.txt"
-            if git diff --cached --quiet; then
-              echo "⚠️ No changes to commit"
-            else
-              git commit -m "consolidated package ${OUTPUT_NAME}"
-              git push origin "$REF_NAME"
-            fi
-
             echo "FEATURE_BRANCH=${OUTPUT_NAME}" >> $GITHUB_ENV
             echo "deploy_package=${OUTPUT_NAME}" >> $GITHUB_OUTPUT
+            echo "source_branches=${FEATURE_INPUT}" >> $GITHUB_OUTPUT
             echo "✅ Consolidation complete: $OUTPUT_NAME"
+            echo ""
+            echo "=========================================="
+            echo "🌿 SOURCE FEATURE BRANCHES"
+            echo "=========================================="
+            IFS=',' read -ra DISPLAY_BRANCHES <<< "$FEATURE_INPUT"
+            for B in "${DISPLAY_BRANCHES[@]}"; do
+              echo "  - $(echo "$B" | xargs)"
+            done
+            echo "=========================================="
 
           else
             echo "📄 Single branch detected — using directly: $FEATURE_INPUT"
@@ -399,6 +395,7 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
           ACTOR: ${{ github.actor }}
           RUN_ID: ${{ github.run_id }}
+          SOURCE_BRANCHES: ${{ steps.resolve-package.outputs.source_branches }}
         run: |
           TAG_DATE=$(TZ='Asia/Kolkata' date +'%d%m%Y')
           TAG_TIME=$(TZ='Asia/Kolkata' date +'%H%M')
@@ -463,6 +460,15 @@ jobs:
           RELEASE_BODY+="| **Date (IST)** | $(TZ='Asia/Kolkata' date +'%d-%m-%Y %H:%M IST') |\n"
           RELEASE_BODY+="| **Package** | ${FEATURE_BRANCH} |\n"
           RELEASE_BODY+="| **Branch** | ${REF_NAME} |\n"
+          if [[ -n "$SOURCE_BRANCHES" ]]; then
+            BRANCHES_MD=""
+            IFS=',' read -ra BS <<< "$SOURCE_BRANCHES"
+            for B in "${BS[@]}"; do
+              BRANCHES_MD+="$(echo "$B" | xargs), "
+            done
+            BRANCHES_MD=$(echo "$BRANCHES_MD" | sed 's/, $//')
+            RELEASE_BODY+="| **Feature Branches** | ${BRANCHES_MD} |\n"
+          fi
           RELEASE_BODY+="| **Deployed by** | ${ACTOR} |\n"
           RELEASE_BODY+="| **Workflow Run** | [${RUN_ID}](https://github.com/${REPO}/actions/runs/${RUN_ID}) |\n"
 
@@ -510,6 +516,7 @@ jobs:
           ACTOR: ${{ needs.Deployment_Build.outputs.actor }}
           RUN_ID: ${{ needs.Deployment_Build.outputs.run_id }}
           REPO: ${{ needs.Deployment_Build.outputs.repo }}
+          SOURCE_BRANCHES: ${{ needs.Deployment_Build.outputs.source_branches }}
         run: |
           echo "=========================================="
           echo "✅ DEPLOYMENT SUCCESSFUL"
@@ -518,7 +525,24 @@ jobs:
           echo "  Package     : $PACKAGE"
           echo "  Deployed by : $ACTOR"
           echo "  Run         : https://github.com/${REPO}/actions/runs/${RUN_ID}"
+          if [[ -n "$SOURCE_BRANCHES" ]]; then
+            echo "  Branches    :"
+            IFS=',' read -ra BS <<< "$SOURCE_BRANCHES"
+            for B in "${BS[@]}"; do echo "    - $(echo "$B" | xargs)"; done
+          fi
           echo "=========================================="
+          {
+            echo "## ✅ Deployment Successful"
+            echo "| Field | Value |"
+            echo "|---|---|"
+            echo "| **Environment** | \`${ENVIRONMENT}\` |"
+            echo "| **Package** | \`${PACKAGE}\` |"
+            echo "| **Deployed by** | ${ACTOR} |"
+            echo "| **Run** | [${RUN_ID}](https://github.com/${REPO}/actions/runs/${RUN_ID}) |"
+            if [[ -n "$SOURCE_BRANCHES" ]]; then
+              echo "| **Source Branches** | $(echo "$SOURCE_BRANCHES" | tr ',' '<br>') |"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
   Update_Release_Notes:
     runs-on: ubuntu-latest
@@ -566,6 +590,7 @@ jobs:
           ACTOR: ${{ needs.Deployment_Build.outputs.actor }}
           REF_NAME: ${{ needs.Deployment_Build.outputs.ref_name }}
           REPO: ${{ needs.Deployment_Build.outputs.repo }}
+          SOURCE_BRANCHES: ${{ needs.Deployment_Build.outputs.source_branches }}
         run: |
           echo "📋 Fetching Jira ticket details..."
 
@@ -581,6 +606,14 @@ jobs:
           RELEASE_HTML+="<tr><td><strong>Deployed by</strong></td><td>${ACTOR}</td></tr>"
           RELEASE_HTML+="<tr><td><strong>Branch</strong></td><td>${REF_NAME}</td></tr>"
           RELEASE_HTML+="<tr><td><strong>Package(s)</strong></td><td>${PACKAGE}</td></tr>"
+          if [[ -n "$SOURCE_BRANCHES" ]]; then
+            BRANCHES_HTML=""
+            IFS=',' read -ra BS <<< "$SOURCE_BRANCHES"
+            for B in "${BS[@]}"; do
+              BRANCHES_HTML+="<li>$(echo "$B" | xargs)</li>"
+            done
+            RELEASE_HTML+="<tr><td><strong>Feature Branches</strong></td><td><ul>${BRANCHES_HTML}</ul></td></tr>"
+          fi
           if [[ -n "$TAG_NAME" ]]; then
             RELEASE_HTML+="<tr><td><strong>Release Tag</strong></td><td><a href=\"${TAG_URL}\">${TAG_NAME}</a></td></tr>"
           fi
