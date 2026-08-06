@@ -65,6 +65,8 @@ jobs:
       repo:          ${{ github.repository }}
       original_head: ${{ steps.git-reset.outputs.original_head }}
       resolved_commit: ${{ steps.git-reset.outputs.resolved_commit }}
+      jira_tickets:  ${{ steps.git-reset.outputs.jira_tickets }}
+      notify_emails: ${{ secrets.NOTIFY_EMAILS }}
 
     steps:
 
@@ -129,6 +131,12 @@ jobs:
           echo "✅ Branch '$REF_NAME' force-reset to commit $COMMIT_ID"
           echo "resolved_commit=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
           echo "original_head=${ORIGINAL_HEAD}" >> $GITHUB_OUTPUT
+
+          # ── Extract Jira ticket numbers from removed commits ───────────────
+          JIRA_TICKETS=$(git log --pretty=format:"%s" "${COMMIT_ID}..${ORIGINAL_HEAD}" 2>/dev/null \
+            | grep -oE '[A-Z]+-[0-9]+' | sort -u | tr '\n' ',' | sed 's/,$//')
+          echo "jira_tickets=${JIRA_TICKETS}" >> $GITHUB_OUTPUT
+          echo "🎫 Jira tickets in rolled-back commits: ${JIRA_TICKETS:-none}"
 
       # ── Step 3: Resolve package.xml at the reset commit ──────────────────────
       - name: Resolve package.xml
@@ -392,6 +400,14 @@ jobs:
             echo "| **Triggered by** | ${ACTOR} |"
             echo "| **Workflow Run** | [${RUN_ID}](https://github.com/${REPO}/actions/runs/${RUN_ID}) |"
             echo ""
+            JIRA_TICKETS="${{ steps.git-reset.outputs.jira_tickets }}"
+            if [[ -n "$JIRA_TICKETS" ]]; then
+              echo "### 🎫 Jira Tickets in Rolled-back Commits"
+              echo ""
+              IFS=',' read -ra TICKETS <<< "$JIRA_TICKETS"
+              for T in "${TICKETS[@]}"; do echo "- \`${T}\`"; done
+              echo ""
+            fi
             if [[ -n "$REMOVED" ]]; then
               echo "### 🗑️ Commits Removed from Branch"
               echo ""
@@ -514,3 +530,37 @@ jobs:
             echo "$UPDATE_RESPONSE" | sed '$d'
             exit 1
           fi
+
+  Send_Email_Notification:
+    runs-on: ubuntu-latest
+    needs: Rollback_Build
+    if: needs.Rollback_Build.result == 'success' || needs.Rollback_Build.result == 'failure'
+    steps:
+      - name: Send Rollback Email Notification
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_SERVER }}
+          server_port:    ${{ secrets.SMTP_PORT }}
+          username:       ${{ secrets.SMTP_USERNAME }}
+          password:       ${{ secrets.SMTP_PASSWORD }}
+          subject: "[${{ needs.Rollback_Build.outputs.environment }}] Rollback ${{ needs.Rollback_Build.result == 'success' && 'Successful ✅' || 'Failed ❌' }} — ${{ github.ref_name }}"
+          to:             ${{ secrets.NOTIFY_EMAILS }}
+          from:           "Do not Reply <${{ secrets.GMAIL_USERNAME }}>"
+          html_body: |
+            <h2>🔄 Rollback Notification — ${{ needs.Rollback_Build.outputs.environment }}</h2>
+            <table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;font-family:Arial,sans-serif;">
+              <tr><th>Field</th><th>Details</th></tr>
+              <tr><td><strong>Status</strong></td><td>${{ needs.Rollback_Build.result == 'success' && '✅ SUCCESSFUL' || '❌ FAILED' }}</td></tr>
+              <tr><td><strong>Environment</strong></td><td>${{ needs.Rollback_Build.outputs.environment }}</td></tr>
+              <tr><td><strong>Branch</strong></td><td>${{ needs.Rollback_Build.outputs.ref_name }}</td></tr>
+              <tr><td><strong>Rolled back to commit</strong></td><td><code>${{ needs.Rollback_Build.outputs.resolved_commit }}</code></td></tr>
+              <tr><td><strong>Previous HEAD</strong></td><td><code>${{ needs.Rollback_Build.outputs.original_head }}</code></td></tr>
+              <tr><td><strong>Package</strong></td><td>${{ needs.Rollback_Build.outputs.package_path || 'N/A (commit-only rollback)' }}</td></tr>
+              <tr><td><strong>Jira Tickets</strong></td><td>${{ needs.Rollback_Build.outputs.jira_tickets || 'N/A' }}</td></tr>
+              <tr><td><strong>Triggered by</strong></td><td>${{ needs.Rollback_Build.outputs.actor }}</td></tr>
+              <tr><td><strong>Workflow Run</strong></td><td><a href="https://github.com/${{ needs.Rollback_Build.outputs.repo }}/actions/runs/${{ needs.Rollback_Build.outputs.run_id }}">View Run</a></td></tr>
+            </table>
+            <br/>
+            <p style="font-size:12px;color:#888;font-family:Arial,sans-serif;">
+              ⚠️ This is an automated notification sent by GitHub Actions. Please do not reply to this email.
+            </p>
