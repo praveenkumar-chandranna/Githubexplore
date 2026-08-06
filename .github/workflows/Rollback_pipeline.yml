@@ -473,6 +473,9 @@ jobs:
             REMOVED_HTML+="</ul><p><em>Total: ${COUNT} commit(s) removed</em></p>"
           fi
 
+          JIRA_TICKETS="${{ needs.Rollback_Build.outputs.jira_tickets }}"
+          JIRA_ROW="<tr><td><strong>Jira Tickets</strong></td><td>${JIRA_TICKETS:-N/A}</td></tr>"
+
           DEPLOY_ROW=""
           [[ -n "$PACKAGE_PATH" ]] && DEPLOY_ROW="<tr><td><strong>Package Deployed</strong></td><td><code>${PACKAGE_PATH}</code></td></tr>"
 
@@ -486,6 +489,7 @@ jobs:
           RELEASE_HTML+="<tr><td><strong>Committed on</strong></td><td>${RESET_DATE}</td></tr>"
           RELEASE_HTML+="<tr><td><strong>Committed by</strong></td><td>${RESET_AUTHOR}</td></tr>"
           RELEASE_HTML+="<tr><td><strong>Previous HEAD</strong></td><td><code>${PREV_HEAD}</code></td></tr>"
+          RELEASE_HTML+="${JIRA_ROW}"
           RELEASE_HTML+="${DEPLOY_ROW}"
           RELEASE_HTML+="<tr><td><strong>Triggered by</strong></td><td>${ACTOR}</td></tr>"
           RELEASE_HTML+="<tr><td><strong>Rollback date</strong></td><td>${ROLLBACK_DATE}</td></tr>"
