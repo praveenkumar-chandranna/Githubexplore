@@ -1,131 +1,281 @@
+title = "Lodha Salesforce Gitleaks Configuration"
+
 [extend]
 useDefault = true
 
-title = "Lodha Gitleaks Configuration"
-
+# ==========================================
+# GLOBAL ALLOWLIST
+# ==========================================
 [allowlist]
-description = "Global allowlist"
+description = "Global allowlist — skip non-source paths"
 paths = [
   '''node_modules/''',
-  '''\.git/''',
-  '''package-lock\.json''',
-  '''\.sf/''',
-  '''\.sfdx/''',
+  '''\\.git/''',
+  '''package-lock\\.json''',
+  '''\\.sf/''',
+  '''\\.sfdx/''',
+  '''staticresources/''',
+  '''contentassets/''',
+  '''\\.png$''',
+  '''\\.jpg$''',
+  '''\\.svg$''',
+  '''\\.zip$''',
+  '''\\.resource$''',
 ]
 
 # ==========================================
-# SALESFORCE SECRETS
+# SALESFORCE CREDENTIALS & TOKENS
 # ==========================================
 
 [[rules]]
-id = "salesforce-consumer-key"
+id = "sf-consumer-key"
 description = "Salesforce Connected App Consumer Key"
 regex = '''(?i)(consumer[_\-]?key|client[_\-]?id)\s*[:=]\s*['"]?([A-Za-z0-9._]{50,})['"]?'''
-tags = ["salesforce", "key"]
-
-[[rules]]
-id = "salesforce-consumer-secret"
-description = "Salesforce Connected App Consumer Secret"
-regex = '''(?i)(consumer[_\-]?secret|client[_\-]?secret)\s*[:=]\s*['"]?([A-Za-z0-9]{16,})['"]?'''
-tags = ["salesforce", "secret"]
-
-[[rules]]
-id = "salesforce-refresh-token"
-description = "Salesforce Refresh Token"
-regex = '''(?i)(refresh[_\-]?token)\s*[:=]\s*['"]?([A-Za-z0-9._!]{40,})['"]?'''
-tags = ["salesforce", "token"]
-
-[[rules]]
-id = "salesforce-access-token"
-description = "Salesforce Access Token"
-regex = '''(?i)(access[_\-]?token|session[_\-]?id)\s*[:=]\s*['"]?([A-Za-z0-9!._]{40,})['"]?'''
-tags = ["salesforce", "token"]
-
-[[rules]]
-id = "salesforce-auth-url"
-description = "Salesforce SFDX Auth URL"
-regex = '''force://[A-Za-z0-9._]+:[A-Za-z0-9._]+@[a-zA-Z0-9.\-]+'''
-tags = ["salesforce", "auth"]
-
-[[rules]]
-id = "private-key-block"
-description = "Private Key (PEM)"
-regex = '''-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----'''
-tags = ["key", "private"]
-
-[[rules]]
-id = "generic-password"
-description = "Generic Password Assignment"
-regex = '''(?i)(password|passwd|pwd)\s*[:=]\s*['"]([^'"]{8,})['"]'''
-tags = ["password"]
-
-[[rules]]
-id = "generic-secret"
-description = "Generic Secret Assignment"
-regex = '''(?i)(secret|api[_\-]?key|apikey|token)\s*[:=]\s*['"]([^'"]{8,})['"]'''
-tags = ["secret"]
-
-[[rules]]
-id = "jwt-token"
-description = "JWT Token"
-regex = '''eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}'''
-tags = ["jwt", "token"]
-
-[[rules]]
-id = "aws-access-key"
-description = "AWS Access Key ID"
-regex = '''(?:A3T[A-Z0-9]|AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{16}'''
-tags = ["aws", "key"]
-
-[[rules]]
-id = "aws-secret-key"
-description = "AWS Secret Access Key"
-regex = '''(?i)aws_secret_access_key\s*[:=]\s*['"]?([A-Za-z0-9/+=]{40})['"]?'''
-tags = ["aws", "secret"]
-
-[[rules]]
-id = "hardcoded-connection-string"
-description = "Database Connection String"
-regex = '''(?i)(jdbc|mongodb(\+srv)?|postgres(ql)?|mysql|mssql):\/\/[^\s'"]+:[^\s'"]+@[^\s'"]+'''
-tags = ["database", "connection"]
-
-# ==========================================
-# INDIAN PII — AADHAAR, PAN, MOBILE, EMAIL
-# ==========================================
-
-[[rules]]
-id = "indian-aadhaar-number"
-description = "Indian Aadhaar Number (12-digit, space/hyphen separated)"
-regex = '''\b[2-9]{1}[0-9]{3}\s?[0-9]{4}\s?[0-9]{4}\b'''
-tags = ["pii", "aadhaar", "india"]
+tags = ["salesforce", "key", "secret"]
 severity = "critical"
 
 [[rules]]
-id = "indian-pan-number"
+id = "sf-consumer-secret"
+description = "Salesforce Connected App Consumer Secret"
+regex = '''(?i)(consumer[_\-]?secret|client[_\-]?secret)\s*[:=]\s*['"]?([A-Za-z0-9]{16,})['"]?'''
+tags = ["salesforce", "secret"]
+severity = "critical"
+
+[[rules]]
+id = "sf-refresh-token"
+description = "Salesforce Refresh Token"
+regex = '''(?i)(refresh[_\-]?token)\s*[:=]\s*['"]?([A-Za-z0-9._!]{40,})['"]?'''
+tags = ["salesforce", "token"]
+severity = "critical"
+
+[[rules]]
+id = "sf-access-token"
+description = "Salesforce Access Token / Session ID"
+regex = '''(?i)(access[_\-]?token|session[_\-]?id)\s*[:=]\s*['"]?([A-Za-z0-9!._]{40,})['"]?'''
+tags = ["salesforce", "token"]
+severity = "critical"
+
+[[rules]]
+id = "sf-sfdx-auth-url"
+description = "Salesforce SFDX Auth URL with embedded credentials"
+regex = '''force://[A-Za-z0-9._]+:[A-Za-z0-9._]+@[a-zA-Z0-9.\-]+'''
+tags = ["salesforce", "auth"]
+severity = "critical"
+
+[[rules]]
+id = "sf-instance-url-with-token"
+description = "Salesforce instance URL with session token embedded"
+regex = '''https://[a-zA-Z0-9\-]+\.(salesforce|force)\.com/[A-Za-z0-9!._]{20,}'''
+tags = ["salesforce", "token", "url"]
+severity = "high"
+
+[[rules]]
+id = "sf-my-domain-hardcoded"
+description = "Hardcoded Salesforce My Domain URL in source"
+regex = '''['"][a-zA-Z0-9\-]+\.my\.salesforce\.com['"]'''
+tags = ["salesforce", "url"]
+severity = "medium"
+[rules.allowlist]
+regexes = [
+  '''example\.my\.salesforce\.com''',
+  '''test\.my\.salesforce\.com''',
+]
+
+# ==========================================
+# SALESFORCE ORG / RECORD IDs
+# ==========================================
+
+[[rules]]
+id = "sf-org-id"
+description = "Hardcoded Salesforce Org ID (18-char)"
+regex = '''['"][0-9A-Za-z]{15,18}['"]'''
+tags = ["salesforce", "org-id"]
+severity = "medium"
+[rules.allowlist]
+# Allow in test classes and mock data files
+paths = ['''Test\.cls$''', '''Mock\.cls$''', '''TestData\.cls$''']
+regexes = [
+  '''000000000000000''',   # placeholder IDs
+  '''[Tt]est[Ii][Dd]''',
+]
+
+[[rules]]
+id = "sf-hardcoded-record-id"
+description = "Hardcoded Salesforce Record ID in Apex/JS"
+regex = '''(?i)(accountId|contactId|opportunityId|userId|recordId|parentId)\s*=\s*['"][0-9A-Za-z]{15,18}['"]'''
+tags = ["salesforce", "record-id"]
+severity = "high"
+[rules.allowlist]
+paths = ['''Test\.cls$''', '''Mock\.cls$''']
+
+# ==========================================
+# APEX-SPECIFIC PATTERNS
+# ==========================================
+
+[[rules]]
+id = "apex-debug-sensitive"
+description = "System.debug logging potentially sensitive data"
+regex = '''(?i)System\.debug\s*\(.*?(password|token|secret|key|credential|ssn|aadhaar|pan|account).*?\)'''
+tags = ["salesforce", "apex", "logging"]
+severity = "high"
+
+[[rules]]
+id = "apex-hardcoded-credential"
+description = "Hardcoded credential value in Apex string"
+regex = '''(?i)(password|passwd|secret|apiKey|api_key|token)\s*=\s*['"][^'"]{8,}['"]'''
+tags = ["salesforce", "apex", "secret"]
+severity = "critical"
+[rules.allowlist]
+paths = ['''Test\.cls$''']
+regexes = [
+  '''testPassword''',
+  '''dummyToken''',
+  '''mockSecret''',
+]
+
+[[rules]]
+id = "apex-soql-hardcoded-id"
+description = "SOQL query with hardcoded Salesforce ID"
+regex = '''(?i)(WHERE|AND|OR)\s+Id\s*=\s*['"][0-9A-Za-z]{15,18}['"]'''
+tags = ["salesforce", "apex", "soql"]
+severity = "medium"
+[rules.allowlist]
+paths = ['''Test\.cls$''']
+
+[[rules]]
+id = "named-credential-hardcoded"
+description = "Named Credential endpoint hardcoded instead of using callout"
+regex = '''(?i)(endpoint|callout)\s*[:=]\s*['"]https?://[^'"]{10,}['"]'''
+tags = ["salesforce", "named-credential"]
+severity = "medium"
+[rules.allowlist]
+regexes = [
+  '''callout:[A-Za-z_]+''',   # proper Named Credential usage
+]
+
+# ==========================================
+# PRIVATE KEYS & CERTIFICATES
+# ==========================================
+
+[[rules]]
+id = "private-key-pem"
+description = "PEM Private Key block"
+regex = '''-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----'''
+tags = ["key", "certificate"]
+severity = "critical"
+
+[[rules]]
+id = "certificate-block"
+description = "PEM Certificate block"
+regex = '''-----BEGIN CERTIFICATE-----'''
+tags = ["certificate"]
+severity = "medium"
+
+# ==========================================
+# GENERIC SECRETS
+# ==========================================
+
+[[rules]]
+id = "generic-password"
+description = "Generic hardcoded password"
+regex = '''(?i)(password|passwd|pwd)\s*[:=]\s*['"]([^'"]{8,})['"]'''
+tags = ["password", "secret"]
+severity = "critical"
+[rules.allowlist]
+paths = ['''Test\.cls$''']
+regexes = [
+  '''testPassword''',
+  '''dummyPwd''',
+  '''changeme''',
+]
+
+[[rules]]
+id = "generic-secret"
+description = "Generic hardcoded secret / API key / token"
+regex = '''(?i)(secret|api[_\-]?key|apikey|token)\s*[:=]\s*['"]([^'"]{8,})['"]'''
+tags = ["secret"]
+severity = "critical"
+
+[[rules]]
+id = "jwt-token"
+description = "Hardcoded JWT Token"
+regex = '''eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}'''
+tags = ["jwt", "token"]
+severity = "critical"
+
+# ==========================================
+# AWS CREDENTIALS
+# ==========================================
+
+[[rules]]
+id = "aws-access-key-id"
+description = "AWS Access Key ID"
+regex = '''(?:A3T[A-Z0-9]|AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{16}'''
+tags = ["aws", "key"]
+severity = "critical"
+
+[[rules]]
+id = "aws-secret-access-key"
+description = "AWS Secret Access Key"
+regex = '''(?i)aws_secret_access_key\s*[:=]\s*['"]?([A-Za-z0-9/+=]{40})['"]?'''
+tags = ["aws", "secret"]
+severity = "critical"
+
+# ==========================================
+# DATABASE CONNECTION STRINGS
+# ==========================================
+
+[[rules]]
+id = "database-connection-string"
+description = "Database connection string with embedded credentials"
+regex = '''(?i)(jdbc|mongodb(\+srv)?|postgres(ql)?|mysql|mssql):\/\/[^\s'"]+:[^\s'"]+@[^\s'"]+'''
+tags = ["database", "connection"]
+severity = "critical"
+
+# ==========================================
+# INDIAN PII
+# ==========================================
+
+[[rules]]
+id = "indian-aadhaar"
+description = "Indian Aadhaar Number (12-digit)"
+regex = '''\b[2-9]{1}[0-9]{3}\s?[0-9]{4}\s?[0-9]{4}\b'''
+tags = ["pii", "aadhaar", "india"]
+severity = "critical"
+[rules.allowlist]
+paths = ['''Test\.cls$''']
+
+[[rules]]
+id = "indian-pan"
 description = "Indian PAN Card Number"
 regex = '''\b[A-Z]{3}[ABCFGHLJPTF]{1}[A-Z]{1}[0-9]{4}[A-Z]{1}\b'''
 tags = ["pii", "pan", "india"]
 severity = "critical"
+[rules.allowlist]
+paths = ['''Test\.cls$''']
 
 [[rules]]
-id = "indian-mobile-number"
-description = "Indian Mobile Number hardcoded in source"
+id = "indian-mobile-labeled"
+description = "Indian Mobile Number with label"
 regex = '''(?i)(mobile|phone|contact|cell|mob)\s*[:=]\s*['"]?\+?91[-\s]?[6-9][0-9]{9}['"]?'''
 tags = ["pii", "mobile", "india"]
 severity = "high"
+[rules.allowlist]
+paths = ['''Test\.cls$''']
 
 [[rules]]
 id = "indian-mobile-bare"
-description = "Bare Indian Mobile Number (10-digit starting 6-9)"
+description = "Bare Indian Mobile Number (10-digit)"
 regex = '''\b(?<!\d)[6-9][0-9]{9}(?!\d)\b'''
 tags = ["pii", "mobile", "india"]
 severity = "medium"
 [rules.allowlist]
-regexes = ['''[0-9]{10,}[A-Za-z]''']  # skip version strings / IDs
+regexes = ['''[0-9]{10,}[A-Za-z]''']
+paths = ['''Test\.cls$''']
 
 [[rules]]
 id = "email-hardcoded"
-description = "Hardcoded email address in source code"
+description = "Hardcoded email address"
 regex = '''['"][a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}['"]'''
 tags = ["pii", "email"]
 severity = "high"
@@ -136,14 +286,19 @@ regexes = [
   '''salesforce\.com''',
   '''github\.com''',
   '''atlassian\.net''',
+  '''@test\.com''',
+  '''@lodha\.com''',
 ]
+paths = ['''Test\.cls$''']
 
 [[rules]]
-id = "indian-passport-number"
+id = "indian-passport"
 description = "Indian Passport Number"
 regex = '''\b[A-PR-WYa-pr-wy][1-9]\d\s?\d{4}[1-9]\b'''
 tags = ["pii", "passport", "india"]
 severity = "critical"
+[rules.allowlist]
+paths = ['''Test\.cls$''']
 
 [[rules]]
 id = "indian-voter-id"
@@ -151,28 +306,43 @@ description = "Indian Voter ID (EPIC Number)"
 regex = '''\b[A-Z]{3}[0-9]{7}\b'''
 tags = ["pii", "voter-id", "india"]
 severity = "high"
+[rules.allowlist]
+paths = ['''Test\.cls$''']
 
 [[rules]]
 id = "indian-bank-account"
-description = "Indian Bank Account Number hardcoded"
+description = "Indian Bank Account Number"
 regex = '''(?i)(account[_\-]?no|account[_\-]?number|acc[_\-]?no)\s*[:=]\s*['"]?[0-9]{9,18}['"]?'''
 tags = ["pii", "bank", "india"]
 severity = "critical"
+[rules.allowlist]
+paths = ['''Test\.cls$''']
 
 [[rules]]
-id = "indian-ifsc-code"
-description = "Indian IFSC Code hardcoded"
+id = "indian-ifsc"
+description = "Indian IFSC Code"
 regex = '''\b[A-Z]{4}0[A-Z0-9]{6}\b'''
 tags = ["pii", "ifsc", "india"]
 severity = "medium"
+[rules.allowlist]
+paths = ['''Test\.cls$''']
+
+[[rules]]
+id = "indian-gst"
+description = "Indian GST Number hardcoded"
+regex = '''\b[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}\b'''
+tags = ["pii", "gst", "india"]
+severity = "high"
+[rules.allowlist]
+paths = ['''Test\.cls$''']
 
 # ==========================================
-# PROFANITY — BLOCK OFFENSIVE STRINGS
+# PROFANITY
 # ==========================================
 
 [[rules]]
 id = "profanity-in-code"
-description = "Profanity or offensive language detected in source"
+description = "Profanity or offensive language in source"
 regex = '''(?i)\b(fuck|shit|bastard|asshole|bitch|cunt|damn|crap|idiot|stupid|moron|retard|nigger|faggot|whore|slut)\b'''
 tags = ["profanity", "policy"]
 severity = "high"

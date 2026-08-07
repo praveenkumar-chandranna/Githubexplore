@@ -535,6 +535,64 @@ jobs:
             exit 1
           fi
 
+  Publish_To_Jira:
+    runs-on: ubuntu-latest
+    needs: Rollback_Build
+    if: needs.Rollback_Build.result == 'success' || needs.Rollback_Build.result == 'failure'
+    steps:
+      - name: Post Rollback Comment on Jira Tickets
+        shell: bash
+        env:
+          JIRA_TICKETS:    ${{ needs.Rollback_Build.outputs.jira_tickets }}
+          ENVIRONMENT:     ${{ needs.Rollback_Build.outputs.environment }}
+          ROLLBACK_RESULT: ${{ needs.Rollback_Build.result }}
+          RESET_COMMIT:    ${{ needs.Rollback_Build.outputs.resolved_commit }}
+          PREV_HEAD:       ${{ needs.Rollback_Build.outputs.original_head }}
+          PACKAGE_PATH:    ${{ needs.Rollback_Build.outputs.package_path }}
+          ACTOR:           ${{ needs.Rollback_Build.outputs.actor }}
+          RUN_ID:          ${{ needs.Rollback_Build.outputs.run_id }}
+          REPO:            ${{ needs.Rollback_Build.outputs.repo }}
+          JIRA_BASE_URL:   ${{ secrets.JIRA_BASE_URL }}
+          JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
+          ATLASSIAN_API_TOKEN: ${{ secrets.ATLASSIAN_API_TOKEN }}
+        run: |
+          if [[ -z "$JIRA_TICKETS" ]]; then
+            echo "⚠️ No Jira tickets found in rolled-back commits — skipping"
+            exit 0
+          fi
+
+          STATUS_ICON="✅"
+          [[ "$ROLLBACK_RESULT" != "success" ]] && STATUS_ICON="❌"
+          RUN_URL="https://github.com/${REPO}/actions/runs/${RUN_ID}"
+          ROLLBACK_DATE=$(TZ='Asia/Kolkata' date +'%d-%m-%Y %H:%M IST')
+
+          COMMENT="*${STATUS_ICON} Rollback Notification — ${ENVIRONMENT}*\n"
+          COMMENT+="|| Field || Details ||\n"
+          COMMENT+="| Status | ${STATUS_ICON} ${ROLLBACK_RESULT^^} |\n"
+          COMMENT+="| Environment | ${ENVIRONMENT} |\n"
+          COMMENT+="| Rolled back to | +${RESET_COMMIT}+ |\n"
+          COMMENT+="| Previous HEAD | +${PREV_HEAD}+ |\n"
+          COMMENT+="| Package | ${PACKAGE_PATH:-N/A (commit-only rollback)} |\n"
+          COMMENT+="| Triggered by | ${ACTOR} |\n"
+          COMMENT+="| Date | ${ROLLBACK_DATE} |\n"
+          COMMENT+="| Workflow Run | [View Run|${RUN_URL}] |"
+
+          IFS=',' read -ra TICKETS <<< "$JIRA_TICKETS"
+          for TICKET in "${TICKETS[@]}"; do
+            TICKET=$(echo "$TICKET" | xargs)
+            echo "📝 Posting comment to $TICKET..."
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+              -u "${JIRA_USER_EMAIL}:${ATLASSIAN_API_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d "{\"body\": \"${COMMENT}\"}" \
+              "${JIRA_BASE_URL}/rest/api/2/issue/${TICKET}/comment")
+            if [[ "$HTTP_CODE" == "201" ]]; then
+              echo "✅ Comment posted to $TICKET"
+            else
+              echo "⚠️ Failed to post comment to $TICKET (HTTP $HTTP_CODE)"
+            fi
+          done
+
   Send_Email_Notification:
     runs-on: ubuntu-latest
     needs: Rollback_Build
