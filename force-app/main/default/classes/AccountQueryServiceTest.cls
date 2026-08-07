@@ -3,8 +3,8 @@ private class AccountQueryServiceTest {
     @TestSetup
     static void setup() {
         insert new List<Account>{
-            new Account(Name = 'Test Account 1', Industry = 'Technology'),
-            new Account(Name = 'Test Account 2', Industry = 'Finance')
+            new Account(Name = 'Test Account 1', Industry = 'Technology',Phone ='+918888887788'),
+            new Account(Name = 'Test Account 2', Industry = 'Finance',Phone='+918888887888')
         };
     }
 
