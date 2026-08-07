@@ -265,8 +265,8 @@ paths = ['''Test\.cls$''']
 
 [[rules]]
 id = "indian-mobile-bare"
-description = "Bare Indian Mobile Number (10-digit)"
-regex = '''\b(?<!\d)[6-9][0-9]{9}(?!\d)\b'''
+description = "Bare Indian Mobile Number (10-digit) with surrounding non-digit boundary"
+regex = '''(^|[^0-9])[6-9][0-9]{9}([^0-9]|$)'''
 tags = ["pii", "mobile", "india"]
 severity = "medium"
 [rules.allowlist]
