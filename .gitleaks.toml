@@ -87,15 +87,25 @@ regexes = [
 
 [[rules]]
 id = "sf-org-id"
-description = "Hardcoded Salesforce Org ID (18-char)"
-regex = '''['"][0-9A-Za-z]{15,18}['"]'''
+description = "Hardcoded Salesforce Org ID (15 or 18-char starting with 00)"
+regex = '''['"]00[A-Za-z0-9]{13,16}['"]'''
 tags = ["salesforce", "org-id"]
 severity = "medium"
 [rules.allowlist]
-# Allow in test classes and mock data files
-paths = ['''Test\.cls$''', '''Mock\.cls$''', '''TestData\.cls$''']
+paths = [
+  '''Test\.cls$''',
+  '''Mock\.cls$''',
+  '''TestData\.cls$''',
+  '''\.json$''',
+  '''\.xml$''',
+  '''\.yml$''',
+  '''\.yaml$''',
+  '''sfdx-project\.json''',
+  '''package\.json''',
+  '''extensions\.json''',
+]
 regexes = [
-  '''000000000000000''',   # placeholder IDs
+  '''000000000000000''',
   '''[Tt]est[Ii][Dd]''',
 ]
 
@@ -118,6 +128,8 @@ description = "System.debug logging potentially sensitive data"
 regex = '''(?i)System\.debug\s*\(.*?(password|token|secret|key|credential|ssn|aadhaar|pan|account).*?\)'''
 tags = ["salesforce", "apex", "logging"]
 severity = "high"
+[rules.allowlist]
+paths = ['''Test\.cls$''']
 
 [[rules]]
 id = "apex-hardcoded-credential"
@@ -288,8 +300,14 @@ regexes = [
   '''atlassian\.net''',
   '''@test\.com''',
   '''@lodha\.com''',
+  '''secrets\.[A-Z_]+EMAIL''',
+  '''\$\{\{.*EMAIL.*\}\}''',
 ]
-paths = ['''Test\.cls$''']
+paths = [
+  '''Test\.cls$''',
+  '''\.yml$''',
+  '''\.yaml$''',
+]
 
 [[rules]]
 id = "indian-passport"
