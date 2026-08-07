@@ -132,7 +132,7 @@ public class GitleaksViolationDemo {
     // ── Profanity ─────────────────────────────────────────────
 
     // profanity-in-code
-    // TODO: fix this shit logic later
+    // TODO: fix this  logic later
     public static void badlyNamedMethod() {
         Integer x = 1;
     }
