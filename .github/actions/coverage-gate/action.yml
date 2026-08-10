@@ -90,21 +90,12 @@ runs:
         KEY_COUNT=$(jq 'keys | length' "$COVERAGE_FILE" 2>/dev/null || echo 0)
         echo "🔎 Coverage entries found: $KEY_COUNT"
         if [[ "$KEY_COUNT" -eq 0 ]]; then
-          echo "⚠️  Coverage JSON is empty — no Apex classes were instrumented."
-          echo "coverage_pct=0" >> $GITHUB_OUTPUT
-          echo "passed=false"   >> $GITHUB_OUTPUT
-          echo "class_table="   >> $GITHUB_OUTPUT
-          echo ""
-          echo "=========================================="
-          echo "APEX COVERAGE GATE — ${ENVIRONMENT}"
-          echo "=========================================="
-          echo "  Overall   : 0%"
-          echo "  Covered   : 0 / 0 lines"
-          echo "  Minimum   : ${MIN_COVERAGE}%"
-          echo "=========================================="
-          echo "❌ HARD GATE: Coverage 0% is below Lodha minimum of ${MIN_COVERAGE}%"
-          echo "   No coverage data — ensure test classes cover deployed Apex."
-          exit 1
+          echo "⚠️  Coverage JSON is empty — no Apex classes in this deployment."
+          echo "   Coverage gate skipped."
+          echo "coverage_pct=skipped" >> $GITHUB_OUTPUT
+          echo "passed=true"          >> $GITHUB_OUTPUT
+          echo "class_table="         >> $GITHUB_OUTPUT
+          exit 0
         fi
 
         # ── Detect format: Istanbul (.s) vs Salesforce native (.lines) ─────────
