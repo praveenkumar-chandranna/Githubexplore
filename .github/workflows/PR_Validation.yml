@@ -253,6 +253,35 @@ jobs:
           
           echo "manifest_path=$MANIFEST_PATH" >> "$GITHUB_OUTPUT"
 
+      - name: Check API Version in Metadata Files
+        shell: bash
+        env:
+          MIN: ${{ secrets.API_VERSION_MIN }}
+          MAX: ${{ secrets.API_VERSION_MAX }}
+        run: |
+          FAILED=0
+          MIN=${MIN:-30}
+          MAX=${MAX:-63}
+
+          while IFS= read -r FILE; do
+            VERSION=$(grep -oP '(?<=<apiVersion>)[^<]+' "$FILE" || true)
+            if [[ -n "$VERSION" ]]; then
+              MAJOR=$(echo "$VERSION" | cut -d'.' -f1)
+              if [[ "$MAJOR" -lt "$MIN" || "$MAJOR" -gt "$MAX" ]]; then
+                echo "❌ $FILE — apiVersion is $VERSION (accepted range: $MIN.0–$MAX.0)"
+                FAILED=1
+              fi
+            fi
+          done < <(find force-app -name "*-meta.xml" 2>/dev/null)
+
+          if [[ $FAILED -eq 1 ]]; then
+            echo ""
+            echo "❌ One or more files have apiVersion outside accepted range ($MIN.0–$MAX.0). Fix and push again."
+            exit 1
+          fi
+
+          echo "✅ All metadata files have apiVersion within accepted range ($MIN.0–$MAX.0)"
+
       - name: Validate Deployment - ${{ env.TARGET_ORG_NAME }} Org
         id: validate
         shell: bash
@@ -578,7 +607,7 @@ jobs:
   Send_Gitleaks_Email:
     runs-on: ubuntu-latest
     needs: Pre_Validation_Build
-    if: needs.Pre_Validation_Build.outputs.has_findings == 'true'
+    if: always() && needs.Pre_Validation_Build.outputs.has_findings == 'true'
     steps:
       - name: Send Gitleaks Alert Email
         uses: dawidd6/action-send-mail@v3
