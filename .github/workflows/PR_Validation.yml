@@ -578,7 +578,7 @@ jobs:
   Send_Gitleaks_Email:
     runs-on: ubuntu-latest
     needs: Pre_Validation_Build
-    if: needs.Pre_Validation_Build.outputs.has_findings == 'true'
+    if: always() && needs.Pre_Validation_Build.outputs.has_findings == 'true'
     steps:
       - name: Send Gitleaks Alert Email
         uses: dawidd6/action-send-mail@v3
