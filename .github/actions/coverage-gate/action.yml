@@ -234,7 +234,7 @@ runs:
 
     # ── Step 2: Post per-class breakdown as Jira comment ─────────────────────
     - name: Post coverage breakdown to Jira
-      if: inputs.jira-base-url != '' && inputs.jira-api-token != ''
+      if: inputs.jira-base-url != '' && inputs.jira-api-token != '' && steps.gate.outputs.passed == 'false'
       shell: bash
       env:
         JIRA_BASE_URL:   ${{ inputs.jira-base-url }}
