@@ -82,13 +82,82 @@ runs:
 
         echo "📄 Coverage file: $COVERAGE_FILE"
 
+        # ── Debug: show structure ─────────────────────────────────────────────
+        echo "🔎 Coverage file preview (first 500 chars):"
+        head -c 500 "$COVERAGE_FILE"
+        echo ""
+
+        KEY_COUNT=$(jq 'keys | length' "$COVERAGE_FILE" 2>/dev/null || echo 0)
+        echo "🔎 Coverage entries found: $KEY_COUNT"
+        if [[ "$KEY_COUNT" -eq 0 ]]; then
+          echo "⚠️  Coverage JSON is empty — no Apex classes were instrumented."
+          echo "coverage_pct=0" >> $GITHUB_OUTPUT
+          echo "passed=false"   >> $GITHUB_OUTPUT
+          echo "class_table="   >> $GITHUB_OUTPUT
+          echo ""
+          echo "=========================================="
+          echo "APEX COVERAGE GATE — ${ENVIRONMENT}"
+          echo "=========================================="
+          echo "  Overall   : 0%"
+          echo "  Covered   : 0 / 0 lines"
+          echo "  Minimum   : ${MIN_COVERAGE}%"
+          echo "=========================================="
+          echo "❌ HARD GATE: Coverage 0% is below Lodha minimum of ${MIN_COVERAGE}%"
+          echo "   No coverage data — ensure test classes cover deployed Apex."
+          exit 1
+        fi
+
+        # ── Detect format: Istanbul (.s) vs Salesforce native (.lines) ─────────
+        HAS_S_KEY=$(jq '[to_entries[] | select(.value.s != null)] | length' "$COVERAGE_FILE" 2>/dev/null || echo 0)
+        HAS_LINES_KEY=$(jq '[to_entries[] | select(.value.lines != null)] | length' "$COVERAGE_FILE" 2>/dev/null || echo 0)
+        echo "🔎 Istanbul(.s) entries: $HAS_S_KEY  |  Salesforce(.lines) entries: $HAS_LINES_KEY"
+
         # ── Per-class breakdown ───────────────────────────────────────────────
         CLASS_TABLE=""
         TOTAL_LINES=0
         COVERED_LINES=0
 
+        if [[ "$HAS_S_KEY" -gt 0 ]]; then
+          # Istanbul format: { "path/ClassName": { "s": { "0": 1, "1": 0 } } }
+          JQ_FILTER='
+            to_entries[] |
+            .key as $class |
+            (.value.s // {} | to_entries) as $stmts |
+            {
+              class:   $class,
+              total:   ($stmts | length),
+              covered: ([$stmts[] | select(.value > 0)] | length),
+              pct:     (if ($stmts | length) > 0
+                        then ([$stmts[] | select(.value > 0)] | length) * 100 / ($stmts | length) | floor
+                        else 0 end)
+            } | select(.total > 0)
+          '
+        elif [[ "$HAS_LINES_KEY" -gt 0 ]]; then
+          # Salesforce native format: { "ClassName": { "lines": { "covered": 10, "total": 12 } } }
+          JQ_FILTER='
+            to_entries[] |
+            .key as $class |
+            (.value.lines) as $l |
+            {
+              class:   $class,
+              total:   ($l.total // 0),
+              covered: ($l.covered // 0),
+              pct:     (if ($l.total // 0) > 0
+                        then ($l.covered // 0) * 100 / $l.total | floor
+                        else 0 end)
+            } | select(.total > 0)
+          '
+        else
+          echo "⚠️  Unrecognised coverage JSON format — dumping keys for diagnosis:"
+          jq 'to_entries[0]' "$COVERAGE_FILE" 2>/dev/null || true
+          echo "coverage_pct=0" >> $GITHUB_OUTPUT
+          echo "passed=false"   >> $GITHUB_OUTPUT
+          echo "class_table="   >> $GITHUB_OUTPUT
+          exit 1
+        fi
+
         while IFS= read -r ROW; do
-          CLASS=$(echo "$ROW" | jq -r '.class' | sed 's|^no-map/||')
+          CLASS=$(echo "$ROW" | jq -r '.class' | sed 's|^no-map/||' | sed 's|.*/||')
           TOTAL=$(echo "$ROW" | jq -r '.total')
           COVERED=$(echo "$ROW" | jq -r '.covered')
           PCT=$(echo "$ROW" | jq -r '.pct')
@@ -102,19 +171,7 @@ runs:
           fi
 
           CLASS_TABLE+="| ${BADGE} ${CLASS} | ${COVERED}/${TOTAL} | ${PCT}% |\n"
-        done < <(jq -c '
-          to_entries[] |
-          .key as $class |
-          (.value.s | to_entries) as $stmts |
-          {
-            class:   $class,
-            total:   ($stmts | length),
-            covered: ([$stmts[] | select(.value > 0)] | length),
-            pct:     (if ($stmts | length) > 0
-                      then ([$stmts[] | select(.value > 0)] | length) * 100 / ($stmts | length) | floor
-                      else 0 end)
-          }
-        ' "$COVERAGE_FILE" 2>/dev/null)
+        done < <(jq -c "$JQ_FILTER" "$COVERAGE_FILE" 2>/dev/null)
 
         # ── Overall percentage ────────────────────────────────────────────────
         if [[ $TOTAL_LINES -gt 0 ]]; then

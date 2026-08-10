@@ -357,7 +357,7 @@ jobs:
         run: |
           MANIFEST="${WORKSPACE}/manifest/${FEATURE_BRANCH}_package.xml"
           echo "Deploying: $MANIFEST"
-          CMD=(sf project deploy start --manifest "$MANIFEST" --target-org "$ORG_USERNAME" --test-level "$TEST_LEVEL" --wait 10 --ignore-conflicts --coverage-formatters json --results-dir coverage-results)
+          CMD=(sf project deploy start --manifest "$MANIFEST" --target-org "$ORG_USERNAME" --test-level "$TEST_LEVEL" --wait 60 --ignore-conflicts --coverage-formatters json --results-dir coverage-results)
           if [[ "$TEST_LEVEL" == "RunSpecifiedTests" && -n "$TEST_CLASSES" ]]; then
             CMD+=(--tests $TEST_CLASSES)
           fi
