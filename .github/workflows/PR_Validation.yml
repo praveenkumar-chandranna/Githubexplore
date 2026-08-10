@@ -292,7 +292,7 @@ jobs:
           echo ""
           
           set +e
-          "${CMD[@]}" | tee deploy-result.txt
+          "${CMD[@]}" 2>&1 | tee deploy-result.txt
           VALIDATION_EXIT_CODE=${PIPESTATUS[0]}
           set -e
 
