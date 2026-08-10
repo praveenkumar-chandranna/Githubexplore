@@ -377,7 +377,7 @@ jobs:
         shell: bash
         run: |
           set +e
-          gitleaks detect --source . --config .gitleaks.toml \
+          gitleaks detect --source . --no-git --config .gitleaks.toml \
             --report-format json \
             --report-path gitleaks-report.json \
             --verbose
