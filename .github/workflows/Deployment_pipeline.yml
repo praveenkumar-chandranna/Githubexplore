@@ -573,7 +573,7 @@ jobs:
           # Use source_branches if multi-package, else deploy_package
           INPUT="${SOURCE_BRANCHES:-$PACKAGE}"
 
-          TICKETS=$(echo "$INPUT" | grep -oP '[A-Z]+-\d+' | sort -u | tr '\n' ',' | sed 's/,$//')
+          TICKETS=$(echo "$INPUT" | grep -oP '[A-Z]+[-_]\d+' | sort -u | tr '\n' ',' | sed 's/,$//' || true)
 
           if [[ -z "$TICKETS" ]]; then
             echo "⚠️ No Jira tickets found in branch name(s): $INPUT"
@@ -666,6 +666,11 @@ jobs:
           fi
           RELEASE_HTML+="<hr/>"
           echo "✅ Built release notes for ${TICKET_COUNT} tickets"
+
+          if [[ -z "$CONFLUENCE_BASE_URL" || -z "$PAGE_ID" ]]; then
+            echo "⚠️ Confluence secrets not configured — skipping page update"
+            exit 0
+          fi
 
           echo "📄 Fetching current Confluence page..."
           PAGE_RESPONSE=$(curl -s \
