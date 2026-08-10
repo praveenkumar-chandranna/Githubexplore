@@ -68,10 +68,10 @@ jobs:
           INPUT_FEATURE: ${{ github.event.inputs.Feature_Branch }}
           INPUT_DTYPE: ${{ github.event.inputs.destructive_type }}
         run: |
-          FEATURE_INPUT=$(echo "$INPUT_FEATURE" | xargs | sed 's|^feature/||')
+          FEATURE_INPUT=$(echo "$INPUT_FEATURE" | xargs)
           echo "ENVIRONMENT=$INPUT_ENV"             >> $GITHUB_ENV
           echo "TEST_LEVEL=$INPUT_TESTLEVEL"        >> $GITHUB_ENV
-          echo "FEATURE_BRANCH=feature/${FEATURE_INPUT}" >> $GITHUB_ENV
+          echo "FEATURE_BRANCH=${FEATURE_INPUT}"    >> $GITHUB_ENV
           echo "DESTRUCTIVE_TYPE=$INPUT_DTYPE"      >> $GITHUB_ENV
 
       - name: Checkout source code
@@ -143,8 +143,8 @@ jobs:
           FEATURE_BRANCH: ${{ env.FEATURE_BRANCH }}
           TEST_LEVEL: ${{ env.TEST_LEVEL }}
         run: |
-          BRANCH_NAME=$(echo "$FEATURE_BRANCH" | sed 's|^feature/||')
-          MANIFEST_DIR="${WORKSPACE}/manifest/feature"
+          BRANCH_NAME="$FEATURE_BRANCH"
+          MANIFEST_DIR="${WORKSPACE}/manifest"
 
           EMPTY_PKG="${MANIFEST_DIR}/${BRANCH_NAME}_package.xml"
           DESTRUCTIVE_XML="${MANIFEST_DIR}/${BRANCH_NAME}_destructiveChanges.xml"
