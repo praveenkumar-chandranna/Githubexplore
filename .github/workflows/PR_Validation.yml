@@ -261,10 +261,10 @@ jobs:
           FAILED=0
           MIN=${MIN:-60}
 
-          MAX=$(curl -s https://mdcoverage.secure.force.com/services/apexrest/report | jq -r '.versions | keys | map(tonumber) | max' 2>/dev/null || echo "")
+          MAX=$(curl -s https://www.salesforce.com/services/data/ | grep -oP '(?<=v)[0-9]+(?=\.0)' | sort -n | tail -1 2>/dev/null || echo "")
           if [[ -z "$MAX" || "$MAX" == "null" ]]; then
-            echo "⚠️  Could not fetch latest Salesforce API version — falling back to 63"
-            MAX=63
+            echo "⚠️  Could not fetch latest Salesforce API version — falling back to 67"
+            MAX=67
           fi
           echo "📌 API version range: $MIN.0 – $MAX.0"
 
