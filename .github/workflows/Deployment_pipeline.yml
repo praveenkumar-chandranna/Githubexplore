@@ -564,11 +564,19 @@ jobs:
       - name: Extract Jira Tickets from Commits
         id: extract_tickets
         shell: bash
+        env:
+          PACKAGE: ${{ needs.Deployment_Build.outputs.deploy_package }}
+          SOURCE_BRANCHES: ${{ needs.Deployment_Build.outputs.source_branches }}
         run: |
-          echo "🔍 Extracting Jira ticket IDs from recent commits..."
-          TICKETS=$(git log --oneline -50 | grep -oP '[A-Z]+-\d+' | sort -u | tr '\n' ',' | sed 's/,$//')
+          echo "🔍 Extracting Jira ticket IDs from branch name(s)..."
+
+          # Use source_branches if multi-package, else deploy_package
+          INPUT="${SOURCE_BRANCHES:-$PACKAGE}"
+
+          TICKETS=$(echo "$INPUT" | grep -oP '[A-Z]+[-_]\d+' | sort -u | tr '\n' ',' | sed 's/,$//' || true)
+
           if [[ -z "$TICKETS" ]]; then
-            echo "⚠️ No Jira tickets found in recent commits"
+            echo "⚠️ No Jira tickets found in branch name(s): $INPUT"
             echo "has_tickets=false" >> "$GITHUB_OUTPUT"
           else
             echo "✅ Found tickets: $TICKETS"
@@ -628,6 +636,7 @@ jobs:
             IFS=',' read -ra TICKET_ARRAY <<< "$TICKETS"
 
             for TICKET in "${TICKET_ARRAY[@]}"; do
+              TICKET=$(echo "$TICKET" | xargs)
               echo "  Fetching: $TICKET"
               RESPONSE=$(curl -s -w "\n%{http_code}" \
                 -u "${JIRA_USER_EMAIL}:${ATLASSIAN_API_TOKEN}" \
@@ -658,6 +667,11 @@ jobs:
           RELEASE_HTML+="<hr/>"
           echo "✅ Built release notes for ${TICKET_COUNT} tickets"
 
+          if [[ -z "$CONFLUENCE_BASE_URL" || -z "$PAGE_ID" ]]; then
+            echo "⚠️ Confluence secrets not configured — skipping page update"
+            exit 0
+          fi
+
           echo "📄 Fetching current Confluence page..."
           PAGE_RESPONSE=$(curl -s \
             -u "${JIRA_USER_EMAIL}:${ATLASSIAN_API_TOKEN}" \
@@ -678,28 +692,16 @@ jobs:
           echo "📝 Updating: $PAGE_TITLE (v$CURRENT_VERSION → v$NEW_VERSION)"
 
           NEW_BODY="${RELEASE_HTML}${CURRENT_BODY}"
-          NEW_BODY_ESCAPED=$(echo "$NEW_BODY" | jq -Rs .)
-
-          UPDATE_PAYLOAD=$(cat <<EOF
-          {
-            "version": { "number": ${NEW_VERSION} },
-            "title": "${PAGE_TITLE}",
-            "type": "page",
-            "body": {
-              "storage": {
-                "value": ${NEW_BODY_ESCAPED},
-                "representation": "storage"
-              }
-            }
-          }
-          EOF
-          )
 
           UPDATE_RESPONSE=$(curl -s -w "\n%{http_code}" \
             -X PUT \
             -u "${JIRA_USER_EMAIL}:${ATLASSIAN_API_TOKEN}" \
             -H "Content-Type: application/json" \
-            -d "$UPDATE_PAYLOAD" \
+            -d "$(jq -n \
+              --argjson version "${NEW_VERSION}" \
+              --arg title "${PAGE_TITLE}" \
+              --arg value "${NEW_BODY}" \
+              '{version: {number: $version}, title: $title, type: "page", body: {storage: {value: $value, representation: "storage"}}}')" \
             "${CONFLUENCE_BASE_URL}/rest/api/content/${PAGE_ID}")
 
           UPDATE_CODE=$(echo "$UPDATE_RESPONSE" | tail -1)

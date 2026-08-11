@@ -257,11 +257,16 @@ jobs:
         shell: bash
         env:
           MIN: ${{ secrets.API_VERSION_MIN }}
-          MAX: ${{ secrets.API_VERSION_MAX }}
         run: |
           FAILED=0
-          MIN=${MIN:-30}
-          MAX=${MAX:-63}
+          MIN=${MIN:-60}
+
+          MAX=$(curl -s https://mdcoverage.secure.force.com/services/apexrest/report | jq -r '.versions | keys | map(tonumber) | max' 2>/dev/null || echo "")
+          if [[ -z "$MAX" || "$MAX" == "null" ]]; then
+            echo "⚠️  Could not fetch latest Salesforce API version — falling back to 63"
+            MAX=63
+          fi
+          echo "📌 API version range: $MIN.0 – $MAX.0"
 
           while IFS= read -r FILE; do
             VERSION=$(grep -oP '(?<=<apiVersion>)[^<]+' "$FILE" || true)
