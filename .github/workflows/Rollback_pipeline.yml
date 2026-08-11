@@ -66,6 +66,7 @@ jobs:
       original_head: ${{ steps.git-reset.outputs.original_head }}
       resolved_commit: ${{ steps.git-reset.outputs.resolved_commit }}
       jira_tickets:  ${{ steps.git-reset.outputs.jira_tickets }}
+      removed_commits: ${{ steps.git-reset.outputs.removed_commits }}
       notify_emails: ${{ secrets.NOTIFY_EMAILS }}
 
     steps:
@@ -125,6 +126,13 @@ jobs:
           git remote set-url origin "https://x-access-token:${GH_PAT}@github.com/${REPO}.git"
 
           ORIGINAL_HEAD=$(git rev-parse HEAD)
+
+          # ── Capture removed commits BEFORE reset ──────────────────────────
+          REMOVED_COMMITS=$(git log --oneline "${COMMIT_ID}..HEAD" 2>/dev/null || true)
+          echo "removed_commits<<EOF" >> $GITHUB_OUTPUT
+          echo "$REMOVED_COMMITS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
           git reset --hard "$COMMIT_ID"
           git push origin "$REF_NAME" --force
 
@@ -461,7 +469,7 @@ jobs:
           RESET_AUTHOR=$(git log -1 --pretty=format:"%an" "$RESET_COMMIT" 2>/dev/null || echo "")
 
           REMOVED_HTML="<em>None (already at target commit)</em>"
-          REMOVED=$(git log --oneline "${RESET_COMMIT}..${PREV_HEAD}" 2>/dev/null || true)
+          REMOVED="${{ needs.Rollback_Build.outputs.removed_commits }}"
           if [[ -n "$REMOVED" ]]; then
             COUNT=$(echo "$REMOVED" | wc -l | xargs)
             REMOVED_HTML="<ul>"
@@ -513,16 +521,16 @@ jobs:
           fi
 
           NEW_VERSION=$((CURRENT_VERSION + 1))
-          NEW_BODY_ESCAPED=$(echo "${RELEASE_HTML}${CURRENT_BODY}" | jq -Rs .)
+          NEW_BODY="${RELEASE_HTML}${CURRENT_BODY}"
 
           UPDATE_RESPONSE=$(curl -s -w "\n%{http_code}" -X PUT \
             -u "${JIRA_USER_EMAIL}:${ATLASSIAN_API_TOKEN}" \
             -H "Content-Type: application/json" \
             -d "$(jq -n \
-              --argjson version "{\"number\": ${NEW_VERSION}}" \
+              --argjson version "${NEW_VERSION}" \
               --arg title "$PAGE_TITLE" \
-              --argjson body "{\"storage\": {\"value\": ${NEW_BODY_ESCAPED}, \"representation\": \"storage\"}}" \
-              '{version: $version, title: $title, type: "page", body: $body}')" \
+              --arg body "$NEW_BODY" \
+              '{version: {number: $version}, title: $title, type: "page", body: {storage: {value: $body, representation: "storage"}}}')" \
             "${CONFLUENCE_BASE_URL}/rest/api/content/${CONFLUENCE_PAGE_ID}")
 
           UPDATE_CODE=$(echo "$UPDATE_RESPONSE" | tail -1)
