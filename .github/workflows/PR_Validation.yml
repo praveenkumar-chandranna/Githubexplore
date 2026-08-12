@@ -386,8 +386,7 @@ jobs:
         id: run-scanner
         uses: forcedotcom/run-code-analyzer@v2
         with:
-          run-arguments: --target force-app
-          output-file: code-analyzer-results.csv
+          run-arguments: --target force-app --output-file code-analyzer-results.csv
           results-artifact-name: salesforce-code-analyzer-results
 
       - name: Upload Code Analyzer CSV
@@ -631,7 +630,7 @@ jobs:
         continue-on-error: true
 
       - name: Publish to Confluence
-        if: env.CONFLUENCE_BASE_URL != '' && env.CONFLUENCE_USER_EMAIL != '' && env.CONFLUENCE_SPACE_KEY != ''
+        if: steps.check_csv.outputs.exists == 'true' && env.CONFLUENCE_BASE_URL != '' && env.CONFLUENCE_USER_EMAIL != '' && env.CONFLUENCE_SPACE_KEY != ''
         shell: bash
         env:
           CONFLUENCE_BASE_URL: ${{ secrets.CONFLUENCE_BASE_URL }}
