@@ -392,7 +392,7 @@ jobs:
 
       - name: Upload Code Analyzer CSV
         if: always() && hashFiles('code-analyzer-results.csv') != ''
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: code-analyzer-csv
           path: code-analyzer-results.csv
@@ -700,14 +700,25 @@ jobs:
             echo "✅ Confluence page created"
           fi
 
-      - name: Send Code Analyzer Email
+      - name: Check CSV exists
+        id: check_csv
+        shell: bash
+        run: |
+          if [[ -f code-analyzer-results.csv ]]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Send Code Analyzer Email (with CSV)
+        if: steps.check_csv.outputs.exists == 'true'
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: ${{ secrets.SMTP_SERVER }}
           server_port:    ${{ secrets.SMTP_PORT }}
           username:       ${{ secrets.SMTP_USERNAME }}
           password:       ${{ secrets.SMTP_PASSWORD }}
-          subject: "📊 [Code Analyzer] PR #${{ needs.Pre_Validation_Build.outputs.pr_number }} — ${{ needs.Pre_Validation_Build.outputs.head_ref }} | Violations: ${{ needs.Pre_Validation_Build.outputs.num_violations }}"
+          subject:        "📊 [Code Analyzer] PR #${{ needs.Pre_Validation_Build.outputs.pr_number }} — ${{ needs.Pre_Validation_Build.outputs.head_ref }} | Violations: ${{ needs.Pre_Validation_Build.outputs.num_violations }}"
           to:             ${{ secrets.NOTIFY_EMAILS }}
           from:           "Do not Reply <${{ secrets.GMAIL_USERNAME }}>"
           attachments:    code-analyzer-results.csv
@@ -725,9 +736,8 @@ jobs:
               <tr><td><strong>PR Link</strong></td><td><a href="https://github.com/${{ needs.Pre_Validation_Build.outputs.repo }}/pull/${{ needs.Pre_Validation_Build.outputs.pr_number }}">View PR</a></td></tr>
             </table>
             <br/>
-            <p style="font-size:12px;color:#888;font-family:Arial,sans-serif;">
-              ⚠️ This is an automated notification sent by GitHub Actions. Please do not reply to this email.
-            </p>
+            <p style="font-size:12px;color:#888;font-family:Arial,sans-serif;">⚠️ This is an automated notification sent by GitHub Actions. Please do not reply to this email.</p>
+
 
   # Job 5: Email alert for Gitleaks findings
   Send_Gitleaks_Email:
