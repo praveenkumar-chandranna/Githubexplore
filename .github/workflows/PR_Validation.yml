@@ -78,7 +78,8 @@ jobs:
       pr_number:     ${{ github.event.pull_request.number }}
       run_id:        ${{ github.run_id }}
       repo:          ${{ github.repository }}
-
+      num_violations:    ${{ steps.run-scanner.outputs.num-violations }}
+      num_sev1:          ${{ steps.run-scanner.outputs.num-sev1-violations }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v7
@@ -385,8 +386,16 @@ jobs:
         id: run-scanner
         uses: forcedotcom/run-code-analyzer@v2
         with:
-          run-arguments: --target force-app
+          run-arguments: --target force-app --output-file code-analyzer-results.csv --output-format csv
           results-artifact-name: salesforce-code-analyzer-results
+
+      - name: Upload Code Analyzer CSV
+        if: always() && hashFiles('code-analyzer-results.csv') != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: code-analyzer-csv
+          path: code-analyzer-results.csv
+          retention-days: 30
 
       - name: Fail if critical violations found
         if: |
@@ -608,7 +617,121 @@ jobs:
             echo "✅ JWT key file cleaned up"
           fi
 
-  # Job 4: Email alert for Gitleaks findings
+  # Job 4: Publish Code Analyzer CSV to Confluence and email
+  Publish_Code_Analyzer_Report:
+    runs-on: ubuntu-latest
+    needs: Pre_Validation_Build
+    if: always() && needs.Pre_Validation_Build.result != 'skipped'
+    steps:
+      - name: Download Code Analyzer CSV
+        uses: actions/download-artifact@v4
+        with:
+          name: code-analyzer-csv
+        continue-on-error: true
+
+      - name: Publish to Confluence
+        if: |
+          secrets.CONFLUENCE_BASE_URL != '' &&
+          secrets.CONFLUENCE_API_TOKEN != '' &&
+          secrets.CONFLUENCE_SPACE_KEY != ''
+        shell: bash
+        env:
+          CONFLUENCE_BASE_URL: ${{ secrets.CONFLUENCE_BASE_URL }}
+          CONFLUENCE_USER_EMAIL: ${{ secrets.CONFLUENCE_USER_EMAIL }}
+          CONFLUENCE_API_TOKEN: ${{ secrets.CONFLUENCE_API_TOKEN }}
+          CONFLUENCE_SPACE_KEY: ${{ secrets.CONFLUENCE_SPACE_KEY }}
+          PR_NUMBER: ${{ needs.Pre_Validation_Build.outputs.pr_number }}
+          HEAD_REF: ${{ needs.Pre_Validation_Build.outputs.head_ref }}
+          ACTOR: ${{ needs.Pre_Validation_Build.outputs.actor }}
+          NUM_VIOLATIONS: ${{ needs.Pre_Validation_Build.outputs.num_violations }}
+          NUM_SEV1: ${{ needs.Pre_Validation_Build.outputs.num_sev1 }}
+          RUN_ID: ${{ needs.Pre_Validation_Build.outputs.run_id }}
+          REPO: ${{ needs.Pre_Validation_Build.outputs.repo }}
+        run: |
+          SCAN_TIME=$(TZ='Asia/Kolkata' date +'%d-%m-%Y %H:%M IST')
+          PAGE_TITLE="Code Analyzer Report — PR #${PR_NUMBER} (${HEAD_REF})"
+
+          # Build HTML table from CSV if file exists
+          if [[ -f code-analyzer-results.csv ]]; then
+            TABLE_ROWS=$(awk -F',' 'NR==1 { \
+              printf "<tr>"; for(i=1;i<=NF;i++) printf "<th>%s</th>",$i; printf "</tr>"; next \
+            } { \
+              printf "<tr>"; for(i=1;i<=NF;i++) printf "<td>%s</td>",$i; printf "</tr>" \
+            }' code-analyzer-results.csv)
+            CSV_TABLE="<table border=\"1\" cellpadding=\"4\" cellspacing=\"0\" style=\"border-collapse:collapse;font-family:monospace;font-size:12px;\">$TABLE_ROWS</table>"
+          else
+            CSV_TABLE="<p><em>No CSV output generated — no violations found or scanner did not produce output.</em></p>"
+          fi
+
+          PAGE_BODY="<h2>Salesforce Code Analyzer Report</h2>\
+          <table border='1' cellpadding='6' cellspacing='0' style='border-collapse:collapse;'>\
+          <tr><th>Field</th><th>Value</th></tr>\
+          <tr><td>Scanned At</td><td>${SCAN_TIME}</td></tr>\
+          <tr><td>PR</td><td>#${PR_NUMBER}</td></tr>\
+          <tr><td>Branch</td><td>${HEAD_REF}</td></tr>\
+          <tr><td>Author</td><td>${ACTOR}</td></tr>\
+          <tr><td>Total Violations</td><td>${NUM_VIOLATIONS}</td></tr>\
+          <tr><td>Sev1 Violations</td><td>${NUM_SEV1}</td></tr>\
+          <tr><td>Workflow Run</td><td><a href='https://github.com/${REPO}/actions/runs/${RUN_ID}'>${RUN_ID}</a></td></tr>\
+          </table>\
+          <h3>Violation Details</h3>${CSV_TABLE}"
+
+          # Check if page already exists
+          EXISTING=$(curl -s -u "${CONFLUENCE_USER_EMAIL}:${CONFLUENCE_API_TOKEN}" \
+            "${CONFLUENCE_BASE_URL}/rest/api/content?title=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "$PAGE_TITLE")&spaceKey=${CONFLUENCE_SPACE_KEY}&expand=version" \
+            | jq -r '.results[0].id // empty')
+
+          if [[ -n "$EXISTING" ]]; then
+            CURRENT_VERSION=$(curl -s -u "${CONFLUENCE_USER_EMAIL}:${CONFLUENCE_API_TOKEN}" \
+              "${CONFLUENCE_BASE_URL}/rest/api/content/${EXISTING}?expand=version" | jq '.version.number')
+            NEW_VERSION=$((CURRENT_VERSION + 1))
+            curl -s -X PUT \
+              -u "${CONFLUENCE_USER_EMAIL}:${CONFLUENCE_API_TOKEN}" \
+              -H "Content-Type: application/json" \
+              "${CONFLUENCE_BASE_URL}/rest/api/content/${EXISTING}" \
+              -d "$(jq -n --arg title "$PAGE_TITLE" --arg body "$PAGE_BODY" --argjson version "${NEW_VERSION}" \
+                '{version:{number:$version},title:$title,type:"page",body:{storage:{value:$body,representation:"storage"}}}')"
+            echo "✅ Confluence page updated: ${EXISTING}"
+          else
+            curl -s -X POST \
+              -u "${CONFLUENCE_USER_EMAIL}:${CONFLUENCE_API_TOKEN}" \
+              -H "Content-Type: application/json" \
+              "${CONFLUENCE_BASE_URL}/rest/api/content" \
+              -d "$(jq -n --arg title "$PAGE_TITLE" --arg body "$PAGE_BODY" --arg space "$CONFLUENCE_SPACE_KEY" \
+                '{type:"page",title:$title,space:{key:$space},body:{storage:{value:$body,representation:"storage"}}}')"
+            echo "✅ Confluence page created"
+          fi
+
+      - name: Send Code Analyzer Email
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_SERVER }}
+          server_port:    ${{ secrets.SMTP_PORT }}
+          username:       ${{ secrets.SMTP_USERNAME }}
+          password:       ${{ secrets.SMTP_PASSWORD }}
+          subject: "📊 [Code Analyzer] PR #${{ needs.Pre_Validation_Build.outputs.pr_number }} — ${{ needs.Pre_Validation_Build.outputs.head_ref }} | Violations: ${{ needs.Pre_Validation_Build.outputs.num_violations }}"
+          to:             ${{ secrets.NOTIFY_EMAILS }}
+          from:           "Do not Reply <${{ secrets.GMAIL_USERNAME }}>"
+          attachments:    code-analyzer-results.csv
+          html_body: |
+            <h2>📊 Salesforce Code Analyzer Report</h2>
+            <p>The CSV report is attached to this email.</p>
+            <table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;font-family:Arial,sans-serif;">
+              <tr><th>Field</th><th>Details</th></tr>
+              <tr><td><strong>PR Number</strong></td><td>#${{ needs.Pre_Validation_Build.outputs.pr_number }}</td></tr>
+              <tr><td><strong>Branch</strong></td><td>${{ needs.Pre_Validation_Build.outputs.head_ref }} → ${{ needs.Pre_Validation_Build.outputs.base_ref }}</td></tr>
+              <tr><td><strong>Author</strong></td><td>${{ needs.Pre_Validation_Build.outputs.actor }}</td></tr>
+              <tr><td><strong>Total Violations</strong></td><td>${{ needs.Pre_Validation_Build.outputs.num_violations }}</td></tr>
+              <tr><td><strong>Sev1 Violations</strong></td><td>${{ needs.Pre_Validation_Build.outputs.num_sev1 }}</td></tr>
+              <tr><td><strong>Workflow Run</strong></td><td><a href="https://github.com/${{ needs.Pre_Validation_Build.outputs.repo }}/actions/runs/${{ needs.Pre_Validation_Build.outputs.run_id }}">View Run</a></td></tr>
+              <tr><td><strong>PR Link</strong></td><td><a href="https://github.com/${{ needs.Pre_Validation_Build.outputs.repo }}/pull/${{ needs.Pre_Validation_Build.outputs.pr_number }}">View PR</a></td></tr>
+            </table>
+            <br/>
+            <p style="font-size:12px;color:#888;font-family:Arial,sans-serif;">
+              ⚠️ This is an automated notification sent by GitHub Actions. Please do not reply to this email.
+            </p>
+
+  # Job 5: Email alert for Gitleaks findings
   Send_Gitleaks_Email:
     runs-on: ubuntu-latest
     needs: Pre_Validation_Build
