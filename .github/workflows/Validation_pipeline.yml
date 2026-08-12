@@ -197,18 +197,6 @@ jobs:
               cat "$OUTPUT_TEST"
             fi
 
-            git config user.name "$GIT_USER_NAME"
-            git config user.email "$GIT_USER_EMAIL"
-            git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
-            git add "${OUTPUT_DIR}/${OUTPUT_NAME}_package.xml"
-            [[ -f "$OUTPUT_TEST" ]] && git add "${OUTPUT_DIR}/${OUTPUT_NAME}_TestClass.txt"
-            if git diff --cached --quiet; then
-              echo "⚠️ No changes to commit"
-            else
-              git commit -m "Consolidated package ${OUTPUT_NAME}"
-              git push origin "$REF_NAME"
-            fi
-
             echo "FEATURE_BRANCH=${OUTPUT_NAME}" >> $GITHUB_ENV
             echo "✅ Consolidation complete: $OUTPUT_NAME"
 
