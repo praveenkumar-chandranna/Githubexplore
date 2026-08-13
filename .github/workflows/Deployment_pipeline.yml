@@ -77,6 +77,97 @@ jobs:
           echo "ref_name=${REF_NAME}" >> $GITHUB_OUTPUT
           echo "repo=${REPO}" >> $GITHUB_OUTPUT
 
+
+      - name: Enforce Deployment Promotion Gate
+        shell: bash
+        env:
+          INPUT_ENV: ${{ github.event.inputs.environment }}
+          INPUT_FEATURE: ${{ github.event.inputs.Feature_Branch }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          CONFIG_FILE="${GITHUB_WORKSPACE}/deployment-gate-config.json"
+          if [[ ! -f "$CONFIG_FILE" ]]; then
+            echo "Warning: deployment-gate-config.json not found - skipping gate"
+            exit 0
+          fi
+
+          GATE_ENABLED=$(jq -r '.gate_enabled' "$CONFIG_FILE")
+          if [[ "$GATE_ENABLED" != "true" ]]; then
+            echo "Deployment gate is disabled via config - skipping"
+            exit 0
+          fi
+
+          #  Detect branch type 
+          HOTFIX_PATTERN=$(jq -r '.hotfix.branch_pattern' "$CONFIG_FILE" | sed 's/\*/.*/') 
+          RETRIEVE_PATTERN=$(jq -r '.retrieve.branch_pattern' "$CONFIG_FILE" | sed 's/\*/.*/') 
+
+          IS_HOTFIX=false
+          IS_RETRIEVE=false
+          IFS=',' read -ra BRANCHES <<< "$INPUT_FEATURE"
+          for B in "${BRANCHES[@]}"; do
+            B=$(echo "$B" | xargs)
+            if [[ "$B" =~ $HOTFIX_PATTERN ]]; then IS_HOTFIX=true; fi
+            if [[ "$B" =~ $RETRIEVE_PATTERN ]]; then IS_RETRIEVE=true; fi
+          done
+
+          #  Scenario 3: retrieve/*  no gate, deploy to any org freely 
+          RETRIEVE_BYPASS=$(jq -r '.retrieve.gate_bypass' "$CONFIG_FILE")
+          if [[ "$IS_RETRIEVE" == "true" && "$RETRIEVE_BYPASS" == "true" ]]; then
+            echo "retrieve/* branch detected - gate bypassed, deploy to any org freely"
+            exit 0
+          fi
+
+          #  Scenario 2: hotfix/*  independent, no promotion chain required 
+          if [[ "$IS_HOTFIX" == "true" ]]; then
+            ALLOWED=$(jq -r '.hotfix.allowed_environments[]' "$CONFIG_FILE")
+            if ! echo "$ALLOWED" | grep -qx "$INPUT_ENV"; then
+              echo "=========================================="
+              echo "DEPLOYMENT GATE BLOCKED - HOTFIX RESTRICTION"
+              echo "=========================================="
+              echo "  Hotfix branches may only deploy to: $(echo "$ALLOWED" | tr '\n' ' ')"
+              echo "  Attempted environment: ${INPUT_ENV}"
+              echo "=========================================="
+              exit 1
+            fi
+            echo "hotfix/* branch - no promotion chain required, deploying to ${INPUT_ENV}"
+            exit 0
+          fi
+
+          #  Scenario 1: feature/*  enforce DEV > QA > UAT > PRODUCTION 
+          PREV_ENV=$(jq -r --arg env "$INPUT_ENV" '.promotion_chain[$env] // empty' "$CONFIG_FILE")
+
+          if [[ -z "$PREV_ENV" ]]; then
+            echo "No promotion gate required for ${INPUT_ENV}"
+            exit 0
+          fi
+
+          echo "Checking ${INPUT_FEATURE} was deployed to ${PREV_ENV} before allowing ${INPUT_ENV}..."
+
+          RUNS=$(curl -s \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${REPO}/actions/workflows/Deployment_pipeline.yml/runs?status=success&per_page=50")
+
+          MATCH=$(echo "$RUNS" | jq -r \
+            --arg env "$PREV_ENV" \
+            --arg pkg "$INPUT_FEATURE" \
+            '.workflow_runs[] | select(.inputs.environment == $env and (.inputs.Feature_Branch | split(",") | map(ltrimstr(" ") | rtrimstr(" ")) | contains([$pkg | ltrimstr(" ") | rtrimstr(" ")]))) | .id' \
+            | head -1)
+
+          if [[ -z "$MATCH" ]]; then
+            echo "=========================================="
+            echo "DEPLOYMENT GATE BLOCKED"
+            echo "=========================================="
+            echo "  Package  : ${INPUT_FEATURE}"
+            echo "  Target   : ${INPUT_ENV}"
+            echo "  Required : Successful deployment to ${PREV_ENV} not found"
+            echo "  Action   : Deploy to ${PREV_ENV} first, then retry ${INPUT_ENV}"
+            echo "=========================================="
+            exit 1
+          fi
+
+          echo "Found successful ${PREV_ENV} deployment (run: ${MATCH}) - gate passed for ${INPUT_ENV}"
       - name: Set environment variables
         id: set-env
         shell: bash
