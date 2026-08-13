@@ -104,6 +104,50 @@ jobs:
           echo "${{ secrets.SALESFORCE_JWT_SECRET_KEY }}" > server.key
           chmod 600 server.key
 
+      - name: Enforce Deployment Promotion Gate
+        shell: bash
+        env:
+          SOURCE_BRANCH: ${{ github.head_ref }}
+          DEST_BRANCH: ${{ github.base_ref }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          declare -A REQUIRED_ENV=([QA]="DEV" [UAT]="QA" [main]="UAT")
+          PREV_ENV="${REQUIRED_ENV[$DEST_BRANCH]}"
+
+          if [[ -z "$PREV_ENV" ]]; then
+            echo "✅ No promotion gate required for PR targeting ${DEST_BRANCH}"
+            exit 0
+          fi
+
+          echo "🔍 PR targets ${DEST_BRANCH} — checking ${SOURCE_BRANCH} was deployed to ${PREV_ENV}..."
+
+          RUNS=$(curl -s \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${REPO}/actions/workflows/Deployment_pipeline.yml/runs?status=success&per_page=50")
+
+          MATCH=$(echo "$RUNS" | jq -r \
+            --arg env "$PREV_ENV" \
+            --arg pkg "$SOURCE_BRANCH" \
+            '.workflow_runs[] | select(.inputs.environment == $env and (.inputs.Feature_Branch | split(",") | map(ltrimstr(" ") | rtrimstr(" ")) | contains([$pkg | ltrimstr(" ") | rtrimstr(" ")]))) | .id' \
+            | head -1)
+
+          if [[ -z "$MATCH" ]]; then
+            echo ""
+            echo "=========================================="
+            echo "🚫 PR MERGE BLOCKED — PROMOTION GATE FAILED"
+            echo "=========================================="
+            echo "  Source Branch : ${SOURCE_BRANCH}"
+            echo "  Target Branch : ${DEST_BRANCH}"
+            echo "  Required      : Successful deployment to ${PREV_ENV} not found"
+            echo "  Action        : Deploy ${SOURCE_BRANCH} to ${PREV_ENV} first"
+            echo "=========================================="
+            exit 1
+          fi
+
+          echo "✅ Found successful ${PREV_ENV} deployment (run: ${MATCH}) — gate passed"
+
       - name: Set Source and Destination Branch
         shell: bash
         env:
