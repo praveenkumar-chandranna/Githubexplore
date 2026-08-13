@@ -386,7 +386,7 @@ jobs:
         id: run-scanner
         uses: forcedotcom/run-code-analyzer@v2
         with:
-          run-arguments: --target force-app --output-file code-analyzer-results.csv
+          run-arguments: --target force-app --output-file code-analyzer-results.csv --config-file code-analyzer.yml
           results-artifact-name: salesforce-code-analyzer-results
 
       - name: Upload Code Analyzer CSV

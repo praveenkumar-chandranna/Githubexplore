@@ -1,0 +1,22 @@
+engines:
+  pmd:
+    disable_engine: false
+    rule_disable_filters:
+      - engine: "pmd"
+        rule: "TrailingWhitespace"
+      - engine: "pmd"
+        rule: "RegexpSingleline"
+      - engine: "pmd"
+        rule: "WhitespaceAround"
+      - engine: "pmd"
+        rule: "WhitespaceBefore"
+      - engine: "pmd"
+        rule: "WhitespaceAfter"
+      - engine: "pmd"
+        rule: "NoWhitespaceAfter"
+      - engine: "pmd"
+        rule: "NoWhitespaceBefore"
+      - engine: "pmd"
+        rule: "EmptyLineSeparator"
+      - engine: "pmd"
+        rule: "GenericWhitespace"
