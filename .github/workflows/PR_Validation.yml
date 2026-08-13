@@ -711,7 +711,7 @@ jobs:
 
       - name: Send Code Analyzer Email (with CSV)
         if: steps.check_csv.outputs.exists == 'true'
-        uses: dawidd6/action-send-mail@v3
+        uses: dawidd6/action-send-mail@v18
         with:
           server_address: ${{ secrets.SMTP_SERVER }}
           server_port:    ${{ secrets.SMTP_PORT }}
@@ -745,7 +745,7 @@ jobs:
     if: always() && needs.Pre_Validation_Build.outputs.has_findings == 'true'
     steps:
       - name: Send Gitleaks Alert Email
-        uses: dawidd6/action-send-mail@v3
+        uses: dawidd6/action-send-mail@v18
         with:
           server_address: ${{ secrets.SMTP_SERVER }}
           server_port:    ${{ secrets.SMTP_PORT }}
