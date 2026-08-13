@@ -621,7 +621,7 @@ jobs:
   Publish_Code_Analyzer_Report:
     runs-on: ubuntu-latest
     needs: Pre_Validation_Build
-    if: always() && needs.Pre_Validation_Build.result != 'skipped'
+    if: needs.Pre_Validation_Build.result == 'success'
     steps:
       - name: Download Code Analyzer CSV
         uses: actions/download-artifact@v4
@@ -629,8 +629,18 @@ jobs:
           name: code-analyzer-csv
         continue-on-error: true
 
+      - name: Check CSV exists
+        id: check_csv
+        shell: bash
+        run: |
+          if [[ -f code-analyzer-results.csv ]]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Publish to Confluence
-        if: steps.check_csv.outputs.exists == 'true' && env.CONFLUENCE_BASE_URL != '' && env.CONFLUENCE_USER_EMAIL != '' && env.CONFLUENCE_SPACE_KEY != ''
+        if: steps.check_csv.outputs.exists == 'true'
         shell: bash
         env:
           CONFLUENCE_BASE_URL: ${{ secrets.CONFLUENCE_BASE_URL }}
@@ -697,16 +707,6 @@ jobs:
               -d "$(jq -n --arg title "$PAGE_TITLE" --arg body "$PAGE_BODY" --arg space "$CONFLUENCE_SPACE_KEY" \
                 '{type:"page",title:$title,space:{key:$space},body:{storage:{value:$body,representation:"storage"}}}')"
             echo "✅ Confluence page created"
-          fi
-
-      - name: Check CSV exists
-        id: check_csv
-        shell: bash
-        run: |
-          if [[ -f code-analyzer-results.csv ]]; then
-            echo "exists=true" >> $GITHUB_OUTPUT
-          else
-            echo "exists=false" >> $GITHUB_OUTPUT
           fi
 
       - name: Send Code Analyzer Email (with CSV)
