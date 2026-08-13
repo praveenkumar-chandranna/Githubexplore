@@ -646,7 +646,7 @@ jobs:
           CONFLUENCE_BASE_URL: ${{ secrets.CONFLUENCE_BASE_URL }}
           CONFLUENCE_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
           CONFLUENCE_API_TOKEN: ${{ secrets.ATLASSIAN_API_TOKEN }}
-          CONFLUENCE_SPACE_KEY: ${{ secrets.CONFLUENCE_SPACE_KEY }}
+          CONFLUENCE_PAGE_ID: ${{ secrets.CODE_ANALYZER_CONFLUENCE_PAGE_ID }}
           PR_NUMBER: ${{ needs.Pre_Validation_Build.outputs.pr_number }}
           HEAD_REF: ${{ needs.Pre_Validation_Build.outputs.head_ref }}
           ACTOR: ${{ needs.Pre_Validation_Build.outputs.actor }}
@@ -655,22 +655,22 @@ jobs:
           RUN_ID: ${{ needs.Pre_Validation_Build.outputs.run_id }}
           REPO: ${{ needs.Pre_Validation_Build.outputs.repo }}
         run: |
-          SCAN_TIME=$(TZ='Asia/Kolkata' date +'%d-%m-%Y %H:%M IST')
-          PAGE_TITLE="Code Analyzer Report — PR #${PR_NUMBER} (${HEAD_REF})"
-
-          # Build HTML table from CSV if file exists
-          if [[ -f code-analyzer-results.csv ]]; then
-            TABLE_ROWS=$(awk -F',' 'NR==1 { \
-              printf "<tr>"; for(i=1;i<=NF;i++) printf "<th>%s</th>",$i; printf "</tr>"; next \
-            } { \
-              printf "<tr>"; for(i=1;i<=NF;i++) printf "<td>%s</td>",$i; printf "</tr>" \
-            }' code-analyzer-results.csv)
-            CSV_TABLE="<table border=\"1\" cellpadding=\"4\" cellspacing=\"0\" style=\"border-collapse:collapse;font-family:monospace;font-size:12px;\">$TABLE_ROWS</table>"
-          else
-            CSV_TABLE="<p><em>No CSV output generated — no violations found or scanner did not produce output.</em></p>"
+          if [[ -z "$CONFLUENCE_BASE_URL" || -z "$CONFLUENCE_PAGE_ID" ]]; then
+            echo "⚠️ Confluence secrets not configured - skipping"
+            exit 0
           fi
 
-          PAGE_BODY="<h2>Salesforce Code Analyzer Report</h2>\
+          SCAN_TIME=$(TZ='Asia/Kolkata' date +'%d-%m-%Y %H:%M IST')
+
+          # Build HTML table from CSV
+          TABLE_ROWS=$(awk -F',' 'NR==1 { \
+            printf "<tr>"; for(i=1;i<=NF;i++) printf "<th>%s</th>",$i; printf "</tr>"; next \
+          } { \
+            printf "<tr>"; for(i=1;i<=NF;i++) printf "<td>%s</td>",$i; printf "</tr>" \
+          }' code-analyzer-results.csv)
+          CSV_TABLE="<table border=\"1\" cellpadding=\"4\" cellspacing=\"0\" style=\"border-collapse:collapse;font-family:monospace;font-size:12px;\">$TABLE_ROWS</table>"
+
+          NEW_BODY="<h2>Salesforce Code Analyzer Report</h2>\
           <table border='1' cellpadding='6' cellspacing='0' style='border-collapse:collapse;'>\
           <tr><th>Field</th><th>Value</th></tr>\
           <tr><td>Scanned At</td><td>${SCAN_TIME}</td></tr>\
@@ -683,30 +683,38 @@ jobs:
           </table>\
           <h3>Violation Details</h3>${CSV_TABLE}"
 
-          # Check if page already exists
-          EXISTING=$(curl -s -u "${CONFLUENCE_USER_EMAIL}:${CONFLUENCE_API_TOKEN}" \
-            "${CONFLUENCE_BASE_URL}/rest/api/content?title=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "$PAGE_TITLE")&spaceKey=${CONFLUENCE_SPACE_KEY}&expand=version" \
-            | jq -r '.results[0].id // empty')
+          PAGE_RESPONSE=$(curl -s \
+            -u "${CONFLUENCE_USER_EMAIL}:${CONFLUENCE_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            "${CONFLUENCE_BASE_URL}/rest/api/content/${CONFLUENCE_PAGE_ID}?expand=version,title")
 
-          if [[ -n "$EXISTING" ]]; then
-            CURRENT_VERSION=$(curl -s -u "${CONFLUENCE_USER_EMAIL}:${CONFLUENCE_API_TOKEN}" \
-              "${CONFLUENCE_BASE_URL}/rest/api/content/${EXISTING}?expand=version" | jq '.version.number')
-            NEW_VERSION=$((CURRENT_VERSION + 1))
-            curl -s -X PUT \
-              -u "${CONFLUENCE_USER_EMAIL}:${CONFLUENCE_API_TOKEN}" \
-              -H "Content-Type: application/json" \
-              "${CONFLUENCE_BASE_URL}/rest/api/content/${EXISTING}" \
-              -d "$(jq -n --arg title "$PAGE_TITLE" --arg body "$PAGE_BODY" --argjson version "${NEW_VERSION}" \
-                '{version:{number:$version},title:$title,type:"page",body:{storage:{value:$body,representation:"storage"}}}')"
-            echo "✅ Confluence page updated: ${EXISTING}"
+          CURRENT_VERSION=$(echo "$PAGE_RESPONSE" | jq -r '.version.number')
+          PAGE_TITLE=$(echo "$PAGE_RESPONSE" | jq -r '.title')
+
+          if [[ -z "$CURRENT_VERSION" || "$CURRENT_VERSION" == "null" ]]; then
+            echo "❌ Failed to fetch Confluence page"
+            echo "$PAGE_RESPONSE"
+            exit 1
+          fi
+
+          NEW_VERSION=$((CURRENT_VERSION + 1))
+
+          UPDATE_RESPONSE=$(curl -s -w "\n%{http_code}" \
+            -X PUT \
+            -u "${CONFLUENCE_USER_EMAIL}:${CONFLUENCE_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            "${CONFLUENCE_BASE_URL}/rest/api/content/${CONFLUENCE_PAGE_ID}" \
+            -d "$(jq -n --arg title "$PAGE_TITLE" --arg body "$NEW_BODY" --argjson version "${NEW_VERSION}" \
+              '{version:{number:$version},title:$title,type:"page",body:{storage:{value:$body,representation:"storage"}}}')") 
+
+          UPDATE_CODE=$(echo "$UPDATE_RESPONSE" | tail -1)
+          if [[ "$UPDATE_CODE" == "200" ]]; then
+            echo "✅ Confluence page updated successfully"
+            echo "🔗 ${CONFLUENCE_BASE_URL}/pages/viewpage.action?pageId=${CONFLUENCE_PAGE_ID}"
           else
-            curl -s -X POST \
-              -u "${CONFLUENCE_USER_EMAIL}:${CONFLUENCE_API_TOKEN}" \
-              -H "Content-Type: application/json" \
-              "${CONFLUENCE_BASE_URL}/rest/api/content" \
-              -d "$(jq -n --arg title "$PAGE_TITLE" --arg body "$PAGE_BODY" --arg space "$CONFLUENCE_SPACE_KEY" \
-                '{type:"page",title:$title,space:{key:$space},body:{storage:{value:$body,representation:"storage"}}}')"
-            echo "✅ Confluence page created"
+            echo "❌ Confluence update failed (HTTP $UPDATE_CODE)"
+            echo "$UPDATE_RESPONSE"
+            exit 1
           fi
 
       - name: Send Code Analyzer Email (with CSV)
