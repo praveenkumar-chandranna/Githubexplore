@@ -1,4 +1,10 @@
 {
+  "branch_to_env": {
+    "DEV":  "DEV",
+    "QA":   "QA",
+    "UAT":  "UAT",
+    "main": "PRODUCTION"
+  },
   "promotion_chain": {
     "QA":         "DEV",
     "UAT":        "QA",
@@ -7,8 +13,7 @@
   "hotfix": {
     "branch_pattern": "hotfix/*",
     "allowed_environments": ["UAT", "PRODUCTION"],
-    "pr_target_branch": "main",
-    "promotion_chain": {}
+    "pr_target_branch": "main"
   },
   "retrieve": {
     "branch_pattern": "retrieve/*",

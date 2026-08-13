@@ -125,23 +125,23 @@ jobs:
             exit 0
           fi
 
-          #  Detect branch type 
+          # Detect branch type from source branch
           HOTFIX_PATTERN=$(jq -r '.hotfix.branch_pattern' "$CONFIG_FILE" | sed 's/\*/.*/') 
           RETRIEVE_PATTERN=$(jq -r '.retrieve.branch_pattern' "$CONFIG_FILE" | sed 's/\*/.*/') 
 
           IS_HOTFIX=false
           IS_RETRIEVE=false
-          if [[ "$SOURCE_BRANCH" =~ $HOTFIX_PATTERN ]]; then IS_HOTFIX=true; fi
-          if [[ "$SOURCE_BRANCH" =~ $RETRIEVE_PATTERN ]]; then IS_RETRIEVE=true; fi
+          [[ "$SOURCE_BRANCH" =~ $HOTFIX_PATTERN ]]  && IS_HOTFIX=true
+          [[ "$SOURCE_BRANCH" =~ $RETRIEVE_PATTERN ]] && IS_RETRIEVE=true
 
-          #  Scenario 3: retrieve/*  no gate, PR to any branch freely 
+          # Scenario 3: retrieve/* - gate bypassed, PR to any branch freely
           RETRIEVE_BYPASS=$(jq -r '.retrieve.gate_bypass' "$CONFIG_FILE")
           if [[ "$IS_RETRIEVE" == "true" && "$RETRIEVE_BYPASS" == "true" ]]; then
-            echo "retrieve/* branch detected - gate bypassed, PR to any org freely"
+            echo "retrieve/* branch - gate bypassed, PR to ${DEST_BRANCH} allowed"
             exit 0
           fi
 
-          #  Scenario 2: hotfix/*  independent, only PR to main 
+          # Scenario 2: hotfix/* - independent, PR only allowed to pr_target_branch
           if [[ "$IS_HOTFIX" == "true" ]]; then
             PR_TARGET=$(jq -r '.hotfix.pr_target_branch' "$CONFIG_FILE")
             if [[ "$DEST_BRANCH" != "$PR_TARGET" ]]; then
@@ -153,19 +153,25 @@ jobs:
               echo "=========================================="
               exit 1
             fi
-            echo "hotfix/* PR to main - no promotion chain required, gate passed"
+            echo "hotfix/* PR to ${PR_TARGET} - no promotion chain required, gate passed"
             exit 0
           fi
 
-          #  Scenario 1: feature/*  enforce DEV > QA > UAT > PRODUCTION 
-          PREV_ENV=$(jq -r --arg env "$DEST_BRANCH" '.promotion_chain[$env] // empty' "$CONFIG_FILE")
+          # Scenario 1: feature/* - enforce DEV > QA > UAT > PRODUCTION
+          # Translate git branch name to environment name using branch_to_env map
+          TARGET_ENV=$(jq -r --arg b "$DEST_BRANCH" '.branch_to_env[$b] // empty' "$CONFIG_FILE")
+          if [[ -z "$TARGET_ENV" ]]; then
+            echo "No branch_to_env mapping for ${DEST_BRANCH} - skipping gate"
+            exit 0
+          fi
 
+          PREV_ENV=$(jq -r --arg env "$TARGET_ENV" '.promotion_chain[$env] // empty' "$CONFIG_FILE")
           if [[ -z "$PREV_ENV" ]]; then
-            echo "No promotion gate required for PR targeting ${DEST_BRANCH}"
+            echo "No promotion gate required for PR targeting ${DEST_BRANCH} (${TARGET_ENV})"
             exit 0
           fi
 
-          echo "PR targets ${DEST_BRANCH} - checking ${SOURCE_BRANCH} was deployed to ${PREV_ENV}..."
+          echo "PR targets ${DEST_BRANCH} (${TARGET_ENV}) - checking ${SOURCE_BRANCH} was deployed to ${PREV_ENV}..."
 
           RUNS=$(curl -s \
             -H "Authorization: Bearer ${GH_TOKEN}" \
@@ -183,14 +189,14 @@ jobs:
             echo "PR MERGE BLOCKED - PROMOTION GATE FAILED"
             echo "=========================================="
             echo "  Source Branch : ${SOURCE_BRANCH}"
-            echo "  Target Branch : ${DEST_BRANCH}"
+            echo "  Target Branch : ${DEST_BRANCH} (${TARGET_ENV})"
             echo "  Required      : Successful deployment to ${PREV_ENV} not found"
             echo "  Action        : Deploy ${SOURCE_BRANCH} to ${PREV_ENV} first"
             echo "=========================================="
             exit 1
           fi
 
-          echo "Found successful ${PREV_ENV} deployment (run: ${MATCH}) - gate passed"
+          echo "Found successful ${PREV_ENV} deployment (run: ${MATCH}) - gate passed for ${TARGET_ENV}"
       - name: Set Source and Destination Branch
         shell: bash
         env:
