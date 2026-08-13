@@ -1,0 +1,18 @@
+{
+  "promotion_chain": {
+    "QA":         "DEV",
+    "UAT":        "QA",
+    "PRODUCTION": "UAT"
+  },
+  "hotfix": {
+    "branch_pattern": "hotfix/*",
+    "allowed_environments": ["UAT", "PRODUCTION"],
+    "pr_target_branch": "main",
+    "promotion_chain": {}
+  },
+  "retrieve": {
+    "branch_pattern": "retrieve/*",
+    "gate_bypass": true
+  },
+  "gate_enabled": true
+}

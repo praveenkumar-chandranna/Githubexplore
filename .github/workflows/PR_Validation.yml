@@ -104,6 +104,93 @@ jobs:
           echo "${{ secrets.SALESFORCE_JWT_SECRET_KEY }}" > server.key
           chmod 600 server.key
 
+
+      - name: Enforce Deployment Promotion Gate
+        shell: bash
+        env:
+          SOURCE_BRANCH: ${{ github.head_ref }}
+          DEST_BRANCH: ${{ github.base_ref }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          CONFIG_FILE="${GITHUB_WORKSPACE}/deployment-gate-config.json"
+          if [[ ! -f "$CONFIG_FILE" ]]; then
+            echo "Warning: deployment-gate-config.json not found - skipping gate"
+            exit 0
+          fi
+
+          GATE_ENABLED=$(jq -r '.gate_enabled' "$CONFIG_FILE")
+          if [[ "$GATE_ENABLED" != "true" ]]; then
+            echo "Deployment gate is disabled via config - skipping"
+            exit 0
+          fi
+
+          #  Detect branch type 
+          HOTFIX_PATTERN=$(jq -r '.hotfix.branch_pattern' "$CONFIG_FILE" | sed 's/\*/.*/') 
+          RETRIEVE_PATTERN=$(jq -r '.retrieve.branch_pattern' "$CONFIG_FILE" | sed 's/\*/.*/') 
+
+          IS_HOTFIX=false
+          IS_RETRIEVE=false
+          if [[ "$SOURCE_BRANCH" =~ $HOTFIX_PATTERN ]]; then IS_HOTFIX=true; fi
+          if [[ "$SOURCE_BRANCH" =~ $RETRIEVE_PATTERN ]]; then IS_RETRIEVE=true; fi
+
+          #  Scenario 3: retrieve/*  no gate, PR to any branch freely 
+          RETRIEVE_BYPASS=$(jq -r '.retrieve.gate_bypass' "$CONFIG_FILE")
+          if [[ "$IS_RETRIEVE" == "true" && "$RETRIEVE_BYPASS" == "true" ]]; then
+            echo "retrieve/* branch detected - gate bypassed, PR to any org freely"
+            exit 0
+          fi
+
+          #  Scenario 2: hotfix/*  independent, only PR to main 
+          if [[ "$IS_HOTFIX" == "true" ]]; then
+            PR_TARGET=$(jq -r '.hotfix.pr_target_branch' "$CONFIG_FILE")
+            if [[ "$DEST_BRANCH" != "$PR_TARGET" ]]; then
+              echo "=========================================="
+              echo "PR BLOCKED - HOTFIX BRANCH RESTRICTION"
+              echo "=========================================="
+              echo "  Hotfix branches may only merge to: $PR_TARGET"
+              echo "  Attempted target: ${DEST_BRANCH}"
+              echo "=========================================="
+              exit 1
+            fi
+            echo "hotfix/* PR to main - no promotion chain required, gate passed"
+            exit 0
+          fi
+
+          #  Scenario 1: feature/*  enforce DEV > QA > UAT > PRODUCTION 
+          PREV_ENV=$(jq -r --arg env "$DEST_BRANCH" '.promotion_chain[$env] // empty' "$CONFIG_FILE")
+
+          if [[ -z "$PREV_ENV" ]]; then
+            echo "No promotion gate required for PR targeting ${DEST_BRANCH}"
+            exit 0
+          fi
+
+          echo "PR targets ${DEST_BRANCH} - checking ${SOURCE_BRANCH} was deployed to ${PREV_ENV}..."
+
+          RUNS=$(curl -s \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${REPO}/actions/workflows/Deployment_pipeline.yml/runs?status=success&per_page=50")
+
+          MATCH=$(echo "$RUNS" | jq -r \
+            --arg env "$PREV_ENV" \
+            --arg pkg "$SOURCE_BRANCH" \
+            '.workflow_runs[] | select(.inputs.environment == $env and (.inputs.Feature_Branch | split(",") | map(ltrimstr(" ") | rtrimstr(" ")) | contains([$pkg | ltrimstr(" ") | rtrimstr(" ")]))) | .id' \
+            | head -1)
+
+          if [[ -z "$MATCH" ]]; then
+            echo "=========================================="
+            echo "PR MERGE BLOCKED - PROMOTION GATE FAILED"
+            echo "=========================================="
+            echo "  Source Branch : ${SOURCE_BRANCH}"
+            echo "  Target Branch : ${DEST_BRANCH}"
+            echo "  Required      : Successful deployment to ${PREV_ENV} not found"
+            echo "  Action        : Deploy ${SOURCE_BRANCH} to ${PREV_ENV} first"
+            echo "=========================================="
+            exit 1
+          fi
+
+          echo "Found successful ${PREV_ENV} deployment (run: ${MATCH}) - gate passed"
       - name: Set Source and Destination Branch
         shell: bash
         env:
@@ -267,7 +354,7 @@ jobs:
             echo "⚠️  Could not fetch latest Salesforce API version — falling back to 67"
             MAX=67
           fi
-          echo "📌 API version range: $MIN.0 – $MAX.0"
+          echo "📌 API version range: $MIN.0 - $MAX.0"
 
           while IFS= read -r FILE; do
             VERSION=$(grep -oP '(?<=<apiVersion>)[^<]+' "$FILE" || true)
@@ -621,7 +708,7 @@ jobs:
   Publish_Code_Analyzer_Report:
     runs-on: ubuntu-latest
     needs: Pre_Validation_Build
-    if: always() && needs.Pre_Validation_Build.result != 'skipped'
+    if: needs.Pre_Validation_Build.result == 'success'
     steps:
       - name: Download Code Analyzer CSV
         uses: actions/download-artifact@v4
@@ -629,14 +716,24 @@ jobs:
           name: code-analyzer-csv
         continue-on-error: true
 
+      - name: Check CSV exists
+        id: check_csv
+        shell: bash
+        run: |
+          if [[ -f code-analyzer-results.csv ]]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Publish to Confluence
-        if: steps.check_csv.outputs.exists == 'true' && env.CONFLUENCE_BASE_URL != '' && env.CONFLUENCE_USER_EMAIL != '' && env.CONFLUENCE_SPACE_KEY != ''
+        if: steps.check_csv.outputs.exists == 'true'
         shell: bash
         env:
           CONFLUENCE_BASE_URL: ${{ secrets.CONFLUENCE_BASE_URL }}
           CONFLUENCE_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
           CONFLUENCE_API_TOKEN: ${{ secrets.ATLASSIAN_API_TOKEN }}
-          CONFLUENCE_SPACE_KEY: ${{ secrets.CONFLUENCE_SPACE_KEY }}
+          CONFLUENCE_PAGE_ID: ${{ secrets.CODE_ANALYZER_CONFLUENCE_PAGE_ID }}
           PR_NUMBER: ${{ needs.Pre_Validation_Build.outputs.pr_number }}
           HEAD_REF: ${{ needs.Pre_Validation_Build.outputs.head_ref }}
           ACTOR: ${{ needs.Pre_Validation_Build.outputs.actor }}
@@ -645,10 +742,13 @@ jobs:
           RUN_ID: ${{ needs.Pre_Validation_Build.outputs.run_id }}
           REPO: ${{ needs.Pre_Validation_Build.outputs.repo }}
         run: |
-          SCAN_TIME=$(TZ='Asia/Kolkata' date +'%d-%m-%Y %H:%M IST')
-          PAGE_TITLE="Code Analyzer Report — PR #${PR_NUMBER} (${HEAD_REF})"
+          if [[ -z "$CONFLUENCE_BASE_URL" || -z "$CONFLUENCE_PAGE_ID" ]]; then
+            echo "Confluence secrets not configured - skipping"
+            exit 0
+          fi
 
-          # Build HTML table from CSV if file exists
+          SCAN_TIME=$(TZ='Asia/Kolkata' date +'%d-%m-%Y %H:%M IST')
+
           if [[ -f code-analyzer-results.csv ]]; then
             TABLE_ROWS=$(awk -F',' 'NR==1 { \
               printf "<tr>"; for(i=1;i<=NF;i++) printf "<th>%s</th>",$i; printf "</tr>"; next \
@@ -657,10 +757,10 @@ jobs:
             }' code-analyzer-results.csv)
             CSV_TABLE="<table border=\"1\" cellpadding=\"4\" cellspacing=\"0\" style=\"border-collapse:collapse;font-family:monospace;font-size:12px;\">$TABLE_ROWS</table>"
           else
-            CSV_TABLE="<p><em>No CSV output generated — no violations found or scanner did not produce output.</em></p>"
+            CSV_TABLE="<p><em>No violations found.</em></p>"
           fi
 
-          PAGE_BODY="<h2>Salesforce Code Analyzer Report</h2>\
+          NEW_ENTRY="<h2>Code Analyzer Scan - PR #${PR_NUMBER} | ${HEAD_REF} | ${SCAN_TIME}</h2>\
           <table border='1' cellpadding='6' cellspacing='0' style='border-collapse:collapse;'>\
           <tr><th>Field</th><th>Value</th></tr>\
           <tr><td>Scanned At</td><td>${SCAN_TIME}</td></tr>\
@@ -671,42 +771,45 @@ jobs:
           <tr><td>Sev1 Violations</td><td>${NUM_SEV1}</td></tr>\
           <tr><td>Workflow Run</td><td><a href='https://github.com/${REPO}/actions/runs/${RUN_ID}'>${RUN_ID}</a></td></tr>\
           </table>\
-          <h3>Violation Details</h3>${CSV_TABLE}"
+          <h3>Violation Details</h3>${CSV_TABLE}<hr/>"
 
-          # Check if page already exists
-          EXISTING=$(curl -s -u "${CONFLUENCE_USER_EMAIL}:${CONFLUENCE_API_TOKEN}" \
-            "${CONFLUENCE_BASE_URL}/rest/api/content?title=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "$PAGE_TITLE")&spaceKey=${CONFLUENCE_SPACE_KEY}&expand=version" \
-            | jq -r '.results[0].id // empty')
+          PAGE_RESPONSE=$(curl -s \
+            -u "${CONFLUENCE_USER_EMAIL}:${CONFLUENCE_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            "${CONFLUENCE_BASE_URL}/rest/api/content/${CONFLUENCE_PAGE_ID}?expand=body.storage,version")
 
-          if [[ -n "$EXISTING" ]]; then
-            CURRENT_VERSION=$(curl -s -u "${CONFLUENCE_USER_EMAIL}:${CONFLUENCE_API_TOKEN}" \
-              "${CONFLUENCE_BASE_URL}/rest/api/content/${EXISTING}?expand=version" | jq '.version.number')
-            NEW_VERSION=$((CURRENT_VERSION + 1))
-            curl -s -X PUT \
-              -u "${CONFLUENCE_USER_EMAIL}:${CONFLUENCE_API_TOKEN}" \
-              -H "Content-Type: application/json" \
-              "${CONFLUENCE_BASE_URL}/rest/api/content/${EXISTING}" \
-              -d "$(jq -n --arg title "$PAGE_TITLE" --arg body "$PAGE_BODY" --argjson version "${NEW_VERSION}" \
-                '{version:{number:$version},title:$title,type:"page",body:{storage:{value:$body,representation:"storage"}}}')"
-            echo "✅ Confluence page updated: ${EXISTING}"
-          else
-            curl -s -X POST \
-              -u "${CONFLUENCE_USER_EMAIL}:${CONFLUENCE_API_TOKEN}" \
-              -H "Content-Type: application/json" \
-              "${CONFLUENCE_BASE_URL}/rest/api/content" \
-              -d "$(jq -n --arg title "$PAGE_TITLE" --arg body "$PAGE_BODY" --arg space "$CONFLUENCE_SPACE_KEY" \
-                '{type:"page",title:$title,space:{key:$space},body:{storage:{value:$body,representation:"storage"}}}')"
-            echo "✅ Confluence page created"
+          CURRENT_VERSION=$(echo "$PAGE_RESPONSE" | jq -r '.version.number')
+          CURRENT_BODY=$(echo "$PAGE_RESPONSE" | jq -r '.body.storage.value')
+          PAGE_TITLE=$(echo "$PAGE_RESPONSE" | jq -r '.title')
+
+          if [[ -z "$CURRENT_VERSION" || "$CURRENT_VERSION" == "null" ]]; then
+            echo "Failed to fetch Confluence page"
+            echo "$PAGE_RESPONSE"
+            exit 1
           fi
 
-      - name: Check CSV exists
-        id: check_csv
-        shell: bash
-        run: |
-          if [[ -f code-analyzer-results.csv ]]; then
-            echo "exists=true" >> $GITHUB_OUTPUT
+          NEW_VERSION=$((CURRENT_VERSION + 1))
+          NEW_BODY="${NEW_ENTRY}${CURRENT_BODY}"
+
+          UPDATE_RESPONSE=$(curl -s -w "\n%{http_code}" \
+            -X PUT \
+            -u "${CONFLUENCE_USER_EMAIL}:${CONFLUENCE_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n \
+              --argjson version "{\"number\": ${NEW_VERSION}}" \
+              --arg title "${PAGE_TITLE}" \
+              --arg value "${NEW_BODY}" \
+              '{version: $version, title: $title, type: "page", body: {storage: {value: $value, representation: "storage"}}}')" \
+            "${CONFLUENCE_BASE_URL}/rest/api/content/${CONFLUENCE_PAGE_ID}")
+
+          UPDATE_CODE=$(echo "$UPDATE_RESPONSE" | tail -1)
+          if [[ "$UPDATE_CODE" == "200" ]]; then
+              echo "✅ Confluence page updated successfully"
+            echo "${CONFLUENCE_BASE_URL}/pages/viewpage.action?pageId=${CONFLUENCE_PAGE_ID}"
           else
-            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "Confluence update failed (HTTP $UPDATE_CODE)"
+            echo "$UPDATE_RESPONSE" | sed '$d'
+            exit 1
           fi
 
       - name: Send Code Analyzer Email (with CSV)
