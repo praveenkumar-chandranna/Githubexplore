@@ -106,7 +106,8 @@ jobs:
 
                   FEATURE_INPUT=$(echo "$RUN_DETAIL" | jq -r '.inputs.Feature_Branch // ""')
                   ENV_INPUT=$(echo "$RUN_DETAIL" | jq -r '.inputs.environment // ""')
-                  echo "  [DEBUG] run=$RUN_ID Feature_Branch='$FEATURE_INPUT' environment='$ENV_INPUT'"
+                  ALL_INPUTS=$(echo "$RUN_DETAIL" | jq -c '.inputs // {}')
+                  echo "  [DEBUG] run=$RUN_ID inputs=$ALL_INPUTS Feature_Branch='$FEATURE_INPUT' environment='$ENV_INPUT'"
 
                   if [[ "$FEATURE_INPUT" == "$SOURCE_BRANCH" ]] || \
                      echo "$FEATURE_INPUT" | tr ',' '\n' | xargs | grep -qxF "$SOURCE_BRANCH"; then
