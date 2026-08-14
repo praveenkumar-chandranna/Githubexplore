@@ -20,23 +20,106 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       should_validate: ${{ steps.verify.outputs.should_validate }}
-    
+
     steps:
       - name: Verify Source Branch
         id: verify
         shell: bash
         env:
           SOURCE_BRANCH: ${{ github.head_ref }}
+          DEST_BRANCH: ${{ github.base_ref }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
         run: |
-          echo "PR Source Branch: $SOURCE_BRANCH"
-          
+          echo "PR Source Branch : $SOURCE_BRANCH"
+          echo "PR Target Branch : $DEST_BRANCH"
+
+          # Block PRs raised directly from main
           if [[ "$SOURCE_BRANCH" == "main" ]]; then
             echo "❌ PR from 'main' branch detected - SKIPPING validation"
             echo "should_validate=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "✅ PR from '$SOURCE_BRANCH' - ALLOWING validation"
-            echo "should_validate=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+
+          PREFIX=$(echo "$SOURCE_BRANCH" | cut -d'/' -f1 | tr '[:upper:]' '[:lower:]')
+
+          # Scenario 2: hotfix/ — independent, no promotion gate
+          if [[ "$PREFIX" == "hotfix" ]]; then
+            echo "✅ hotfix/ branch — promotion gate skipped"
+            echo "should_validate=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Scenario 3: retrieve/ — dedicated org, never blocked
+          if [[ "$PREFIX" == "retrieve" ]]; then
+            echo "✅ retrieve/ branch — promotion gate skipped"
+            echo "should_validate=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Scenario 1: feature/ — enforce DEV → QA → UAT → main(PRODUCTION)
+          if [[ "$PREFIX" == "feature" ]]; then
+            case "$DEST_BRANCH" in
+              QA)   PRIOR_ENV="DEV" ;;
+              UAT)  PRIOR_ENV="QA" ;;
+              main) PRIOR_ENV="UAT" ;;
+              *)    PRIOR_ENV="" ;;
+            esac
+
+            if [[ -n "$PRIOR_ENV" ]]; then
+              echo "🔍 Checking '$SOURCE_BRANCH' has a successful $PRIOR_ENV deployment before PR to $DEST_BRANCH..."
+
+              DEPLOYMENTS=$(curl -s \
+                -H "Authorization: Bearer ${GH_TOKEN}" \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                "https://api.github.com/repos/${REPO}/deployments?ref=${SOURCE_BRANCH}&per_page=100")
+
+              PRIOR_IDS=$(echo "$DEPLOYMENTS" | jq -r --arg env "$PRIOR_ENV" \
+                '[.[] | select(.environment == $env) | .id] | .[]')
+
+              if [[ -z "$PRIOR_IDS" ]]; then
+                echo "❌ PROMOTION GATE FAILED"
+                echo "   Branch  : $SOURCE_BRANCH"
+                echo "   Required: successful deployment to $PRIOR_ENV"
+                echo "   Found   : no deployments to $PRIOR_ENV"
+                echo "   → Deploy to $PRIOR_ENV first, then raise this PR."
+                echo "should_validate=false" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+
+              FOUND_SUCCESS=false
+              while IFS= read -r DEP_ID; do
+                [[ -z "$DEP_ID" ]] && continue
+                STATUS=$(curl -s \
+                  -H "Authorization: Bearer ${GH_TOKEN}" \
+                  -H "Accept: application/vnd.github+json" \
+                  -H "X-GitHub-Api-Version: 2022-11-28" \
+                  "https://api.github.com/repos/${REPO}/deployments/${DEP_ID}/statuses" \
+                  | jq -r 'first | .state // "none"')
+                if [[ "$STATUS" == "success" ]]; then
+                  FOUND_SUCCESS=true
+                  echo "  ✅ Found successful $PRIOR_ENV deployment (id: $DEP_ID)"
+                  break
+                fi
+              done <<< "$PRIOR_IDS"
+
+              if [[ "$FOUND_SUCCESS" != "true" ]]; then
+                echo "❌ PROMOTION GATE FAILED"
+                echo "   Branch  : $SOURCE_BRANCH"
+                echo "   Required: successful deployment to $PRIOR_ENV"
+                echo "   Found   : deployments exist but none with status=success"
+                echo "   → Ensure $PRIOR_ENV deployment succeeded before raising PR to $DEST_BRANCH."
+                echo "should_validate=false" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+
+              echo "✅ Promotion gate passed — $SOURCE_BRANCH has a successful $PRIOR_ENV deployment"
+            fi
+          fi
+
+          echo "✅ PR from '$SOURCE_BRANCH' → '$DEST_BRANCH' — ALLOWING validation"
+          echo "should_validate=true" >> "$GITHUB_OUTPUT"
 
   # Job 2: Skip notification
   notify_main_skip:

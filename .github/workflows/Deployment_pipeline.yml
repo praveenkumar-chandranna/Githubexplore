@@ -51,7 +51,7 @@ jobs:
 
     outputs:
       deploy_package: ${{ steps.resolve-package.outputs.deploy_package }}
-      environment: ${{ steps.set-env.outputs.environment }}
+      environment: ${{ steps.set-run-meta.outputs.environment }}
       tag_name: ${{ steps.release-tag.outputs.tag_name }}
       run_id: ${{ steps.set-run-meta.outputs.run_id }}
       actor: ${{ steps.set-run-meta.outputs.actor }}
@@ -60,12 +60,13 @@ jobs:
       source_branches: ${{ steps.resolve-package.outputs.source_branches }}
 
     steps:
-      - name: Validate branch-environment consistency
+      - name: Set run metadata and environment variables
         id: set-run-meta
         shell: bash
         env:
           INPUT_ENV: ${{ github.event.inputs.environment }}
           INPUT_FEATURE: ${{ github.event.inputs.Feature_Branch }}
+          INPUT_TESTLEVEL: ${{ github.event.inputs.testlevel }}
           ACTOR: ${{ github.actor }}
           RUN_ID: ${{ github.run_id }}
           REF_NAME: ${{ github.ref_name }}
@@ -76,21 +77,100 @@ jobs:
           echo "actor=${ACTOR}" >> $GITHUB_OUTPUT
           echo "ref_name=${REF_NAME}" >> $GITHUB_OUTPUT
           echo "repo=${REPO}" >> $GITHUB_OUTPUT
-
-
-      - name: Set environment variables
-        id: set-env
-        shell: bash
-        env:
-          INPUT_ENV: ${{ github.event.inputs.environment }}
-          INPUT_TESTLEVEL: ${{ github.event.inputs.testlevel }}
-        run: |
           echo "ENVIRONMENT=$INPUT_ENV" >> $GITHUB_ENV
           echo "environment=$INPUT_ENV" >> $GITHUB_OUTPUT
           echo "TEST_LEVEL=$INPUT_TESTLEVEL" >> $GITHUB_ENV
 
+      - name: Enforce Deployment Promotion Gate
+        shell: bash
+        env:
+          INPUT_ENV: ${{ github.event.inputs.environment }}
+          INPUT_FEATURE: ${{ github.event.inputs.Feature_Branch }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Use first branch name to determine prefix (handles multi-branch input)
+          FIRST_BRANCH=$(echo "$INPUT_FEATURE" | cut -d',' -f1 | xargs)
+          PREFIX=$(echo "$FIRST_BRANCH" | cut -d'/' -f1 | tr '[:upper:]' '[:lower:]')
+
+          echo "Branch prefix : $PREFIX"
+          echo "Target env    : $INPUT_ENV"
+
+          # Scenario 2: hotfix/ — independent, can deploy to any env including UAT/PRODUCTION directly
+          if [[ "$PREFIX" == "hotfix" ]]; then
+            echo "✅ hotfix/ branch — promotion gate skipped (can deploy to any env)"
+            exit 0
+          fi
+
+          # Scenario 3: retrieve/ — dedicated org deployments, never blocked
+          if [[ "$PREFIX" == "retrieve" ]]; then
+            echo "✅ retrieve/ branch — promotion gate skipped (dedicated org deployment)"
+            exit 0
+          fi
+
+          # Scenario 1: feature/ — enforce DEV → QA → UAT → PRODUCTION sequence
+          if [[ "$PREFIX" != "feature" ]]; then
+            echo "✅ Branch prefix '$PREFIX' has no promotion gate rule — allowing"
+            exit 0
+          fi
+
+          # Map each env to its required prior env
+          case "$INPUT_ENV" in
+            QA)         PRIOR_ENV="DEV" ;;
+            UAT)        PRIOR_ENV="QA" ;;
+            PRODUCTION) PRIOR_ENV="UAT" ;;
+            *)          echo "✅ No prior env required for $INPUT_ENV — gate passed"; exit 0 ;;
+          esac
+
+          echo "🔍 Checking '$FIRST_BRANCH' has a successful $PRIOR_ENV deployment before $INPUT_ENV..."
+
+          DEPLOYMENTS=$(curl -s \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${REPO}/deployments?ref=${FIRST_BRANCH}&per_page=100")
+
+          PRIOR_IDS=$(echo "$DEPLOYMENTS" | jq -r --arg env "$PRIOR_ENV" \
+            '[.[] | select(.environment == $env) | .id] | .[]')
+
+          if [[ -z "$PRIOR_IDS" ]]; then
+            echo "❌ PROMOTION GATE FAILED"
+            echo "   Branch  : $FIRST_BRANCH"
+            echo "   Required: successful deployment to $PRIOR_ENV"
+            echo "   Found   : no deployments to $PRIOR_ENV"
+            echo "   → Deploy to $PRIOR_ENV first, then retry $INPUT_ENV."
+            exit 1
+          fi
+
+          FOUND_SUCCESS=false
+          while IFS= read -r DEP_ID; do
+            [[ -z "$DEP_ID" ]] && continue
+            STATUS=$(curl -s \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${REPO}/deployments/${DEP_ID}/statuses" \
+              | jq -r 'first | .state // "none"')
+            if [[ "$STATUS" == "success" ]]; then
+              FOUND_SUCCESS=true
+              echo "  ✅ Found successful $PRIOR_ENV deployment (id: $DEP_ID)"
+              break
+            fi
+          done <<< "$PRIOR_IDS"
+
+          if [[ "$FOUND_SUCCESS" != "true" ]]; then
+            echo "❌ PROMOTION GATE FAILED"
+            echo "   Branch  : $FIRST_BRANCH"
+            echo "   Required: successful deployment to $PRIOR_ENV"
+            echo "   Found   : deployments exist but none with status=success"
+            echo "   → Ensure $PRIOR_ENV deployment succeeded before promoting to $INPUT_ENV."
+            exit 1
+          fi
+
+          echo "✅ Promotion gate passed — $FIRST_BRANCH has a successful $PRIOR_ENV deployment"
+
       - name: Checkout source code
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
         with:
           ref: ${{ github.ref_name }}
           fetch-depth: 0
@@ -241,7 +321,7 @@ jobs:
           fi
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@v4
         with:
           node-version: 22
 
@@ -281,12 +361,6 @@ jobs:
             HOTFIX)     echo "CLIENT_ID=$KEY_HOTFIX" >> $GITHUB_OUTPUT; echo "USERNAME=$USER_HOTFIX" >> $GITHUB_OUTPUT; echo "LOGIN_URL=$SF_LOGIN_URL_TEST_VAL" >> $GITHUB_OUTPUT ;;
             *) echo "Unsupported environment $ENVIRONMENT"; exit 1 ;;
           esac
-
-      - name: Clear Prior Salesforce Sessions
-        shell: bash
-        run: |
-          echo "🧹 Clearing existing Salesforce org sessions..."
-          sf org logout --all --no-prompt || true
 
       - name: Authenticate to - ${{ github.event.inputs.environment }} Org
         env:
@@ -558,7 +632,7 @@ jobs:
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
         with:
           fetch-depth: 50
 
