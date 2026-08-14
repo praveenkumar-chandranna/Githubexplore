@@ -22,6 +22,7 @@ jobs:
       actions: read
     outputs:
       should_validate: ${{ steps.verify.outputs.should_validate }}
+      skip_reason: ${{ steps.verify.outputs.skip_reason }}
 
     steps:
       - name: Verify Source Branch
@@ -33,12 +34,13 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
         run: |
-          echo "PR Source Branch : $SOURCE_BRANCH"
-          echo "PR Target Branch : $DEST_BRANCH"
+          echo "PR Source Branch : '${SOURCE_BRANCH}'"
+          echo "PR Target Branch : '${DEST_BRANCH}'"
 
           # Block PRs raised directly from main
           if [[ "$SOURCE_BRANCH" == "main" ]]; then
             echo "❌ PR from 'main' branch detected - SKIPPING validation"
+            echo "skip_reason=PR raised directly from 'main' branch — not allowed" >> "$GITHUB_OUTPUT"
             echo "should_validate=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -123,6 +125,7 @@ jobs:
                 echo "   Required: successful deployment to $PRIOR_ENV"
                 echo "   Found   : no successful Deployment_pipeline run for $SOURCE_BRANCH → $PRIOR_ENV"
                 echo "   → Deploy to $PRIOR_ENV first, then raise this PR."
+                echo "skip_reason=Promotion gate failed — deploy ${SOURCE_BRANCH} to ${PRIOR_ENV} before raising PR to ${DEST_BRANCH}" >> "$GITHUB_OUTPUT"
                 echo "should_validate=false" >> "$GITHUB_OUTPUT"
                 exit 0
               fi
@@ -140,16 +143,17 @@ jobs:
     needs: check_source_branch
     if: needs.check_source_branch.outputs.should_validate == 'false'
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Validation Skipped
         shell: bash
+        env:
+          SKIP_REASON: ${{ needs.check_source_branch.outputs.skip_reason }}
         run: |
           echo "=========================================="
           echo "⚠️  VALIDATION SKIPPED"
           echo "=========================================="
-          echo "PR Raised from 'main' branch"
-          echo "Please run Validation for Feature Branch"
+          echo "Reason: ${SKIP_REASON}"
           echo "=========================================="
 
   # Job 3: Main validation job
