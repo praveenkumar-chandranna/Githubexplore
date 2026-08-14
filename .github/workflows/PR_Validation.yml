@@ -662,8 +662,20 @@ jobs:
           fi
 
           SCAN_TIME=$(TZ='Asia/Kolkata' date +'%d-%m-%Y %H:%M IST')
-          ATTACH_NAME="code-analyzer-PR${PR_NUMBER}-${HEAD_REF//\//-}.csv"
+          BASE_NAME="code-analyzer-PR${PR_NUMBER}-${HEAD_REF//\//-}"
 
+          # Count all attachments whose title starts with BASE_NAME
+          VERSIONED_COUNT=$(curl -s \
+            -u "${CONFLUENCE_USER_EMAIL}:${CONFLUENCE_API_TOKEN}" \
+            "${CONFLUENCE_BASE_URL}/rest/api/content/${CONFLUENCE_PAGE_ID}/child/attachment?limit=100" \
+            | jq -r --arg base "${BASE_NAME}" '[.results[].title | select(startswith($base))] | length')
+
+          if [[ "$VERSIONED_COUNT" -gt 0 ]]; then
+            ATTACH_NAME="${BASE_NAME}-$((VERSIONED_COUNT + 1)).csv"
+          else
+            ATTACH_NAME="${BASE_NAME}.csv"
+          fi
+          echo "📎 Attachment name: $ATTACH_NAME"
           # Upload CSV as attachment (overwrite if exists)
           ATTACH_RESP=$(curl -s -w "\n%{http_code}" \
             -u "${CONFLUENCE_USER_EMAIL}:${CONFLUENCE_API_TOKEN}" \
