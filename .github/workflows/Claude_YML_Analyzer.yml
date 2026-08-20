@@ -1,0 +1,251 @@
+name: Claude YML Impact Analyzer
+
+on:
+  pull_request:
+    branches:
+      - DEV
+      - QA
+      - SIT
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+    paths:
+      - '.github/workflows/**.yml'
+      - '.github/workflows/**.yaml'
+      - 'dependabot.yml'
+      - '.github/dependabot.yml'
+
+jobs:
+  yml_impact_analysis:
+    name: YML Impact Analysis
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect Changed YML Files
+        id: changed_yml
+        shell: bash
+        run: |
+          git diff --name-only origin/${{ github.base_ref }}...HEAD \
+            | grep -E '\.(yml|yaml)$' > changed_yml_files.txt || true
+
+          echo "--- Changed YML files ---"
+          cat changed_yml_files.txt
+
+          COUNT=$(wc -l < changed_yml_files.txt | tr -d ' ')
+          echo "yml_count=${COUNT}" >> $GITHUB_OUTPUT
+          echo "has_changes=$([ "$COUNT" -gt 0 ] && echo true || echo false)" >> $GITHUB_OUTPUT
+
+      - name: Collect YML Diffs and Full Content
+        id: collect_content
+        if: steps.changed_yml.outputs.has_changes == 'true'
+        shell: bash
+        run: |
+          > yml_analysis_payload.txt
+
+          while IFS= read -r FILE; do
+            if [[ ! -f "$FILE" ]]; then
+              echo "### DELETED FILE: $FILE" >> yml_analysis_payload.txt
+              echo "" >> yml_analysis_payload.txt
+              continue
+            fi
+
+            echo "### FILE: $FILE" >> yml_analysis_payload.txt
+            echo "" >> yml_analysis_payload.txt
+
+            echo "#### DIFF:" >> yml_analysis_payload.txt
+            echo '```yaml' >> yml_analysis_payload.txt
+            git diff origin/${{ github.base_ref }}...HEAD -- "$FILE" >> yml_analysis_payload.txt 2>/dev/null || true
+            echo '```' >> yml_analysis_payload.txt
+            echo "" >> yml_analysis_payload.txt
+
+            echo "#### FULL CURRENT CONTENT:" >> yml_analysis_payload.txt
+            echo '```yaml' >> yml_analysis_payload.txt
+            cat "$FILE" >> yml_analysis_payload.txt
+            echo '```' >> yml_analysis_payload.txt
+            echo "---" >> yml_analysis_payload.txt
+            echo "" >> yml_analysis_payload.txt
+
+          done < changed_yml_files.txt
+
+          # Truncate to 90KB to stay within Claude token limits
+          PAYLOAD_SIZE=$(wc -c < yml_analysis_payload.txt)
+          if [[ $PAYLOAD_SIZE -gt 92160 ]]; then
+            head -c 92160 yml_analysis_payload.txt > yml_analysis_payload_trimmed.txt
+            echo "⚠️ Payload truncated to 90KB" >> yml_analysis_payload_trimmed.txt
+            mv yml_analysis_payload_trimmed.txt yml_analysis_payload.txt
+          fi
+
+          echo "Payload size: $(wc -c < yml_analysis_payload.txt) bytes"
+
+      - name: Run Claude YML Impact Analysis
+        id: claude_analysis
+        if: steps.changed_yml.outputs.has_changes == 'true'
+        shell: bash
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_REF: ${{ github.head_ref }}
+          BASE_REF: ${{ github.base_ref }}
+          ACTOR: ${{ github.actor }}
+          REPO: ${{ github.repository }}
+        run: |
+          PAYLOAD=$(cat yml_analysis_payload.txt)
+          CHANGED_FILES=$(cat changed_yml_files.txt | tr '\n' ', ' | sed 's/,$//')
+
+          PROMPT="You are a senior DevOps and GitHub Actions expert. A developer has raised a PR that modifies GitHub Actions workflow YAML files. Your job is to review the changes and produce a detailed impact analysis.
+
+          PR Details:
+          - PR #${PR_NUMBER}: ${HEAD_REF} → ${BASE_REF}
+          - Author: ${ACTOR}
+          - Changed YML files: ${CHANGED_FILES}
+
+          Here are the diffs and full file contents:
+
+          ${PAYLOAD}
+
+          Produce your analysis in this EXACT markdown format:
+
+          ## 🔍 Claude YML Impact Analysis — PR #${PR_NUMBER}
+
+          ### 📋 Change Summary
+          [What was changed across all modified files in plain English — 3-5 sentences]
+
+          ### 🗂️ File-by-File Breakdown
+          For each changed file, provide:
+          **\`<filename>\`**
+          - **What changed**: [specific lines/sections modified]
+          - **Why it matters**: [functional impact of this change]
+          - **Risk level**: 🟢 Low / 🟡 Medium / 🔴 High
+
+          ### 💥 Impact Matrix
+          | Workflow File | Jobs Affected | Environments Affected | Trigger Change | Risk |
+          |---|---|---|---|---|
+          [one row per changed file]
+
+          ### 🔒 Security & Permissions Review
+          - [Check for: overly broad permissions, new secrets referenced, GITHUB_TOKEN usage, third-party actions pinned vs unpinned]
+
+          ### ⚠️ Breaking Change Detection
+          - [List any changes that could break existing pipelines, deployments, or dependent workflows]
+          - [Flag: renamed jobs, removed steps, changed outputs, modified secrets, altered trigger branches]
+
+          ### 🔗 Dependency & Chain Impact
+          - [Identify if any workflow calls another workflow (workflow_call, workflow_run) and whether those are affected]
+          - [Flag jobs that use \`needs:\` and whether the dependency chain is intact]
+
+          ### 🧪 Validation Checklist
+          - [ ] All referenced secrets exist (list any new ones added)
+          - [ ] All \`uses:\` action versions are pinned or use a valid tag
+          - [ ] Branch names in triggers match repo branch strategy (DEV/QA/SIT/main)
+          - [ ] No hardcoded credentials or tokens in plain text
+          - [ ] \`if:\` conditions are syntactically correct
+          - [ ] Job \`needs:\` references valid job IDs
+
+          ### 🎯 Overall Risk Assessment
+          **Risk Level**: 🟢 Low / 🟡 Medium / 🔴 High
+          **Recommendation**: SAFE TO MERGE / REVIEW REQUIRED / BLOCK — [one line reason]"
+
+          RESPONSE=$(curl -s -X POST https://api.anthropic.com/v1/messages \
+            -H "x-api-key: ${ANTHROPIC_API_KEY}" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "content-type: application/json" \
+            -d "$(jq -n \
+              --arg model "claude-sonnet-4-5" \
+              --arg prompt "$PROMPT" \
+              '{
+                model: $model,
+                max_tokens: 4096,
+                messages: [{role: "user", content: $prompt}]
+              }')")
+
+          ANALYSIS=$(echo "$RESPONSE" | jq -r '.content[0].text // empty')
+
+          if [[ -z "$ANALYSIS" ]]; then
+            ERROR=$(echo "$RESPONSE" | jq -r '.error.message // "Unknown error"')
+            echo "❌ Claude API error: $ERROR"
+            echo "analysis_status=failed" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+          echo "$ANALYSIS" > claude_yml_analysis.md
+          echo "analysis_status=success" >> $GITHUB_OUTPUT
+          echo "✅ YML impact analysis generated"
+
+      - name: Post Analysis as PR Comment
+        if: steps.claude_analysis.outputs.analysis_status == 'success'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          SCAN_TIME=$(TZ='Asia/Kolkata' date +'%d-%m-%Y %H:%M IST')
+          ANALYSIS_BODY=$(cat claude_yml_analysis.md)
+          FOOTER="\n\n---\n*🤖 Claude YML Analyzer · [Workflow Run](https://github.com/${REPO}/actions/runs/${RUN_ID}) · ${SCAN_TIME}*"
+          FULL_COMMENT="${ANALYSIS_BODY}${FOOTER}"
+
+          curl -s -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${REPO}/issues/${PR_NUMBER}/comments" \
+            -d "$(jq -n --arg body "$FULL_COMMENT" '{body: $body}')"
+
+          echo "✅ Impact analysis posted to PR #${PR_NUMBER}"
+
+      - name: Auto-Label PR Based on Risk
+        if: steps.claude_analysis.outputs.analysis_status == 'success'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          ANALYSIS=$(cat claude_yml_analysis.md)
+
+          # Detect risk level from Claude output and apply label
+          if echo "$ANALYSIS" | grep -q "BLOCK\|🔴 High"; then
+            LABEL="yml-risk-high"
+            COLOR="d73a4a"
+          elif echo "$ANALYSIS" | grep -q "REVIEW REQUIRED\|🟡 Medium"; then
+            LABEL="yml-risk-medium"
+            COLOR="e4e669"
+          else
+            LABEL="yml-risk-low"
+            COLOR="0075ca"
+          fi
+
+          # Create label if it doesn't exist
+          curl -s -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${REPO}/labels" \
+            -d "{\"name\": \"${LABEL}\", \"color\": \"${COLOR}\"}" > /dev/null 2>&1 || true
+
+          # Apply label to PR
+          curl -s -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${REPO}/issues/${PR_NUMBER}/labels" \
+            -d "{\"labels\": [\"${LABEL}\"]}"
+
+          echo "✅ Label '${LABEL}' applied to PR"
+
+      - name: No YML Changes Detected
+        if: steps.changed_yml.outputs.has_changes == 'false'
+        shell: bash
+        run: |
+          echo "ℹ️ No YML files changed — impact analysis skipped"

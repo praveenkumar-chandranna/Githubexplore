@@ -1,0 +1,175 @@
+name: Claude AI Code Review
+
+on:
+  pull_request:
+    branches:
+      - DEV
+      - QA
+      - SIT
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+
+jobs:
+  claude_review:
+    name: Claude Code Review
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get Changed Files
+        id: changed_files
+        shell: bash
+        run: |
+          git diff --name-only origin/${{ github.base_ref }}...HEAD > changed_files.txt
+          echo "Changed files:"
+          cat changed_files.txt
+          echo "file_count=$(wc -l < changed_files.txt)" >> $GITHUB_OUTPUT
+
+      - name: Build Code Diff
+        id: build_diff
+        shell: bash
+        run: |
+          git diff origin/${{ github.base_ref }}...HEAD \
+            -- '*.cls' '*.trigger' '*.js' '*.html' '*.xml' '*.json' \
+            > code_diff.txt 2>/dev/null || true
+
+          DIFF_SIZE=$(wc -c < code_diff.txt)
+          echo "Diff size: ${DIFF_SIZE} bytes"
+
+          # Truncate to 80KB to stay within Claude token limits
+          if [[ $DIFF_SIZE -gt 81920 ]]; then
+            head -c 81920 code_diff.txt > code_diff_trimmed.txt
+            echo "⚠️ Diff truncated to 80KB" >> code_diff_trimmed.txt
+            mv code_diff_trimmed.txt code_diff.txt
+          fi
+
+          echo "has_diff=$([ -s code_diff.txt ] && echo true || echo false)" >> $GITHUB_OUTPUT
+
+      - name: Run Claude Code Review
+        id: claude_review
+        if: steps.build_diff.outputs.has_diff == 'true'
+        shell: bash
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_REF: ${{ github.head_ref }}
+          BASE_REF: ${{ github.base_ref }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          DIFF_CONTENT=$(cat code_diff.txt)
+          CHANGED_FILES=$(cat changed_files.txt)
+
+          PROMPT="You are a senior Salesforce developer reviewing a pull request. Analyze the following code diff and provide a structured review.
+
+          PR Details:
+          - PR #${PR_NUMBER}: ${HEAD_REF} → ${BASE_REF}
+          - Author: ${ACTOR}
+          - Changed files:
+          ${CHANGED_FILES}
+
+          Code Diff:
+          \`\`\`
+          ${DIFF_CONTENT}
+          \`\`\`
+
+          Provide your review in this exact markdown format:
+
+          ## 🤖 Claude AI Code Review
+
+          ### Summary
+          [2-3 sentence overview of the changes]
+
+          ### ✅ Strengths
+          [bullet list of good practices found]
+
+          ### ⚠️ Issues Found
+          [For each issue: file name, line reference, severity (Critical/High/Medium/Low), description, and suggested fix]
+
+          ### 🔒 Security Concerns
+          [Any security issues specific to Salesforce: SOQL injection, hardcoded IDs, exposed credentials, sharing violations]
+
+          ### 📋 Salesforce Best Practices
+          [Bulkification, governor limits, test coverage, naming conventions]
+
+          ### 🎯 Overall Verdict
+          [APPROVE / REQUEST_CHANGES / NEEDS_DISCUSSION] — [one line reason]"
+
+          # Call Claude API
+          RESPONSE=$(curl -s -X POST https://api.anthropic.com/v1/messages \
+            -H "x-api-key: ${ANTHROPIC_API_KEY}" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "content-type: application/json" \
+            -d "$(jq -n \
+              --arg model "claude-opus-4-5" \
+              --arg prompt "$PROMPT" \
+              '{
+                model: $model,
+                max_tokens: 4096,
+                messages: [{role: "user", content: $prompt}]
+              }')")
+
+          # Extract review text
+          REVIEW=$(echo "$RESPONSE" | jq -r '.content[0].text // empty')
+
+          if [[ -z "$REVIEW" ]]; then
+            ERROR=$(echo "$RESPONSE" | jq -r '.error.message // "Unknown error"')
+            echo "❌ Claude API error: $ERROR"
+            echo "review_status=failed" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+          # Save review to file (avoids env var size limits)
+          echo "$REVIEW" > claude_review.md
+          echo "review_status=success" >> $GITHUB_OUTPUT
+          echo "✅ Claude review generated"
+
+      - name: Post Review as PR Comment
+        if: steps.claude_review.outputs.review_status == 'success'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          SCAN_TIME=$(TZ='Asia/Kolkata' date +'%d-%m-%Y %H:%M IST')
+          REVIEW_BODY=$(cat claude_review.md)
+
+          FOOTER="\n\n---\n*🤖 Generated by Claude AI · [Workflow Run](https://github.com/${REPO}/actions/runs/${RUN_ID}) · ${SCAN_TIME}*"
+          FULL_COMMENT="${REVIEW_BODY}${FOOTER}"
+
+          curl -s -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${REPO}/issues/${PR_NUMBER}/comments" \
+            -d "$(jq -n --arg body "$FULL_COMMENT" '{body: $body}')"
+
+          echo "✅ Review posted to PR #${PR_NUMBER}"
+
+      - name: Handle No Diff
+        if: steps.build_diff.outputs.has_diff == 'false'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          curl -s -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${REPO}/issues/${PR_NUMBER}/comments" \
+            -d '{"body": "ℹ️ **Claude Code Review**: No Salesforce source files changed in this PR — review skipped."}'
