@@ -858,96 +858,99 @@ jobs:
           echo "  Active Apex Classes         : $APEX_COUNT"
           echo "  Active Triggers             : $TRIGGER_COUNT"
 
-      - name: Claude Post-Deploy Analysis
-        id: claude
+      - name: Build Health Report
+        id: health_report
+        if: always()
         shell: bash
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           PACKAGE:  ${{ needs.Deployment_Build.outputs.deploy_package }}
           TAG_NAME: ${{ needs.Deployment_Build.outputs.tag_name }}
           ACTOR:    ${{ needs.Deployment_Build.outputs.actor }}
           REPO:     ${{ needs.Deployment_Build.outputs.repo }}
           RUN_ID:   ${{ needs.Deployment_Build.outputs.run_id }}
         run: |
-          HEALTH_DATA=$(cat prod_health.json)
           SCAN_TIME=$(TZ='Asia/Kolkata' date +'%d-%m-%Y %H:%M IST')
+          FAILED_BATCHES=${{ steps.collect.outputs.failed_batches }}
+          TEST_FAILURES=${{ steps.collect.outputs.test_failures }}
+          CRITICAL_LIMITS=${{ steps.collect.outputs.critical_limits }}
 
-          PROMPT="You are a Salesforce production support expert. A deployment just completed to PRODUCTION. Analyze the post-deploy health data and determine if the org is stable.
-
-          Deployment Details:
-          - Package: ${PACKAGE}
-          - Release Tag: ${TAG_NAME}
-          - Deployed by: ${ACTOR}
-          - Scan Time: ${SCAN_TIME}
-
-          Health Data:
-          ${HEALTH_DATA}
-
-          Respond in this EXACT markdown format:
-
-          ## 🏥 Post-Deploy Health Check — PRODUCTION
-
-          ### Deployment Summary
-          | Field | Value |
-          |---|---|
-          | Package | ${PACKAGE} |
-          | Release Tag | ${TAG_NAME} |
-          | Deployed by | ${ACTOR} |
-          | Checked at | ${SCAN_TIME} |
-
-          ### 🚦 Health Verdict
-          **Status**: 🟢 STABLE / 🟡 MONITOR / 🔴 ROLLBACK RECOMMENDED
-          **Reason**: [one line]
-
-          ### ⚠️ Issues Detected
-          [List any failed batch jobs, test failures, or critical governor limits. If none, write: ✅ No issues detected.]
-
-          ### 📊 Governor Limits
-          | Limit | Used | Max | Status |
-          |---|---|---|---|
-          [Flag limits below 20% remaining as 🔴, below 50% as 🟡, else 🟢. Show top 10 most consumed.]
-
-          ### 💡 Recommendations
-          [Numbered list of immediate actions if any issues found. If healthy, write: ✅ No action required — org is stable.]"
-
-          RESPONSE=$(curl -s -X POST https://api.anthropic.com/v1/messages \
-            -H "x-api-key: ${ANTHROPIC_API_KEY}" \
-            -H "anthropic-version: 2023-06-01" \
-            -H "content-type: application/json" \
-            -d "$(jq -n \
-              --arg model "claude-sonnet-4-5" \
-              --arg prompt "$PROMPT" \
-              '{model: $model, max_tokens: 2048, messages: [{role: "user", content: $prompt}]}')") 
-
-          ANALYSIS=$(echo "$RESPONSE" | jq -r '.content[0].text // empty')
-
-          if [[ -z "$ANALYSIS" ]]; then
-            ERROR=$(echo "$RESPONSE" | jq -r '.error.message // "Unknown error"')
-            echo "⚠️ Claude API error: $ERROR — using raw summary fallback"
-            ANALYSIS="## 🏥 Post-Deploy Health Check — PRODUCTION\n\n⚠️ Claude analysis unavailable.\n\n- Failed Batches: ${{ steps.collect.outputs.failed_batches }}\n- Test Failures: ${{ steps.collect.outputs.test_failures }}\n- Critical Limits: ${{ steps.collect.outputs.critical_limits }}"
-          fi
-
-          echo "$ANALYSIS" > health_analysis.md
-          echo "✅ Claude analysis complete"
-
-      - name: Ensure health_analysis.md exists
-        if: always()
-        shell: bash
-        run: |
-          if [[ ! -f health_analysis.md ]]; then
-            echo "## 🏥 Post-Deploy Health Check — PRODUCTION" > health_analysis.md
-            echo "" >> health_analysis.md
-            echo "⚠️ Health analysis could not be generated — check the collect or Claude steps for errors." >> health_analysis.md
-          fi
-
-          # Determine overall status for downstream steps
-          if echo "$ANALYSIS" | grep -q "ROLLBACK RECOMMENDED"; then
-            echo "status=critical" >> $GITHUB_OUTPUT
-          elif echo "$ANALYSIS" | grep -q "MONITOR"; then
-            echo "status=warning" >> $GITHUB_OUTPUT
+          # Determine status
+          if [[ $FAILED_BATCHES -gt 0 || $TEST_FAILURES -gt 0 || $CRITICAL_LIMITS -gt 2 ]]; then
+            STATUS="critical"
+            VERDICT="🔴 ROLLBACK RECOMMENDED"
+          elif [[ $CRITICAL_LIMITS -gt 0 ]]; then
+            STATUS="warning"
+            VERDICT="🟡 MONITOR"
           else
-            echo "status=healthy" >> $GITHUB_OUTPUT
+            STATUS="healthy"
+            VERDICT="🟢 STABLE"
           fi
+
+          echo "status=$STATUS" >> $GITHUB_OUTPUT
+
+          # Build markdown report
+          {
+            echo "## 🏥 Post-Deploy Health Check — PRODUCTION"
+            echo ""
+            echo "### Deployment Summary"
+            echo "| Field | Value |"
+            echo "|---|---|"
+            echo "| **Package** | ${PACKAGE} |"
+            echo "| **Release Tag** | ${TAG_NAME} |"
+            echo "| **Deployed by** | ${ACTOR} |"
+            echo "| **Checked at** | ${SCAN_TIME} |"
+            echo ""
+            echo "### 🚦 Health Verdict"
+            echo "**Status**: ${VERDICT}"
+            echo ""
+            echo "### ⚠️ Issues Detected"
+            if [[ $FAILED_BATCHES -eq 0 && $TEST_FAILURES -eq 0 && $CRITICAL_LIMITS -eq 0 ]]; then
+              echo "✅ No issues detected."
+            else
+              [[ $FAILED_BATCHES -gt 0 ]] && echo "- 🔴 **Failed Batch Jobs (last 1h)**: ${FAILED_BATCHES}"
+              [[ $TEST_FAILURES -gt 0  ]] && echo "- 🔴 **Apex Test Failures (last 1h)**: ${TEST_FAILURES}"
+              [[ $CRITICAL_LIMITS -gt 0 ]] && echo "- 🟡 **Governor Limits below 20% remaining**: ${CRITICAL_LIMITS}"
+            fi
+            echo ""
+            echo "### 📊 Governor Limits (Top 10 most consumed)"
+            echo "| Limit | Remaining | Max | Status |"
+            echo "|---|---|---|---|"
+            if [[ -f prod_health.json ]]; then
+              jq -r '
+                .governor_limits
+                | map(select(.remaining != null and .max != null and .max > 0))
+                | sort_by(.remaining / .max)
+                | .[0:10][]
+                | . as $l
+                | ($l.remaining / $l.max) as $pct
+                | if $pct < 0.20 then "🔴" elif $pct < 0.50 then "🟡" else "🟢" end as $badge
+                | "| \($l.name) | \($l.remaining) | \($l.max) | \($badge) |"
+              ' prod_health.json 2>/dev/null || echo "| N/A | — | — | — |"
+            else
+              echo "| N/A | — | — | — |"
+            fi
+            echo ""
+            echo "### 📋 Metadata Counts"
+            if [[ -f prod_health.json ]]; then
+              APEX=$(jq -r '.metadata.apex_classes'  prod_health.json 2>/dev/null || echo 'N/A')
+              TRIG=$(jq -r '.metadata.apex_triggers' prod_health.json 2>/dev/null || echo 'N/A')
+              echo "- Active Apex Classes : ${APEX}"
+              echo "- Active Apex Triggers: ${TRIG}"
+            fi
+            echo ""
+            echo "### 💡 Recommendations"
+            if [[ "$STATUS" == "healthy" ]]; then
+              echo "✅ No action required — org is stable."
+            else
+              COUNT=1
+              [[ $FAILED_BATCHES -gt 0 ]] && echo "${COUNT}. Investigate failed batch jobs in Setup > Apex Jobs." && COUNT=$((COUNT+1))
+              [[ $TEST_FAILURES -gt 0  ]] && echo "${COUNT}. Review Apex test failures in Setup > Apex Test Execution." && COUNT=$((COUNT+1))
+              [[ $CRITICAL_LIMITS -gt 2 ]] && echo "${COUNT}. Consider rollback — multiple governor limits critically low." && COUNT=$((COUNT+1))
+              [[ $CRITICAL_LIMITS -gt 0 && $CRITICAL_LIMITS -le 2 ]] && echo "${COUNT}. Monitor governor limits closely over the next hour."
+            fi
+          } > health_analysis.md
+
+          echo "✅ Health report generated — Status: $STATUS"
 
       - name: Post Health Check as GitHub Step Summary
         if: always()
@@ -963,7 +966,7 @@ jobs:
           server_port:    ${{ secrets.SMTP_PORT }}
           username:       ${{ secrets.SMTP_USERNAME }}
           password:       ${{ secrets.SMTP_PASSWORD }}
-          subject:        "🏥 [SF Health] Post-Deploy PRODUCTION — ${{ steps.claude.outputs.status == 'critical' && '🔴 CRITICAL' || steps.claude.outputs.status == 'warning' && '🟡 MONITOR' || '🟢 STABLE' }} | ${{ needs.Deployment_Build.outputs.tag_name }}"
+          subject:        "🏥 [SF Health] Post-Deploy PRODUCTION — ${{ steps.health_report.outputs.status == 'critical' && '🔴 CRITICAL' || steps.health_report.outputs.status == 'warning' && '🟡 MONITOR' || '🟢 STABLE' }} | ${{ needs.Deployment_Build.outputs.tag_name }}"
           to:             ${{ secrets.NOTIFY_EMAILS }}
           from:           "Do not Reply <${{ secrets.GMAIL_USERNAME }}>"
           html_body: |
@@ -979,8 +982,8 @@ jobs:
               <tr><td><strong>Critical Limits</strong></td><td>${{ steps.collect.outputs.critical_limits }}</td></tr>
               <tr><td><strong>Workflow Run</strong></td><td><a href="https://github.com/${{ needs.Deployment_Build.outputs.repo }}/actions/runs/${{ needs.Deployment_Build.outputs.run_id }}">View Run</a></td></tr>
             </table>
-            <h3>Claude Analysis</h3>
-            <pre style="background:#f4f4f4;padding:12px;font-family:monospace;font-size:12px;white-space:pre-wrap;">${{ steps.claude.outputs.status }}</pre>
+            <h3>Health Analysis</h3>
+            <pre style="background:#f4f4f4;padding:12px;font-family:monospace;font-size:12px;white-space:pre-wrap;">${{ steps.health_report.outputs.status }}</pre>
             <br/>
             <p style="font-size:11px;color:#888;">⚠️ Automated health report. Do not reply.</p>
           attachments: prod_health.json
@@ -1004,7 +1007,7 @@ jobs:
 
           SCAN_TIME=$(TZ='Asia/Kolkata' date +'%d-%m-%Y %H:%M IST')
           REPORT=$(cat health_analysis.md)
-          STATUS=${{ steps.claude.outputs.status }}
+          STATUS=${{ steps.health_report.outputs.status }}
 
           case "$STATUS" in
             critical) BADGE="<span style='color:red;font-weight:bold;'>🔴 CRITICAL</span>" ;;
