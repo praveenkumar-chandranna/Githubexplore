@@ -760,74 +760,90 @@ jobs:
           TAG_NAME: ${{ needs.Deployment_Build.outputs.tag_name }}
           ACTOR:    ${{ needs.Deployment_Build.outputs.actor }}
         run: |
+          set +e
           echo "📊 Collecting post-deploy health metrics for PRODUCTION..."
           SCAN_TIME=$(TZ='Asia/Kolkata' date +'%d-%m-%Y %H:%M IST')
 
+          # Helper: safely extract JSON array from sf output, fallback to []
+          safe_array() { echo "$1" | jq -c "$2 // []" 2>/dev/null || echo '[]'; }
+          # Helper: safely extract JSON object from sf output, fallback to {}
+          safe_obj()   { echo "$1" | jq -c "$2 // {}" 2>/dev/null || echo '{}'; }
+          # Helper: safely extract integer, fallback to 0
+          safe_int()   { echo "$1" | jq -r "$2 // 0"  2>/dev/null || echo '0'; }
+
           # Governor Limits
-          LIMITS=$(sf org list limits --target-org "$USERNAME" --json 2>/dev/null || echo '{"result":[]}')
+          RAW_LIMITS=$(sf org list limits --target-org "$USERNAME" --json 2>/dev/null)
+          LIMITS_JSON=$(safe_array "$RAW_LIMITS" '.result')
 
           # Org Info
-          ORG_INFO=$(sf org display --target-org "$USERNAME" --json 2>/dev/null || echo '{"result":{}}')
+          RAW_ORG=$(sf org display --target-org "$USERNAME" --json 2>/dev/null)
+          ORG_JSON=$(safe_obj "$RAW_ORG" '.result')
 
           # Active Apex Classes
-          APEX_COUNT=$(sf data query \
+          RAW_APEX=$(sf data query \
             --query "SELECT COUNT() FROM ApexClass WHERE Status='Active'" \
-            --target-org "$USERNAME" --json 2>/dev/null | jq '.result.totalSize // 0')
+            --target-org "$USERNAME" --json 2>/dev/null)
+          APEX_COUNT=$(safe_int "$RAW_APEX" '.result.totalSize')
 
           # Active Triggers
-          TRIGGER_COUNT=$(sf data query \
+          RAW_TRIGGER=$(sf data query \
             --query "SELECT COUNT() FROM ApexTrigger WHERE Status='Active'" \
-            --target-org "$USERNAME" --json 2>/dev/null | jq '.result.totalSize // 0')
+            --target-org "$USERNAME" --json 2>/dev/null)
+          TRIGGER_COUNT=$(safe_int "$RAW_TRIGGER" '.result.totalSize')
 
-          # Failed Batch Jobs in last 1 hour (post-deploy window)
-          FAILED_BATCHES=$(sf data query \
+          # Failed Batch Jobs (last 1 hour)
+          RAW_BATCHES=$(sf data query \
             --query "SELECT Id, ApexClass.Name, Status, NumberOfErrors, TotalJobItems FROM AsyncApexJob WHERE Status='Failed' AND CreatedDate = LAST_N_HOURS:1 LIMIT 10" \
-            --target-org "$USERNAME" --json 2>/dev/null || echo '{"result":{"records":[]}}')
+            --target-org "$USERNAME" --json 2>/dev/null)
+          BATCHES_JSON=$(safe_array "$RAW_BATCHES" '.result.records')
 
           # Scheduled Jobs
-          SCHEDULED_JOBS=$(sf data query \
+          RAW_SCHED=$(sf data query \
             --query "SELECT Id, CronJobDetail.Name, State, NextFireTime FROM CronTrigger WHERE State='WAITING' LIMIT 10" \
-            --target-org "$USERNAME" --json 2>/dev/null || echo '{"result":{"records":[]}}')
+            --target-org "$USERNAME" --json 2>/dev/null)
+          SCHED_JSON=$(safe_array "$RAW_SCHED" '.result.records')
 
-          # Apex Test failures in last 1 hour
-          TEST_FAILURES=$(sf data query \
+          # Apex Test failures (last 1 hour)
+          RAW_TESTS=$(sf data query \
             --query "SELECT Id, ApexClass.Name, MethodName, Message FROM ApexTestResult WHERE Outcome='Fail' AND CreatedDate = LAST_N_HOURS:1 LIMIT 10" \
-            --target-org "$USERNAME" --json 2>/dev/null || echo '{"result":{"records":[]}}')
+            --target-org "$USERNAME" --json 2>/dev/null)
+          TESTS_JSON=$(safe_array "$RAW_TESTS" '.result.records')
 
+          # Build final health JSON — all inputs are now validated
           HEALTH_JSON=$(jq -n \
             --arg env        "PRODUCTION" \
             --arg scan_time  "$SCAN_TIME" \
             --arg package    "$PACKAGE" \
             --arg tag        "$TAG_NAME" \
             --arg actor      "$ACTOR" \
-            --arg apex       "$APEX_COUNT" \
-            --arg triggers   "$TRIGGER_COUNT" \
-            --argjson limits         "$(echo $LIMITS        | jq '.result // []')" \
-            --argjson org_info       "$(echo $ORG_INFO      | jq '.result // {}')" \
-            --argjson failed_batches "$(echo $FAILED_BATCHES | jq '.result.records // []')" \
-            --argjson scheduled_jobs "$(echo $SCHEDULED_JOBS | jq '.result.records // []')" \
-            --argjson test_failures  "$(echo $TEST_FAILURES  | jq '.result.records // []')" \
+            --argjson apex       "$APEX_COUNT" \
+            --argjson triggers   "$TRIGGER_COUNT" \
+            --argjson limits         "$LIMITS_JSON" \
+            --argjson org_info       "$ORG_JSON" \
+            --argjson failed_batches "$BATCHES_JSON" \
+            --argjson scheduled_jobs "$SCHED_JSON" \
+            --argjson test_failures  "$TESTS_JSON" \
             '{
-              environment:    $env,
-              scan_time:      $scan_time,
+              environment:      $env,
+              scan_time:        $scan_time,
               deployed_package: $package,
-              release_tag:    $tag,
-              deployed_by:    $actor,
+              release_tag:      $tag,
+              deployed_by:      $actor,
               metadata: {
-                apex_classes:   ($apex    | tonumber),
-                apex_triggers:  ($triggers | tonumber)
+                apex_classes:  $apex,
+                apex_triggers: $triggers
               },
-              governor_limits:   $limits,
-              failed_batch_jobs: $failed_batches,
-              scheduled_jobs:    $scheduled_jobs,
+              governor_limits:    $limits,
+              failed_batch_jobs:  $failed_batches,
+              scheduled_jobs:     $scheduled_jobs,
               apex_test_failures: $test_failures
             }')
 
           echo "$HEALTH_JSON" > prod_health.json
 
-          FAILED_BATCH_COUNT=$(echo "$HEALTH_JSON" | jq '.failed_batch_jobs | length')
-          TEST_FAIL_COUNT=$(echo "$HEALTH_JSON"    | jq '.apex_test_failures | length')
-          CRITICAL_LIMITS=$(echo "$HEALTH_JSON" | jq '[.governor_limits[] | select(.remaining != null and .max != null and .max > 0 and ((.remaining / .max) < 0.20))] | length')
+          FAILED_BATCH_COUNT=$(echo "$HEALTH_JSON" | jq '.failed_batch_jobs    | length')
+          TEST_FAIL_COUNT=$(echo    "$HEALTH_JSON" | jq '.apex_test_failures   | length')
+          CRITICAL_LIMITS=$(echo   "$HEALTH_JSON" | jq '[.governor_limits[] | select(.remaining != null and .max != null and .max > 0 and ((.remaining / .max) < 0.20))] | length')
 
           echo "failed_batches=$FAILED_BATCH_COUNT" >> $GITHUB_OUTPUT
           echo "test_failures=$TEST_FAIL_COUNT"     >> $GITHUB_OUTPUT
@@ -913,6 +929,16 @@ jobs:
 
           echo "$ANALYSIS" > health_analysis.md
           echo "✅ Claude analysis complete"
+
+      - name: Ensure health_analysis.md exists
+        if: always()
+        shell: bash
+        run: |
+          if [[ ! -f health_analysis.md ]]; then
+            echo "## 🏥 Post-Deploy Health Check — PRODUCTION" > health_analysis.md
+            echo "" >> health_analysis.md
+            echo "⚠️ Health analysis could not be generated — check the collect or Claude steps for errors." >> health_analysis.md
+          fi
 
           # Determine overall status for downstream steps
           if echo "$ANALYSIS" | grep -q "ROLLBACK RECOMMENDED"; then
