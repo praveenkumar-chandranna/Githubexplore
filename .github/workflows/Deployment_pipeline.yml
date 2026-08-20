@@ -816,8 +816,8 @@ jobs:
             --arg package    "$PACKAGE" \
             --arg tag        "$TAG_NAME" \
             --arg actor      "$ACTOR" \
-            --argjson apex       "$APEX_COUNT" \
-            --argjson triggers   "$TRIGGER_COUNT" \
+            --argjson apex       "${APEX_COUNT:-0}" \
+            --argjson triggers   "${TRIGGER_COUNT:-0}" \
             --argjson limits         "$LIMITS_JSON" \
             --argjson org_info       "$ORG_JSON" \
             --argjson failed_batches "$BATCHES_JSON" \
@@ -857,6 +857,92 @@ jobs:
           echo "  Critical Governor Limits    : $CRITICAL_LIMITS"
           echo "  Active Apex Classes         : $APEX_COUNT"
           echo "  Active Triggers             : $TRIGGER_COUNT"
+
+      - name: Display Health Results
+        if: always()
+        shell: bash
+        run: |
+          echo ""
+          echo "╔══════════════════════════════════════════════════════════════╗"
+          echo "║           🏥  SALESFORCE PRODUCTION HEALTH REPORT           ║"
+          echo "╚══════════════════════════════════════════════════════════════╝"
+          echo ""
+
+          if [[ ! -f prod_health.json ]]; then
+            echo "❌ prod_health.json not found — collection step may have failed"
+            exit 0
+          fi
+
+          # ── Org Info ──────────────────────────────────────────────────────
+          ORG_ID=$(jq -r   '.org_info.orgId       // .org_info.id          // "N/A"' prod_health.json)
+          ORG_NAME=$(jq -r '.org_info.name        // .org_info.username    // "N/A"' prod_health.json)
+          ORG_TYPE=$(jq -r '.org_info.orgType     // .org_info.edition     // "N/A"' prod_health.json)
+          INSTANCE=$(jq -r '.org_info.instanceUrl // .org_info.instanceUrl // "N/A"' prod_health.json)
+          SCAN_TIME=$(jq -r '.scan_time           // "N/A"' prod_health.json)
+
+          echo "📋 ORG INFORMATION"
+          echo "  Org Name     : $ORG_NAME"
+          echo "  Org ID       : $ORG_ID"
+          echo "  Org Type     : $ORG_TYPE"
+          echo "  Instance URL : $INSTANCE"
+          echo "  Scanned At   : $SCAN_TIME"
+          echo ""
+
+          # ── Metadata Counts ───────────────────────────────────────────────
+          APEX=$(jq -r   '.metadata.apex_classes  // 0' prod_health.json)
+          TRIG=$(jq -r   '.metadata.apex_triggers // 0' prod_health.json)
+          echo "📦 METADATA COUNTS"
+          echo "  Active Apex Classes  : $APEX"
+          echo "  Active Apex Triggers : $TRIG"
+          echo ""
+
+          # ── Governor Limits ───────────────────────────────────────────────
+          echo "📊 GOVERNOR LIMITS (Top 10 most consumed)"
+          printf "  %-45s %10s %10s %6s\n" "Limit Name" "Remaining" "Max" "Used%"
+          printf "  %-45s %10s %10s %6s\n" "─────────────────────────────────────────────" "─────────" "───" "─────"
+          jq -r '
+            .governor_limits
+            | map(select(.remaining != null and .max != null and .max > 0))
+            | sort_by(.remaining / .max)
+            | .[0:10][]
+            | . as $l
+            | ($l.max - $l.remaining) as $used
+            | (($used / $l.max) * 100 | floor) as $pct
+            | if ($l.remaining / $l.max) < 0.20 then "🔴" elif ($l.remaining / $l.max) < 0.50 then "🟡" else "🟢" end as $badge
+            | "  \($badge) \($l.name | .[0:43] | . + " " * (43 - length)) \($l.remaining | tostring | .[0:10] | . + " " * (10 - length)) \($l.max | tostring | .[0:10] | . + " " * (10 - length)) \($pct)%"
+          ' prod_health.json 2>/dev/null || echo "  (no limit data available)"
+          echo ""
+
+          # ── Failed Batch Jobs ─────────────────────────────────────────────
+          BATCH_COUNT=$(jq '.failed_batch_jobs | length' prod_health.json)
+          echo "⚙️  FAILED BATCH JOBS (last 1h): $BATCH_COUNT"
+          if [[ $BATCH_COUNT -gt 0 ]]; then
+            jq -r '.failed_batch_jobs[] | "  🔴 \(.ApexClass.Name // "Unknown") — Errors: \(.NumberOfErrors)/\(.TotalJobItems) items"' prod_health.json
+          else
+            echo "  ✅ None"
+          fi
+          echo ""
+
+          # ── Apex Test Failures ────────────────────────────────────────────
+          TEST_COUNT=$(jq '.apex_test_failures | length' prod_health.json)
+          echo "🧪 APEX TEST FAILURES (last 1h): $TEST_COUNT"
+          if [[ $TEST_COUNT -gt 0 ]]; then
+            jq -r '.apex_test_failures[] | "  🔴 \(.ApexClass.Name // "Unknown").\(.MethodName) — \(.Message | .[0:80])"' prod_health.json
+          else
+            echo "  ✅ None"
+          fi
+          echo ""
+
+          # ── Scheduled Jobs ────────────────────────────────────────────────
+          SCHED_COUNT=$(jq '.scheduled_jobs | length' prod_health.json)
+          echo "🕐 SCHEDULED JOBS (WAITING): $SCHED_COUNT"
+          if [[ $SCHED_COUNT -gt 0 ]]; then
+            jq -r '.scheduled_jobs[] | "  ✅ \(.CronJobDetail.Name // "Unknown") — Next: \(.NextFireTime // "N/A")"' prod_health.json
+          else
+            echo "  (none)"
+          fi
+          echo ""
+          echo "══════════════════════════════════════════════════════════════"
 
       - name: Build Health Report
         id: health_report
