@@ -816,8 +816,8 @@ jobs:
             --arg package    "$PACKAGE" \
             --arg tag        "$TAG_NAME" \
             --arg actor      "$ACTOR" \
-            --argjson apex       "$APEX_COUNT" \
-            --argjson triggers   "$TRIGGER_COUNT" \
+            --argjson apex       "${APEX_COUNT:-0}" \
+            --argjson triggers   "${TRIGGER_COUNT:-0}" \
             --argjson limits         "$LIMITS_JSON" \
             --argjson org_info       "$ORG_JSON" \
             --argjson failed_batches "$BATCHES_JSON" \
@@ -874,10 +874,10 @@ jobs:
           fi
 
           # ── Org Info ──────────────────────────────────────────────────────
-          ORG_ID=$(jq -r   '.org_info.id          // "N/A"' prod_health.json)
-          ORG_NAME=$(jq -r '.org_info.name        // "N/A"' prod_health.json)
-          ORG_TYPE=$(jq -r '.org_info.orgType     // "N/A"' prod_health.json)
-          INSTANCE=$(jq -r '.org_info.instanceUrl // "N/A"' prod_health.json)
+          ORG_ID=$(jq -r   '.org_info.orgId       // .org_info.id          // "N/A"' prod_health.json)
+          ORG_NAME=$(jq -r '.org_info.name        // .org_info.username    // "N/A"' prod_health.json)
+          ORG_TYPE=$(jq -r '.org_info.orgType     // .org_info.edition     // "N/A"' prod_health.json)
+          INSTANCE=$(jq -r '.org_info.instanceUrl // .org_info.instanceUrl // "N/A"' prod_health.json)
           SCAN_TIME=$(jq -r '.scan_time           // "N/A"' prod_health.json)
 
           echo "📋 ORG INFORMATION"
@@ -905,10 +905,11 @@ jobs:
             | map(select(.remaining != null and .max != null and .max > 0))
             | sort_by(.remaining / .max)
             | .[0:10][]
+            | . as $l
             | ($l.max - $l.remaining) as $used
             | (($used / $l.max) * 100 | floor) as $pct
             | if ($l.remaining / $l.max) < 0.20 then "🔴" elif ($l.remaining / $l.max) < 0.50 then "🟡" else "🟢" end as $badge
-            | "  \($badge) \(.name | .[0:43] | . + " " * (43 - length)) \(.remaining | tostring | .[0:10] | . + " " * (10 - length)) \(.max | tostring | .[0:10] | . + " " * (10 - length)) \($pct)%"
+            | "  \($badge) \($l.name | .[0:43] | . + " " * (43 - length)) \($l.remaining | tostring | .[0:10] | . + " " * (10 - length)) \($l.max | tostring | .[0:10] | . + " " * (10 - length)) \($pct)%"
           ' prod_health.json 2>/dev/null || echo "  (no limit data available)"
           echo ""
 
