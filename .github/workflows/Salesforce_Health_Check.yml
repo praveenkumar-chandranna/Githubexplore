@@ -543,12 +543,11 @@ jobs:
           PASS=$(jq -r         '.health_score.test_counts.passed          // 0' "$FILE")
           FAIL=$(jq -r         '.health_score.test_counts.failed          // 0' "$FILE")
 
-          if [[ $BATCH_COUNT -gt 0 || $TEST_COUNT -gt 0 || $CRITICAL_LIMITS -gt 2 ]]; then
-            VERDICT="🔴 CRITICAL"
-          elif [[ $CRITICAL_LIMITS -gt 0 ]]; then
-            VERDICT="🟡 MONITOR"
-          else
-            VERDICT="🟢 STABLE"
+          # ── Derive verdict and donut slice from weighted health score ───────────
+          HS_INT=$(printf '%d' "$HEALTH_SCORE" 2>/dev/null || echo 0)
+          if   [[ $HS_INT -ge 85 ]]; then VERDICT="🟢 STABLE"
+          elif [[ $HS_INT -ge 60 ]]; then VERDICT="🟡 MONITOR"
+          else                            VERDICT="🔴 CRITICAL"
           fi
 
           {
@@ -556,14 +555,11 @@ jobs:
             echo "_Scanned at: $SCAN_TIME_"
             echo ""
 
-            # ── Doughnut chart: health status breakdown ───────────────────────────
+            # ── Doughnut chart: driven by weighted health score ─────────────────────
             STABLE=0; MONITOR=0; CRITICAL_C=0
-            if [[ $BATCH_COUNT -gt 0 || $TEST_COUNT -gt 0 || $CRITICAL_LIMITS -gt 2 ]]; then
-              CRITICAL_C=1
-            elif [[ $CRITICAL_LIMITS -gt 0 ]]; then
-              MONITOR=1
-            else
-              STABLE=1
+            if   [[ $HS_INT -ge 85 ]]; then STABLE=1
+            elif [[ $HS_INT -ge 60 ]]; then MONITOR=1
+            else                            CRITICAL_C=1
             fi
             DONUT_CFG=$(printf '{"type":"doughnut","data":{"labels":["Stable","Monitor","Critical"],"datasets":[{"data":[%s,%s,%s],"backgroundColor":["#36a2eb","#ffcd56","#ff6384"]}]},"options":{"plugins":{"title":{"display":true,"text":"Health Status — %s"},"legend":{"position":"bottom"}}}}' "$STABLE" "$MONITOR" "$CRITICAL_C" "$ENV")
             DONUT_URL="https://quickchart.io/chart?w=300&h=200&c=$(jq -rn --argjson c "$DONUT_CFG" '$c' | python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.stdin.read()))' 2>/dev/null || printf '%s' "$DONUT_CFG" | sed 's/ /%20/g;s/{/%7B/g;s/}/%7D/g;s/"/%22/g;s/,/%2C/g;s/:/%3A/g;s/\[/%5B/g;s/\]/%5D/g')"
@@ -710,12 +706,11 @@ jobs:
             HCOV=$(jq -r      '.health_score.components.apex_coverage   // "N/A"' "$FILE")
             HHC=$(jq -r       '.health_score.components.sf_health_check // "N/A"' "$FILE")
 
-            if [[ $BATCH -gt 0 || $TESTS -gt 0 || $CRIT -gt 2 ]]; then
-              BADGE="🔴 CRITICAL"; OVERALL="critical"
-            elif [[ $CRIT -gt 0 ]]; then
-              BADGE="🟡 MONITOR"; [[ "$OVERALL" != "critical" ]] && OVERALL="warning"
-            else
-              BADGE="🟢 STABLE"
+            HS_VAL=$(jq -r '.health_score.score // 0' "$FILE")
+            HS_N=$(printf '%d' "$HS_VAL" 2>/dev/null || echo 0)
+            if   [[ $HS_N -ge 85 ]]; then BADGE="🟢 STABLE"
+            elif [[ $HS_N -ge 60 ]]; then BADGE="🟡 MONITOR"; [[ "$OVERALL" != "critical" ]] && OVERALL="warning"
+            else                          BADGE="🔴 CRITICAL"; OVERALL="critical"
             fi
 
             HTML+="<tr><td><strong>$ENV</strong></td><td><strong>$HS / 100</strong><br/><small>$HBAND</small></td><td>$HHC</td><td>${HCOV}%</td><td>$APEX</td><td>$TRIG</td><td>$FLOWS</td><td>$USERS</td><td>$BATCH</td><td>$TESTS</td><td>$CRIT</td><td>$BADGE</td></tr>"
