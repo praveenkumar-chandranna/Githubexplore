@@ -562,26 +562,43 @@ jobs:
         with:
           fetch-depth: 50
 
-      - name: Extract Jira Tickets from Commits
+      - name: Extract Jira Tickets from Branch Names and Commits
         id: extract_tickets
         shell: bash
         env:
           PACKAGE: ${{ needs.Deployment_Build.outputs.deploy_package }}
           SOURCE_BRANCHES: ${{ needs.Deployment_Build.outputs.source_branches }}
         run: |
-          echo "🔍 Extracting Jira ticket IDs from branch name(s)..."
+          echo "🔍 Extracting Jira tickets from branch names AND git commits..."
 
-          # Use source_branches if multi-package, else deploy_package
-          INPUT="${SOURCE_BRANCHES:-$PACKAGE}"
+          # ── Source 1: branch names ─────────────────────────────────────────
+          BRANCH_INPUT="${SOURCE_BRANCHES:-$PACKAGE}"
+          BRANCH_TICKETS=$(echo "$BRANCH_INPUT" | grep -oP '[A-Z]+[-_]\d+' | sort -u || true)
+          echo "  Branch tickets : $(echo "$BRANCH_TICKETS" | tr '\n' ' ')"
 
-          TICKETS=$(echo "$INPUT" | grep -oP '[A-Z]+[-_]\d+' | sort -u | tr '\n' ',' | sed 's/,$//' || true)
+          # ── Source 2: git commit messages (last 50 commits on current branch) ─
+          # Find the last PRODUCTION tag to scope commits since last release
+          LAST_TAG=$(git tag --list 'PRODUCTION/*' --sort=-creatordate | head -1 || true)
+          if [[ -n "$LAST_TAG" ]]; then
+            echo "  Scanning commits since tag: $LAST_TAG"
+            COMMIT_LOG=$(git log "${LAST_TAG}..HEAD" --pretty=format:"%s %b" 2>/dev/null || git log -50 --pretty=format:"%s %b")
+          else
+            echo "  No prior tag found — scanning last 50 commits"
+            COMMIT_LOG=$(git log -50 --pretty=format:"%s %b")
+          fi
+          COMMIT_TICKETS=$(echo "$COMMIT_LOG" | grep -oP '[A-Z]+[-_]\d+' | sort -u || true)
+          echo "  Commit tickets : $(echo "$COMMIT_TICKETS" | tr '\n' ' ')"
 
-          if [[ -z "$TICKETS" ]]; then
-            echo "⚠️ No Jira tickets found in branch name(s): $INPUT"
+          # ── Merge + deduplicate both sources ──────────────────────────────
+          ALL_TICKETS=$(printf '%s\n%s\n' "$BRANCH_TICKETS" "$COMMIT_TICKETS" \
+            | grep -oP '[A-Z]+[-_]\d+' | sort -u | tr '\n' ',' | sed 's/,$//' || true)
+
+          if [[ -z "$ALL_TICKETS" ]]; then
+            echo "⚠️ No Jira tickets found in branch names or commits"
             echo "has_tickets=false" >> "$GITHUB_OUTPUT"
           else
-            echo "✅ Found tickets: $TICKETS"
-            echo "tickets=$TICKETS" >> "$GITHUB_OUTPUT"
+            echo "✅ All tickets (deduplicated): $ALL_TICKETS"
+            echo "tickets=$ALL_TICKETS" >> "$GITHUB_OUTPUT"
             echo "has_tickets=true" >> "$GITHUB_OUTPUT"
           fi
 
@@ -672,6 +689,53 @@ jobs:
             echo "⚠️ Confluence secrets not configured — skipping page update"
             exit 0
           fi
+
+      - name: Transition Jira Tickets to Deployed
+        if: always()
+        shell: bash
+        env:
+          TICKETS:            ${{ steps.extract_tickets.outputs.tickets }}
+          JIRA_BASE_URL:      ${{ secrets.JIRA_BASE_URL }}
+          JIRA_USER_EMAIL:    ${{ secrets.JIRA_USER_EMAIL }}
+          ATLASSIAN_API_TOKEN: ${{ secrets.ATLASSIAN_API_TOKEN }}
+          TRANSITION_ID:      ${{ secrets.JIRA_PROD_TRANSITION_ID }}
+        run: |
+          if [[ -z "$TICKETS" || -z "$TRANSITION_ID" ]]; then
+            echo "⚠️ No tickets or JIRA_PROD_TRANSITION_ID not set — skipping transition"
+            exit 0
+          fi
+
+          echo "🔄 Transitioning Jira tickets to production status..."
+          IFS=',' read -ra TICKET_ARRAY <<< "$TICKETS"
+
+          for TICKET in "${TICKET_ARRAY[@]}"; do
+            TICKET=$(echo "$TICKET" | xargs)
+            echo "  Transitioning: $TICKET"
+
+            # Check current status first
+            ISSUE_RESP=$(curl -s -w "\n%{http_code}" \
+              -u "${JIRA_USER_EMAIL}:${ATLASSIAN_API_TOKEN}" \
+              -H "Content-Type: application/json" \
+              "${JIRA_BASE_URL}/rest/api/3/issue/${TICKET}?fields=status")
+            ISSUE_HTTP=$(echo "$ISSUE_RESP" | tail -1)
+            ISSUE_BODY=$(echo "$ISSUE_RESP" | sed '$d')
+            CURRENT_STATUS=$(echo "$ISSUE_BODY" | jq -r '.fields.status.name // "Unknown"')
+
+            # Perform transition
+            TRANS_RESP=$(curl -s -w "\n%{http_code}" -X POST \
+              -u "${JIRA_USER_EMAIL}:${ATLASSIAN_API_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d "{\"transition\": {\"id\": \"${TRANSITION_ID}\"}}" \
+              "${JIRA_BASE_URL}/rest/api/3/issue/${TICKET}/transitions")
+            TRANS_HTTP=$(echo "$TRANS_RESP" | tail -1)
+
+            if [[ "$TRANS_HTTP" == "204" ]]; then
+              echo "  ✅ $TICKET transitioned (was: $CURRENT_STATUS)"
+            else
+              echo "  ⚠️ $TICKET transition failed (HTTP $TRANS_HTTP) — was: $CURRENT_STATUS"
+              echo "$TRANS_RESP" | sed '$d'
+            fi
+          done
 
           echo "📄 Fetching current Confluence page..."
           PAGE_RESPONSE=$(curl -s \
