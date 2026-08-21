@@ -29,26 +29,40 @@ jobs:
       matrix:
         environment: [DEV, QA, UAT, PRODUCTION]
 
-    if: >
-      github.event_name == 'schedule' ||
-      github.event.inputs.environment == 'ALL' ||
-      github.event.inputs.environment == matrix.environment
-
     steps:
+      - name: Check if this environment should run
+        id: gate
+        shell: bash
+        env:
+          EVENT:        ${{ github.event_name }}
+          INPUT_ENV:    ${{ github.event.inputs.environment }}
+          MATRIX_ENV:   ${{ matrix.environment }}
+        run: |
+          if [[ "$EVENT" == 'schedule' || "$INPUT_ENV" == 'ALL' || "$INPUT_ENV" == "$MATRIX_ENV" ]]; then
+            echo "run=true" >> $GITHUB_OUTPUT
+          else
+            echo "run=false" >> $GITHUB_OUTPUT
+            echo "⏭️ Skipping $MATRIX_ENV — input is $INPUT_ENV"
+          fi
+
       - name: Setup Node.js
+        if: steps.gate.outputs.run == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: 22
 
       - name: Install Salesforce CLI
+        if: steps.gate.outputs.run == 'true'
         run: npm install -g @salesforce/cli@latest --silent
 
       - name: Generate JWT Key
+        if: steps.gate.outputs.run == 'true'
         run: |
           echo "${{ secrets.SALESFORCE_JWT_SECRET_KEY }}" > server.key
           chmod 600 server.key
 
       - name: Set Org Credentials
+        if: steps.gate.outputs.run == 'true'
         id: set-org
         shell: bash
         env:
@@ -72,6 +86,7 @@ jobs:
           esac
 
       - name: Authenticate to Salesforce
+        if: steps.gate.outputs.run == 'true'
         shell: bash
         env:
           CLIENT_ID:    ${{ steps.set-org.outputs.CLIENT_ID }}
@@ -87,6 +102,7 @@ jobs:
             --set-default
 
       - name: Collect Health Metrics
+        if: steps.gate.outputs.run == 'true'
         id: collect
         shell: bash
         env:
@@ -211,7 +227,7 @@ jobs:
           echo "scan_time=$SCAN_TIME"               >> $GITHUB_OUTPUT
 
       - name: Display Health Results
-        if: always()
+        if: steps.gate.outputs.run == 'true'
         shell: bash
         env:
           ENV: ${{ matrix.environment }}
@@ -352,7 +368,7 @@ jobs:
           echo "══════════════════════════════════════════════════════════════"
 
       - name: Write Step Summary
-        if: always()
+        if: steps.gate.outputs.run == 'true'
         shell: bash
         env:
           ENV: ${{ matrix.environment }}
@@ -409,7 +425,7 @@ jobs:
           } >> $GITHUB_STEP_SUMMARY
 
       - name: Upload Health Artifact
-        if: always()
+        if: steps.gate.outputs.run == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: health-${{ matrix.environment }}-${{ github.run_id }}
@@ -417,7 +433,7 @@ jobs:
           retention-days: 30
 
       - name: Cleanup JWT Key
-        if: always()
+        if: always() && steps.gate.outputs.run == 'true'
         run: rm -f server.key
 
   notify:
