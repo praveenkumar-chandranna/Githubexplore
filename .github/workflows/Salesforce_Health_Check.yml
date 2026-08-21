@@ -141,7 +141,7 @@ jobs:
           # ── Active Flows ────────────────────────────────────────────────────
           RAW_FLOWS=$(sf data query \
             --query "SELECT COUNT() FROM FlowDefinition WHERE ActiveVersionId != null" \
-            --target-org "$USERNAME" --json 2>/dev/null)
+            --target-org "$USERNAME" --use-tooling-api --json 2>/dev/null)
           FLOW_COUNT=$(safe_int "$RAW_FLOWS" '.result.totalSize')
 
           # ── Active Users ────────────────────────────────────────────────────
@@ -287,7 +287,7 @@ jobs:
             | (($used / .max) * 100 | floor) as $pct
             | (.remaining / .max) as $ratio
             | if $ratio < 0.20 then "🔴" elif $ratio < 0.50 then "🟡" else "🟢" end as $badge
-            | "  \($badge) \(.name | .[0:46] | . + " " * (46 - length)) \(.remaining | tostring | .[0:10] | . + " " * (10 - length)) \(.max | tostring | .[0:10] | . + " " * (10 - length)) \($pct)%"
+            | "  \($badge) \(.name | .[0:46] | . + " " * (46 - length)) \(.remaining | tostring | . + " " * (10 - length)) \(.max | tostring | . + " " * (10 - length)) \($pct)%"
           ' "$FILE" 2>/dev/null || echo "  (no limit data)"
           echo ""
 
