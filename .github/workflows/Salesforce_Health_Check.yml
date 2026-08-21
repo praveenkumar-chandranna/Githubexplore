@@ -304,11 +304,13 @@ jobs:
           SECURITY_SCAN_SCORE=100
 
           # ── Weighted Score (awk — always available, handles decimals) ────────
+          echo "DEBUG score inputs: hc=$SF_HC_SCORE cov=$COVERAGE ts=$TEST_SCORE st=$STATIC_SCORE ss=$SECURITY_SCAN_SCORE ds=$DEPLOY_SCORE stab=$STABILITY_SCORE"
           HEALTH_SCORE=$(awk -v hc="$SF_HC_SCORE" -v cov="$COVERAGE" \
             -v ts="$TEST_SCORE" -v st="$STATIC_SCORE" \
             -v ss="$SECURITY_SCAN_SCORE" -v ds="$DEPLOY_SCORE" \
             -v stab="$STABILITY_SCORE" \
             'BEGIN { printf "%d", (hc*25 + cov*20 + ts*15 + st*15 + ss*10 + ds*10 + stab*5) / 100 }')
+          echo "DEBUG health_score computed: $HEALTH_SCORE"
 
           # ── Status Band ─────────────────────────────────────────────────────
           HS_INT=$(printf '%d' "$HEALTH_SCORE" 2>/dev/null || echo 0)
