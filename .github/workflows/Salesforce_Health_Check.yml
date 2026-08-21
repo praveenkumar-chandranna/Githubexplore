@@ -428,7 +428,7 @@ jobs:
 
     steps:
       - name: Download All Health Artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: health-*-${{ github.run_id }}
           merge-multiple: true
