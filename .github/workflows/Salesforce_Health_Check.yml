@@ -1,0 +1,498 @@
+name: Salesforce Org Health Check
+
+on:
+  schedule:
+    - cron: '0 2 * * *'   # Daily 7:30 AM IST
+  workflow_dispatch:
+    inputs:
+      environment:
+        type: choice
+        description: Org to health check
+        options:
+          - ALL
+          - DEV
+          - QA
+          - UAT
+          - PRODUCTION
+        default: DEV
+        required: true
+
+jobs:
+  health_check:
+    name: Health Check - ${{ matrix.environment }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        environment: [DEV, QA, UAT, PRODUCTION]
+
+    if: >
+      github.event_name == 'schedule' ||
+      github.event.inputs.environment == 'ALL' ||
+      github.event.inputs.environment == matrix.environment
+
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Salesforce CLI
+        run: npm install -g @salesforce/cli@latest --silent
+
+      - name: Generate JWT Key
+        run: |
+          echo "${{ secrets.SALESFORCE_JWT_SECRET_KEY }}" > server.key
+          chmod 600 server.key
+
+      - name: Set Org Credentials
+        id: set-org
+        shell: bash
+        env:
+          ENV:      ${{ matrix.environment }}
+          KEY_DEV:  ${{ secrets.SALESFORCE_CONSUMER_KEY_DEV }}
+          KEY_QA:   ${{ secrets.SALESFORCE_CONSUMER_KEY_QA }}
+          KEY_UAT:  ${{ secrets.SALESFORCE_CONSUMER_KEY_UAT }}
+          KEY_PROD: ${{ secrets.SALESFORCE_CONSUMER_KEY_PROD }}
+          USER_DEV:  ${{ secrets.SFDX_AUTH_DEV_USERNAME }}
+          USER_QA:   ${{ secrets.SFDX_AUTH_QA_USERNAME }}
+          USER_UAT:  ${{ secrets.SFDX_AUTH_UAT_USERNAME }}
+          USER_PROD: ${{ secrets.SFDX_AUTH_PROD_USERNAME }}
+          SANDBOX_URL: ${{ secrets.SANDBOX_URL }}
+          LOGIN_URL:   ${{ secrets.LOGIN_URL }}
+        run: |
+          case "$ENV" in
+            DEV)        echo "CLIENT_ID=$KEY_DEV"  >> $GITHUB_OUTPUT; echo "USERNAME=$USER_DEV"  >> $GITHUB_OUTPUT; echo "INSTANCE_URL=$SANDBOX_URL" >> $GITHUB_OUTPUT ;;
+            QA)         echo "CLIENT_ID=$KEY_QA"   >> $GITHUB_OUTPUT; echo "USERNAME=$USER_QA"   >> $GITHUB_OUTPUT; echo "INSTANCE_URL=$SANDBOX_URL" >> $GITHUB_OUTPUT ;;
+            UAT)        echo "CLIENT_ID=$KEY_UAT"  >> $GITHUB_OUTPUT; echo "USERNAME=$USER_UAT"  >> $GITHUB_OUTPUT; echo "INSTANCE_URL=$SANDBOX_URL" >> $GITHUB_OUTPUT ;;
+            PRODUCTION) echo "CLIENT_ID=$KEY_PROD" >> $GITHUB_OUTPUT; echo "USERNAME=$USER_PROD" >> $GITHUB_OUTPUT; echo "INSTANCE_URL=$LOGIN_URL"   >> $GITHUB_OUTPUT ;;
+          esac
+
+      - name: Authenticate to Salesforce
+        shell: bash
+        env:
+          CLIENT_ID:    ${{ steps.set-org.outputs.CLIENT_ID }}
+          USERNAME:     ${{ steps.set-org.outputs.USERNAME }}
+          INSTANCE_URL: ${{ steps.set-org.outputs.INSTANCE_URL }}
+        run: |
+          sf org logout --all --no-prompt || true
+          sf org login jwt \
+            --client-id    "$CLIENT_ID" \
+            --jwt-key-file server.key \
+            --username     "$USERNAME" \
+            --instance-url "$INSTANCE_URL" \
+            --set-default
+
+      - name: Collect Health Metrics
+        id: collect
+        shell: bash
+        env:
+          USERNAME: ${{ steps.set-org.outputs.USERNAME }}
+          ENV:      ${{ matrix.environment }}
+        run: |
+          set +e
+          SCAN_TIME=$(TZ='Asia/Kolkata' date +'%d-%m-%Y %H:%M IST')
+          echo "📊 Collecting health metrics for $ENV at $SCAN_TIME..."
+
+          # Safe helpers — capture output first, then parse with fallback
+          safe_array() { echo "$1" | jq -c "$2 // []" 2>/dev/null || echo '[]'; }
+          safe_obj()   { echo "$1" | jq -c "$2 // {}" 2>/dev/null || echo '{}'; }
+          safe_int()   { echo "$1" | jq -r "$2 // 0"  2>/dev/null || echo '0';  }
+
+          # ── Org Info ────────────────────────────────────────────────────────
+          RAW_ORG=$(sf org display --target-org "$USERNAME" --json 2>/dev/null)
+          ORG_JSON=$(safe_obj "$RAW_ORG" '.result')
+
+          # ── Governor Limits ─────────────────────────────────────────────────
+          RAW_LIMITS=$(sf org list limits --target-org "$USERNAME" --json 2>/dev/null)
+          LIMITS_JSON=$(safe_array "$RAW_LIMITS" '.result')
+
+          # ── Active Apex Classes ─────────────────────────────────────────────
+          RAW_APEX=$(sf data query \
+            --query "SELECT COUNT() FROM ApexClass WHERE Status='Active'" \
+            --target-org "$USERNAME" --json 2>/dev/null)
+          APEX_COUNT=$(safe_int "$RAW_APEX" '.result.totalSize')
+
+          # ── Active Apex Triggers ────────────────────────────────────────────
+          RAW_TRIGGER=$(sf data query \
+            --query "SELECT COUNT() FROM ApexTrigger WHERE Status='Active'" \
+            --target-org "$USERNAME" --json 2>/dev/null)
+          TRIGGER_COUNT=$(safe_int "$RAW_TRIGGER" '.result.totalSize')
+
+          # ── Active Flows ────────────────────────────────────────────────────
+          RAW_FLOWS=$(sf data query \
+            --query "SELECT COUNT() FROM FlowDefinition WHERE ActiveVersionId != null" \
+            --target-org "$USERNAME" --json 2>/dev/null)
+          FLOW_COUNT=$(safe_int "$RAW_FLOWS" '.result.totalSize')
+
+          # ── Active Users ────────────────────────────────────────────────────
+          RAW_USERS=$(sf data query \
+            --query "SELECT COUNT() FROM User WHERE IsActive=true AND Profile.UserLicense.LicenseDefinitionKey != 'PID_CHATTER'" \
+            --target-org "$USERNAME" --json 2>/dev/null)
+          USER_COUNT=$(safe_int "$RAW_USERS" '.result.totalSize')
+
+          # ── Failed Batch Jobs (last 24h) ────────────────────────────────────
+          RAW_BATCHES=$(sf data query \
+            --query "SELECT Id, ApexClass.Name, Status, NumberOfErrors, TotalJobItems, CreatedDate FROM AsyncApexJob WHERE Status='Failed' AND CreatedDate = LAST_N_DAYS:1 ORDER BY CreatedDate DESC LIMIT 20" \
+            --target-org "$USERNAME" --json 2>/dev/null)
+          BATCHES_JSON=$(safe_array "$RAW_BATCHES" '.result.records')
+
+          # ── Apex Test Failures (last 24h) ───────────────────────────────────
+          RAW_TESTS=$(sf data query \
+            --query "SELECT Id, ApexClass.Name, MethodName, Outcome, Message, CreatedDate FROM ApexTestResult WHERE Outcome='Fail' AND CreatedDate = LAST_N_DAYS:1 ORDER BY CreatedDate DESC LIMIT 20" \
+            --target-org "$USERNAME" --json 2>/dev/null)
+          TESTS_JSON=$(safe_array "$RAW_TESTS" '.result.records')
+
+          # ── Scheduled Jobs ──────────────────────────────────────────────────
+          RAW_SCHED=$(sf data query \
+            --query "SELECT Id, CronJobDetail.Name, State, NextFireTime, PreviousFireTime FROM CronTrigger WHERE State IN ('WAITING','ACQUIRED') ORDER BY NextFireTime ASC LIMIT 20" \
+            --target-org "$USERNAME" --json 2>/dev/null)
+          SCHED_JSON=$(safe_array "$RAW_SCHED" '.result.records')
+
+          # ── Long-Running Batch Jobs (queued/processing) ─────────────────────
+          RAW_RUNNING=$(sf data query \
+            --query "SELECT Id, ApexClass.Name, Status, JobItemsProcessed, TotalJobItems, NumberOfErrors, CreatedDate FROM AsyncApexJob WHERE Status IN ('Processing','Queued','Preparing') ORDER BY CreatedDate DESC LIMIT 10" \
+            --target-org "$USERNAME" --json 2>/dev/null)
+          RUNNING_JSON=$(safe_array "$RAW_RUNNING" '.result.records')
+
+          # ── Recent Deploy History ───────────────────────────────────────────
+          RAW_DEPLOYS=$(sf data query \
+            --query "SELECT Id, Status, StartDate, CompletedDate, NumberComponentsDeployed, NumberComponentErrors FROM DeployRequest ORDER BY StartDate DESC LIMIT 5" \
+            --target-org "$USERNAME" --json 2>/dev/null)
+          DEPLOYS_JSON=$(safe_array "$RAW_DEPLOYS" '.result.records')
+
+          # ── Build health JSON ───────────────────────────────────────────────
+          HEALTH_JSON=$(jq -n \
+            --arg  env          "$ENV" \
+            --arg  scan_time    "$SCAN_TIME" \
+            --argjson apex      "$APEX_COUNT" \
+            --argjson triggers  "$TRIGGER_COUNT" \
+            --argjson flows     "$FLOW_COUNT" \
+            --argjson users     "$USER_COUNT" \
+            --argjson org_info        "$ORG_JSON" \
+            --argjson limits          "$LIMITS_JSON" \
+            --argjson failed_batches  "$BATCHES_JSON" \
+            --argjson test_failures   "$TESTS_JSON" \
+            --argjson scheduled_jobs  "$SCHED_JSON" \
+            --argjson running_jobs    "$RUNNING_JSON" \
+            --argjson deploy_history  "$DEPLOYS_JSON" \
+            '{
+              environment:   $env,
+              scan_time:     $scan_time,
+              metadata: {
+                apex_classes:  $apex,
+                apex_triggers: $triggers,
+                active_flows:  $flows,
+                active_users:  $users
+              },
+              org_info:        $org_info,
+              governor_limits: $limits,
+              failed_batches:  $failed_batches,
+              test_failures:   $test_failures,
+              scheduled_jobs:  $scheduled_jobs,
+              running_jobs:    $running_jobs,
+              deploy_history:  $deploy_history
+            }')
+
+          echo "$HEALTH_JSON" > health_${{ matrix.environment }}.json
+          echo "✅ Health data collected for $ENV"
+
+          # Quick counts for downstream steps
+          FAILED_BATCH_COUNT=$(echo "$HEALTH_JSON" | jq '.failed_batches  | length')
+          TEST_FAIL_COUNT=$(echo    "$HEALTH_JSON" | jq '.test_failures   | length')
+          CRITICAL_LIMITS=$(echo    "$HEALTH_JSON" | jq '[.governor_limits[] | select(.remaining != null and .max != null and .max > 0 and ((.remaining / .max) < 0.20))] | length')
+
+          echo "failed_batches=$FAILED_BATCH_COUNT" >> $GITHUB_OUTPUT
+          echo "test_failures=$TEST_FAIL_COUNT"     >> $GITHUB_OUTPUT
+          echo "critical_limits=$CRITICAL_LIMITS"   >> $GITHUB_OUTPUT
+          echo "scan_time=$SCAN_TIME"               >> $GITHUB_OUTPUT
+
+      - name: Display Health Results
+        if: always()
+        shell: bash
+        env:
+          ENV: ${{ matrix.environment }}
+        run: |
+          FILE="health_${ENV}.json"
+
+          if [[ ! -f "$FILE" ]]; then
+            echo "❌ $FILE not found — collection step failed"
+            exit 0
+          fi
+
+          echo ""
+          echo "╔══════════════════════════════════════════════════════════════╗"
+          printf  "║   🏥  SALESFORCE HEALTH REPORT — %-27s║\n" "$ENV"
+          echo "╚══════════════════════════════════════════════════════════════╝"
+          echo ""
+
+          # ── Org Info ──────────────────────────────────────────────────────
+          ORG_ID=$(jq -r    '.org_info.id           // "N/A"' "$FILE")
+          ORG_NAME=$(jq -r  '.org_info.name         // "N/A"' "$FILE")
+          ORG_TYPE=$(jq -r  '.org_info.orgType      // "N/A"' "$FILE")
+          INSTANCE=$(jq -r  '.org_info.instanceUrl  // "N/A"' "$FILE")
+          SCAN_TIME=$(jq -r '.scan_time             // "N/A"' "$FILE")
+
+          echo "📋 ORG INFORMATION"
+          echo "  Org Name     : $ORG_NAME"
+          echo "  Org ID       : $ORG_ID"
+          echo "  Org Type     : $ORG_TYPE"
+          echo "  Instance URL : $INSTANCE"
+          echo "  Scanned At   : $SCAN_TIME"
+          echo ""
+
+          # ── Metadata Counts ───────────────────────────────────────────────
+          APEX=$(jq -r   '.metadata.apex_classes  // 0' "$FILE")
+          TRIG=$(jq -r   '.metadata.apex_triggers // 0' "$FILE")
+          FLOWS=$(jq -r  '.metadata.active_flows  // 0' "$FILE")
+          USERS=$(jq -r  '.metadata.active_users  // 0' "$FILE")
+
+          echo "📦 METADATA COUNTS"
+          echo "  Active Apex Classes  : $APEX"
+          echo "  Active Apex Triggers : $TRIG"
+          echo "  Active Flows         : $FLOWS"
+          echo "  Active Users         : $USERS"
+          echo ""
+
+          # ── Governor Limits ───────────────────────────────────────────────
+          echo "📊 GOVERNOR LIMITS (Top 15 most consumed)"
+          printf "  %-48s %10s %10s %7s %6s\n" "Limit Name" "Remaining" "Max" "Used%" "Status"
+          printf "  %-48s %10s %10s %7s %6s\n" "────────────────────────────────────────────────" "─────────" "───" "─────" "──────"
+
+          jq -r '
+            .governor_limits
+            | map(select(.remaining != null and .max != null and .max > 0))
+            | sort_by(.remaining / .max)
+            | .[0:15][]
+            | (.max - .remaining) as $used
+            | (($used / .max) * 100 | floor) as $pct
+            | (.remaining / .max) as $ratio
+            | if $ratio < 0.20 then "🔴" elif $ratio < 0.50 then "🟡" else "🟢" end as $badge
+            | "  \($badge) \(.name | .[0:46] | . + " " * (46 - length)) \(.remaining | tostring | .[0:10] | . + " " * (10 - length)) \(.max | tostring | .[0:10] | . + " " * (10 - length)) \($pct)%"
+          ' "$FILE" 2>/dev/null || echo "  (no limit data)"
+          echo ""
+
+          # ── Failed Batch Jobs ─────────────────────────────────────────────
+          BATCH_COUNT=$(jq '.failed_batches | length' "$FILE")
+          echo "⚙️  FAILED BATCH JOBS (last 24h): $BATCH_COUNT"
+          if [[ $BATCH_COUNT -gt 0 ]]; then
+            jq -r '.failed_batches[] |
+              "  🔴 \(.ApexClass.Name // "Unknown") | Errors: \(.NumberOfErrors)/\(.TotalJobItems) items | \(.CreatedDate // "")"
+            ' "$FILE"
+          else
+            echo "  ✅ None"
+          fi
+          echo ""
+
+          # ── Apex Test Failures ────────────────────────────────────────────
+          TEST_COUNT=$(jq '.test_failures | length' "$FILE")
+          echo "🧪 APEX TEST FAILURES (last 24h): $TEST_COUNT"
+          if [[ $TEST_COUNT -gt 0 ]]; then
+            jq -r '.test_failures[] |
+              "  🔴 \(.ApexClass.Name // "Unknown").\(.MethodName) | \(.Message // "" | .[0:80])"
+            ' "$FILE"
+          else
+            echo "  ✅ None"
+          fi
+          echo ""
+
+          # ── Running / Queued Jobs ─────────────────────────────────────────
+          RUNNING_COUNT=$(jq '.running_jobs | length' "$FILE")
+          echo "🔄 RUNNING / QUEUED BATCH JOBS: $RUNNING_COUNT"
+          if [[ $RUNNING_COUNT -gt 0 ]]; then
+            jq -r '.running_jobs[] |
+              "  ⏳ \(.ApexClass.Name // "Unknown") | Status: \(.Status) | Progress: \(.JobItemsProcessed)/\(.TotalJobItems)"
+            ' "$FILE"
+          else
+            echo "  (none)"
+          fi
+          echo ""
+
+          # ── Scheduled Jobs ────────────────────────────────────────────────
+          SCHED_COUNT=$(jq '.scheduled_jobs | length' "$FILE")
+          echo "🕐 SCHEDULED JOBS (WAITING/ACQUIRED): $SCHED_COUNT"
+          if [[ $SCHED_COUNT -gt 0 ]]; then
+            jq -r '.scheduled_jobs[] |
+              "  ✅ \(.CronJobDetail.Name // "Unknown") | State: \(.State) | Next: \(.NextFireTime // "N/A")"
+            ' "$FILE"
+          else
+            echo "  (none)"
+          fi
+          echo ""
+
+          # ── Recent Deployments ────────────────────────────────────────────
+          DEPLOY_COUNT=$(jq '.deploy_history | length' "$FILE")
+          echo "🚀 RECENT DEPLOYMENTS (last 5)"
+          if [[ $DEPLOY_COUNT -gt 0 ]]; then
+            jq -r '.deploy_history[] |
+              "  \(if .Status == "Succeeded" then "✅" else "❌" end) Status: \(.Status) | Components: \(.NumberComponentsDeployed) | Errors: \(.NumberComponentErrors) | \(.CompletedDate // .StartDate // "")"
+            ' "$FILE"
+          else
+            echo "  (no deploy history available)"
+          fi
+          echo ""
+
+          # ── Overall Status ────────────────────────────────────────────────
+          CRITICAL_LIMITS=$(jq '[.governor_limits[] | select(.remaining != null and .max != null and .max > 0 and ((.remaining / .max) < 0.20))] | length' "$FILE")
+
+          echo "══════════════════════════════════════════════════════════════"
+          if [[ $BATCH_COUNT -gt 0 || $TEST_COUNT -gt 0 || $CRITICAL_LIMITS -gt 2 ]]; then
+            echo "  🔴 OVERALL STATUS: CRITICAL"
+          elif [[ $CRITICAL_LIMITS -gt 0 ]]; then
+            echo "  🟡 OVERALL STATUS: MONITOR"
+          else
+            echo "  🟢 OVERALL STATUS: STABLE"
+          fi
+          echo "  Failed Batches   : $BATCH_COUNT"
+          echo "  Test Failures    : $TEST_COUNT"
+          echo "  Critical Limits  : $CRITICAL_LIMITS"
+          echo "══════════════════════════════════════════════════════════════"
+
+      - name: Write Step Summary
+        if: always()
+        shell: bash
+        env:
+          ENV: ${{ matrix.environment }}
+        run: |
+          FILE="health_${ENV}.json"
+          [[ ! -f "$FILE" ]] && echo "❌ No health data for $ENV" >> $GITHUB_STEP_SUMMARY && exit 0
+
+          SCAN_TIME=$(jq -r '.scan_time // "N/A"' "$FILE")
+          APEX=$(jq -r      '.metadata.apex_classes  // 0' "$FILE")
+          TRIG=$(jq -r      '.metadata.apex_triggers // 0' "$FILE")
+          FLOWS=$(jq -r     '.metadata.active_flows  // 0' "$FILE")
+          USERS=$(jq -r     '.metadata.active_users  // 0' "$FILE")
+          BATCH_COUNT=$(jq  '.failed_batches | length' "$FILE")
+          TEST_COUNT=$(jq   '.test_failures  | length' "$FILE")
+          CRITICAL_LIMITS=$(jq '[.governor_limits[] | select(.remaining != null and .max != null and .max > 0 and ((.remaining / .max) < 0.20))] | length' "$FILE")
+
+          if [[ $BATCH_COUNT -gt 0 || $TEST_COUNT -gt 0 || $CRITICAL_LIMITS -gt 2 ]]; then
+            VERDICT="🔴 CRITICAL"
+          elif [[ $CRITICAL_LIMITS -gt 0 ]]; then
+            VERDICT="🟡 MONITOR"
+          else
+            VERDICT="🟢 STABLE"
+          fi
+
+          {
+            echo "## 🏥 Health Check — $ENV | $VERDICT"
+            echo "_Scanned at: $SCAN_TIME_"
+            echo ""
+            echo "| Metric | Value |"
+            echo "|---|---|"
+            echo "| Active Apex Classes | $APEX |"
+            echo "| Active Apex Triggers | $TRIG |"
+            echo "| Active Flows | $FLOWS |"
+            echo "| Active Users | $USERS |"
+            echo "| Failed Batch Jobs (24h) | $BATCH_COUNT |"
+            echo "| Apex Test Failures (24h) | $TEST_COUNT |"
+            echo "| Critical Governor Limits | $CRITICAL_LIMITS |"
+            echo ""
+            echo "### 📊 Governor Limits (Top 10 most consumed)"
+            echo "| Limit | Remaining | Max | Used% | Status |"
+            echo "|---|---|---|---|---|"
+            jq -r '
+              .governor_limits
+              | map(select(.remaining != null and .max != null and .max > 0))
+              | sort_by(.remaining / .max)
+              | .[0:10][]
+              | (.max - .remaining) as $used
+              | (($used / .max) * 100 | floor) as $pct
+              | (.remaining / .max) as $ratio
+              | if $ratio < 0.20 then "🔴" elif $ratio < 0.50 then "🟡" else "🟢" end as $badge
+              | "| \(.name) | \(.remaining) | \(.max) | \($pct)% | \($badge) |"
+            ' "$FILE" 2>/dev/null
+            echo ""
+          } >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload Health Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: health-${{ matrix.environment }}-${{ github.run_id }}
+          path: health_${{ matrix.environment }}.json
+          retention-days: 30
+
+      - name: Cleanup JWT Key
+        if: always()
+        run: rm -f server.key
+
+  notify:
+    name: Send Health Report Email
+    runs-on: ubuntu-latest
+    needs: health_check
+    if: always()
+
+    steps:
+      - name: Download All Health Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: health-*-${{ github.run_id }}
+          merge-multiple: true
+
+      - name: Build Combined Summary & Email
+        id: summary
+        shell: bash
+        env:
+          REPO:   ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          SCAN_TIME=$(TZ='Asia/Kolkata' date +'%d-%m-%Y %H:%M IST')
+          OVERALL="healthy"
+
+          HTML="<h2>🏥 Salesforce Org Health Report — ${SCAN_TIME}</h2>"
+          HTML+="<table border='1' cellpadding='6' cellspacing='0' style='border-collapse:collapse;font-family:Arial,sans-serif;'>"
+          HTML+="<tr style='background:#f0f0f0;'><th>Environment</th><th>Apex Classes</th><th>Triggers</th><th>Flows</th><th>Users</th><th>Failed Batches</th><th>Test Failures</th><th>Critical Limits</th><th>Status</th></tr>"
+
+          for ENV in DEV QA UAT PRODUCTION; do
+            FILE="health_${ENV}.json"
+            if [[ ! -f "$FILE" ]]; then
+              HTML+="<tr><td>$ENV</td><td colspan='8'>⚠️ No data</td></tr>"
+              continue
+            fi
+
+            APEX=$(jq -r      '.metadata.apex_classes  // 0' "$FILE")
+            TRIG=$(jq -r      '.metadata.apex_triggers // 0' "$FILE")
+            FLOWS=$(jq -r     '.metadata.active_flows  // 0' "$FILE")
+            USERS=$(jq -r     '.metadata.active_users  // 0' "$FILE")
+            BATCH=$(jq        '.failed_batches | length' "$FILE")
+            TESTS=$(jq        '.test_failures  | length' "$FILE")
+            CRIT=$(jq         '[.governor_limits[] | select(.remaining != null and .max != null and .max > 0 and ((.remaining / .max) < 0.20))] | length' "$FILE")
+
+            if [[ $BATCH -gt 0 || $TESTS -gt 0 || $CRIT -gt 2 ]]; then
+              BADGE="🔴 CRITICAL"; OVERALL="critical"
+            elif [[ $CRIT -gt 0 ]]; then
+              BADGE="🟡 MONITOR"; [[ "$OVERALL" != "critical" ]] && OVERALL="warning"
+            else
+              BADGE="🟢 STABLE"
+            fi
+
+            HTML+="<tr><td><strong>$ENV</strong></td><td>$APEX</td><td>$TRIG</td><td>$FLOWS</td><td>$USERS</td><td>$BATCH</td><td>$TESTS</td><td>$CRIT</td><td>$BADGE</td></tr>"
+          done
+
+          HTML+="</table>"
+          HTML+="<p><a href='https://github.com/${REPO}/actions/runs/${RUN_ID}'>View full run logs →</a></p>"
+          HTML+="<p style='font-size:11px;color:#888;'>⚠️ Automated health report. Do not reply.</p>"
+
+          echo "$HTML" > email_body.html
+
+          case "$OVERALL" in
+            critical) echo "subject_status=🔴 CRITICAL" >> $GITHUB_OUTPUT ;;
+            warning)  echo "subject_status=🟡 MONITOR"  >> $GITHUB_OUTPUT ;;
+            *)        echo "subject_status=🟢 STABLE"   >> $GITHUB_OUTPUT ;;
+          esac
+
+      - name: Send Email
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_SERVER }}
+          server_port:    ${{ secrets.SMTP_PORT }}
+          username:       ${{ secrets.SMTP_USERNAME }}
+          password:       ${{ secrets.SMTP_PASSWORD }}
+          subject:        "🏥 [SF Health] ${{ steps.summary.outputs.subject_status }} | ${{ github.run_id }}"
+          to:             ${{ secrets.NOTIFY_EMAILS }}
+          from:           "Do not Reply <${{ secrets.GMAIL_USERNAME }}>"
+          html_body:      file://email_body.html
