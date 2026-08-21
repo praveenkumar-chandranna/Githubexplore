@@ -690,53 +690,6 @@ jobs:
             exit 0
           fi
 
-      - name: Transition Jira Tickets to Deployed
-        if: always()
-        shell: bash
-        env:
-          TICKETS:            ${{ steps.extract_tickets.outputs.tickets }}
-          JIRA_BASE_URL:      ${{ secrets.JIRA_BASE_URL }}
-          JIRA_USER_EMAIL:    ${{ secrets.JIRA_USER_EMAIL }}
-          ATLASSIAN_API_TOKEN: ${{ secrets.ATLASSIAN_API_TOKEN }}
-          TRANSITION_ID:      ${{ secrets.JIRA_PROD_TRANSITION_ID }}
-        run: |
-          if [[ -z "$TICKETS" || -z "$TRANSITION_ID" ]]; then
-            echo "⚠️ No tickets or JIRA_PROD_TRANSITION_ID not set — skipping transition"
-            exit 0
-          fi
-
-          echo "🔄 Transitioning Jira tickets to production status..."
-          IFS=',' read -ra TICKET_ARRAY <<< "$TICKETS"
-
-          for TICKET in "${TICKET_ARRAY[@]}"; do
-            TICKET=$(echo "$TICKET" | xargs)
-            echo "  Transitioning: $TICKET"
-
-            # Check current status first
-            ISSUE_RESP=$(curl -s -w "\n%{http_code}" \
-              -u "${JIRA_USER_EMAIL}:${ATLASSIAN_API_TOKEN}" \
-              -H "Content-Type: application/json" \
-              "${JIRA_BASE_URL}/rest/api/3/issue/${TICKET}?fields=status")
-            ISSUE_HTTP=$(echo "$ISSUE_RESP" | tail -1)
-            ISSUE_BODY=$(echo "$ISSUE_RESP" | sed '$d')
-            CURRENT_STATUS=$(echo "$ISSUE_BODY" | jq -r '.fields.status.name // "Unknown"')
-
-            # Perform transition
-            TRANS_RESP=$(curl -s -w "\n%{http_code}" -X POST \
-              -u "${JIRA_USER_EMAIL}:${ATLASSIAN_API_TOKEN}" \
-              -H "Content-Type: application/json" \
-              -d "{\"transition\": {\"id\": \"${TRANSITION_ID}\"}}" \
-              "${JIRA_BASE_URL}/rest/api/3/issue/${TICKET}/transitions")
-            TRANS_HTTP=$(echo "$TRANS_RESP" | tail -1)
-
-            if [[ "$TRANS_HTTP" == "204" ]]; then
-              echo "  ✅ $TICKET transitioned (was: $CURRENT_STATUS)"
-            else
-              echo "  ⚠️ $TICKET transition failed (HTTP $TRANS_HTTP) — was: $CURRENT_STATUS"
-              echo "$TRANS_RESP" | sed '$d'
-            fi
-          done
-
           echo "📄 Fetching current Confluence page..."
           PAGE_RESPONSE=$(curl -s \
             -u "${JIRA_USER_EMAIL}:${ATLASSIAN_API_TOKEN}" \
@@ -779,4 +732,49 @@ jobs:
             echo "$UPDATE_RESPONSE" | sed '$d'
             exit 1
           fi
+
+      - name: Transition Jira Tickets to Deployed
+        if: always()
+        shell: bash
+        env:
+          TICKETS:            ${{ steps.extract_tickets.outputs.tickets }}
+          JIRA_BASE_URL:      ${{ secrets.JIRA_BASE_URL }}
+          JIRA_USER_EMAIL:    ${{ secrets.JIRA_USER_EMAIL }}
+          ATLASSIAN_API_TOKEN: ${{ secrets.ATLASSIAN_API_TOKEN }}
+          TRANSITION_ID:      ${{ secrets.JIRA_PROD_TRANSITION_ID }}
+        run: |
+          if [[ -z "$TICKETS" || -z "$TRANSITION_ID" ]]; then
+            echo "⚠️ No tickets or JIRA_PROD_TRANSITION_ID not set — skipping transition"
+            exit 0
+          fi
+
+          echo "🔄 Transitioning Jira tickets to production status..."
+          IFS=',' read -ra TICKET_ARRAY <<< "$TICKETS"
+
+          for TICKET in "${TICKET_ARRAY[@]}"; do
+            TICKET=$(echo "$TICKET" | xargs)
+            echo "  Transitioning: $TICKET"
+
+            ISSUE_RESP=$(curl -s -w "\n%{http_code}" \
+              -u "${JIRA_USER_EMAIL}:${ATLASSIAN_API_TOKEN}" \
+              -H "Content-Type: application/json" \
+              "${JIRA_BASE_URL}/rest/api/3/issue/${TICKET}?fields=status")
+            ISSUE_HTTP=$(echo "$ISSUE_RESP" | tail -1)
+            ISSUE_BODY=$(echo "$ISSUE_RESP" | sed '$d')
+            CURRENT_STATUS=$(echo "$ISSUE_BODY" | jq -r '.fields.status.name // "Unknown"')
+
+            TRANS_RESP=$(curl -s -w "\n%{http_code}" -X POST \
+              -u "${JIRA_USER_EMAIL}:${ATLASSIAN_API_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d "{\"transition\": {\"id\": \"${TRANSITION_ID}\"}}" \
+              "${JIRA_BASE_URL}/rest/api/3/issue/${TICKET}/transitions")
+            TRANS_HTTP=$(echo "$TRANS_RESP" | tail -1)
+
+            if [[ "$TRANS_HTTP" == "204" ]]; then
+              echo "  ✅ $TICKET transitioned (was: $CURRENT_STATUS)"
+            else
+              echo "  ⚠️ $TICKET transition failed (HTTP $TRANS_HTTP) — was: $CURRENT_STATUS"
+              echo "$TRANS_RESP" | sed '$d'
+            fi
+          done
 

@@ -122,9 +122,9 @@ jobs:
           RAW_ORG=$(sf org display --target-org "$USERNAME" --json 2>/dev/null)
           ORG_JSON=$(safe_obj "$RAW_ORG" '.result')
 
-          # ── Governor Limits ─────────────────────────────────────────────────
+          # ── Governor Limits (normalize PascalCase keys) ─────────────────────
           RAW_LIMITS=$(sf org list limits --target-org "$USERNAME" --json 2>/dev/null)
-          LIMITS_JSON=$(safe_array "$RAW_LIMITS" '.result')
+          LIMITS_JSON=$(echo "$RAW_LIMITS" | jq -c '[.result[]? | {name: (.name // .Name // ""), remaining: (.remaining // .Remaining // 0), max: (.max // .Max // 0)}]' 2>/dev/null || echo '[]')
 
           # ── Active Apex Classes ─────────────────────────────────────────────
           RAW_APEX=$(sf data query \
@@ -219,7 +219,7 @@ jobs:
           # Quick counts for downstream steps
           FAILED_BATCH_COUNT=$(echo "$HEALTH_JSON" | jq '.failed_batches  | length')
           TEST_FAIL_COUNT=$(echo    "$HEALTH_JSON" | jq '.test_failures   | length')
-          CRITICAL_LIMITS=$(echo    "$HEALTH_JSON" | jq '[.governor_limits[] | select(.remaining != null and .max != null and .max > 0 and ((.remaining / .max) < 0.20))] | length')
+          CRITICAL_LIMITS=$(echo    "$HEALTH_JSON" | jq '[.governor_limits[] | select(.max > 0 and ((.remaining / .max) < 0.20))] | length')
 
           echo "failed_batches=$FAILED_BATCH_COUNT" >> $GITHUB_OUTPUT
           echo "test_failures=$TEST_FAIL_COUNT"     >> $GITHUB_OUTPUT
@@ -352,7 +352,7 @@ jobs:
           echo ""
 
           # ── Overall Status ────────────────────────────────────────────────
-          CRITICAL_LIMITS=$(jq '[.governor_limits[] | select(.remaining != null and .max != null and .max > 0 and ((.remaining / .max) < 0.20))] | length' "$FILE")
+          CRITICAL_LIMITS=$(jq '[.governor_limits[] | select(.max > 0 and ((.remaining / .max) < 0.20))] | length' "$FILE" 2>/dev/null || echo 0)
 
           echo "══════════════════════════════════════════════════════════════"
           if [[ $BATCH_COUNT -gt 0 || $TEST_COUNT -gt 0 || $CRITICAL_LIMITS -gt 2 ]]; then
@@ -383,7 +383,7 @@ jobs:
           USERS=$(jq -r     '.metadata.active_users  // 0' "$FILE")
           BATCH_COUNT=$(jq  '.failed_batches | length' "$FILE")
           TEST_COUNT=$(jq   '.test_failures  | length' "$FILE")
-          CRITICAL_LIMITS=$(jq '[.governor_limits[] | select(.remaining != null and .max != null and .max > 0 and ((.remaining / .max) < 0.20))] | length' "$FILE")
+          CRITICAL_LIMITS=$(jq '[.governor_limits[] | select(.max > 0 and ((.remaining / .max) < 0.20))] | length' "$FILE" 2>/dev/null || echo 0)
 
           if [[ $BATCH_COUNT -gt 0 || $TEST_COUNT -gt 0 || $CRITICAL_LIMITS -gt 2 ]]; then
             VERDICT="🔴 CRITICAL"
@@ -412,7 +412,7 @@ jobs:
             echo "|---|---|---|---|---|"
             jq -r '
               .governor_limits
-              | map(select(.remaining != null and .max != null and .max > 0))
+              | map(select(.max > 0))
               | sort_by(.remaining / .max)
               | .[0:10][]
               | (.max - .remaining) as $used
@@ -420,7 +420,7 @@ jobs:
               | (.remaining / .max) as $ratio
               | if $ratio < 0.20 then "🔴" elif $ratio < 0.50 then "🟡" else "🟢" end as $badge
               | "| \(.name) | \(.remaining) | \(.max) | \($pct)% | \($badge) |"
-            ' "$FILE" 2>/dev/null
+            ' "$FILE" 2>/dev/null || echo "| N/A | — | — | — | — |"
             echo ""
           } >> $GITHUB_STEP_SUMMARY
 
@@ -433,7 +433,7 @@ jobs:
           retention-days: 30
 
       - name: Cleanup JWT Key
-        if: always() && steps.gate.outputs.run == 'true'
+        if: always()
         run: rm -f server.key
 
   notify:
@@ -476,7 +476,7 @@ jobs:
             USERS=$(jq -r     '.metadata.active_users  // 0' "$FILE")
             BATCH=$(jq        '.failed_batches | length' "$FILE")
             TESTS=$(jq        '.test_failures  | length' "$FILE")
-            CRIT=$(jq         '[.governor_limits[] | select(.remaining != null and .max != null and .max > 0 and ((.remaining / .max) < 0.20))] | length' "$FILE")
+            CRIT=$(jq '[.governor_limits[] | select(.max > 0 and ((.remaining / .max) < 0.20))] | length' "$FILE" 2>/dev/null || echo 0)
 
             if [[ $BATCH -gt 0 || $TESTS -gt 0 || $CRIT -gt 2 ]]; then
               BADGE="🔴 CRITICAL"; OVERALL="critical"
