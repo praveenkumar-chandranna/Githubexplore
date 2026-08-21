@@ -120,9 +120,17 @@ jobs:
           RAW_ORG=$(sf org display --target-org "$USERNAME" --json 2>/dev/null)
           ORG_JSON=$(safe_obj "$RAW_ORG" '.result')
 
-          # ── Governor Limits (normalize PascalCase keys) ─────────────────────
+          # ── Governor Limits (normalize camelCase and PascalCase keys) ────────
           RAW_LIMITS=$(sf org list limits --target-org "$USERNAME" --json 2>/dev/null)
-          LIMITS_JSON=$(echo "$RAW_LIMITS" | jq -c '[.result[]? | {name: (.name // .Name // ""), remaining: (.remaining // .Remaining // 0), max: (.max // .Max // 0)}]' 2>/dev/null || echo '[]')
+          echo "DEBUG limits sample: $(echo "$RAW_LIMITS" | jq '.result[0:2]' 2>/dev/null)"
+          LIMITS_JSON=$(echo "$RAW_LIMITS" | jq -c '
+            [.result[]? | {
+              name:      (.name      // .Name      // ""),
+              remaining: (.remaining // .Remaining // 0 | tonumber),
+              max:       (.max       // .Max       // 0 | tonumber)
+            } | select(.name != "" and .max > 0)]
+          ' 2>/dev/null || echo '[]')
+          echo "DEBUG limits parsed count: $(echo "$LIMITS_JSON" | jq 'length' 2>/dev/null)"
 
           # ── Active Apex Classes ─────────────────────────────────────────────
           RAW_APEX=$(sf data query \
@@ -245,10 +253,18 @@ jobs:
 
           # ── 2. Apex Coverage Score (20%) ────────────────────────────────────
           RAW_COV=$(sf data query \
-            --query "SELECT PercentCovered FROM ApexOrgWideCoverage LIMIT 1" \
+            --query "SELECT NumLinesCovered, NumLinesUncovered FROM ApexCodeCoverageAggregate" \
             --target-org "$USERNAME" --use-tooling-api --json 2>/dev/null)
-          COVERAGE=$(safe_int "$RAW_COV" '.result.records[0].PercentCovered')
+          echo "DEBUG coverage raw: $(echo "$RAW_COV" | jq '{totalSize: .result.totalSize, first: .result.records[0]}' 2>/dev/null)"
+          COVERAGE=$(echo "$RAW_COV" | jq -r '
+            if (.result.records | length) > 0 then
+              (.result.records | map(.NumLinesCovered // 0) | add) as $covered |
+              (.result.records | map((.NumLinesCovered // 0) + (.NumLinesUncovered // 0)) | add) as $total |
+              if $total > 0 then ($covered * 100 / $total | floor) else 0 end
+            else 0 end
+          ' 2>/dev/null || echo 0)
           [[ -z "$COVERAGE" || "$COVERAGE" == "null" ]] && COVERAGE=0
+          echo "DEBUG coverage computed: $COVERAGE"
 
           # ── 3. Test Results Score (15%) ─────────────────────────────────────
           RAW_PASS=$(sf data query \
@@ -287,24 +303,24 @@ jobs:
           STATIC_SCORE=100
           SECURITY_SCAN_SCORE=100
 
-          # ── Weighted Score ──────────────────────────────────────────────────
-          WEIGHTED=$(echo "scale=2;
-            ($SF_HC_SCORE        * 25 +
-             $COVERAGE           * 20 +
-             $TEST_SCORE         * 15 +
-             $STATIC_SCORE       * 15 +
-             $SECURITY_SCAN_SCORE * 10 +
-             $DEPLOY_SCORE       * 10 +
-             $STABILITY_SCORE    *  5) / 100" | bc 2>/dev/null || echo 0)
-          HEALTH_SCORE=$(printf '%.0f' "$WEIGHTED" 2>/dev/null || echo "$WEIGHTED")
+          # ── Weighted Score (awk — always available, handles decimals) ────────
+          echo "DEBUG score inputs: hc=$SF_HC_SCORE cov=$COVERAGE ts=$TEST_SCORE st=$STATIC_SCORE ss=$SECURITY_SCAN_SCORE ds=$DEPLOY_SCORE stab=$STABILITY_SCORE"
+          HEALTH_SCORE=$(awk -v hc="$SF_HC_SCORE" -v cov="$COVERAGE" \
+            -v ts="$TEST_SCORE" -v st="$STATIC_SCORE" \
+            -v ss="$SECURITY_SCAN_SCORE" -v ds="$DEPLOY_SCORE" \
+            -v stab="$STABILITY_SCORE" \
+            'BEGIN { printf "%d", (hc*25 + cov*20 + ts*15 + st*15 + ss*10 + ds*10 + stab*5) / 100 }')
+          echo "DEBUG health_score computed: $HEALTH_SCORE"
 
           # ── Status Band ─────────────────────────────────────────────────────
-          if   [[ $HEALTH_SCORE -ge 95 ]]; then BAND="🟢 Excellent"
-          elif [[ $HEALTH_SCORE -ge 85 ]]; then BAND="🟢 Healthy"
-          elif [[ $HEALTH_SCORE -ge 75 ]]; then BAND="🟡 Warning"
-          elif [[ $HEALTH_SCORE -ge 60 ]]; then BAND="🟠 Risk"
-          else                                  BAND="🔴 Critical"
+          HS_INT=$(printf '%d' "$HEALTH_SCORE" 2>/dev/null || echo 0)
+          if   [[ $HS_INT -ge 95 ]]; then BAND="🟢 Excellent"
+          elif [[ $HS_INT -ge 85 ]]; then BAND="🟢 Healthy"
+          elif [[ $HS_INT -ge 75 ]]; then BAND="🟡 Warning"
+          elif [[ $HS_INT -ge 60 ]]; then BAND="🟠 Risk"
+          else                            BAND="🔴 Critical"
           fi
+          HEALTH_SCORE=$HS_INT
 
           # ── Persist score into health JSON ──────────────────────────────────
           jq --argjson hs   "$HEALTH_SCORE" \
@@ -404,7 +420,7 @@ jobs:
 
           jq -r '
             .governor_limits
-            | map(select(.remaining != null and .max != null and .max > 0))
+            | map(select((.max | type) == "number" and .max > 0))
             | sort_by(.remaining / .max)
             | .[0:15][]
             | (.max - .remaining) as $used
