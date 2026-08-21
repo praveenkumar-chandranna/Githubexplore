@@ -1,8 +1,6 @@
 name: Salesforce Org Health Check
 
 on:
-  schedule:
-    - cron: '0 2 * * *'   # Daily 7:30 AM IST
   workflow_dispatch:
     inputs:
       environment:
@@ -397,6 +395,26 @@ jobs:
             echo "## 🏥 Health Check — $ENV | $VERDICT"
             echo "_Scanned at: $SCAN_TIME_"
             echo ""
+
+            # ── Doughnut chart: health status breakdown ───────────────────────────
+            STABLE=0; MONITOR=0; CRITICAL_C=0
+            if [[ $BATCH_COUNT -gt 0 || $TEST_COUNT -gt 0 || $CRITICAL_LIMITS -gt 2 ]]; then
+              CRITICAL_C=1
+            elif [[ $CRITICAL_LIMITS -gt 0 ]]; then
+              MONITOR=1
+            else
+              STABLE=1
+            fi
+            DONUT_CFG=$(printf '{"type":"doughnut","data":{"labels":["Stable","Monitor","Critical"],"datasets":[{"data":[%s,%s,%s],"backgroundColor":["#36a2eb","#ffcd56","#ff6384"]}]},"options":{"plugins":{"title":{"display":true,"text":"Health Status — %s"},"legend":{"position":"bottom"}}}}' "$STABLE" "$MONITOR" "$CRITICAL_C" "$ENV")
+            DONUT_URL="https://quickchart.io/chart?w=300&h=200&c=$(jq -rn --argjson c "$DONUT_CFG" '$c' | python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.stdin.read()))' 2>/dev/null || printf '%s' "$DONUT_CFG" | sed 's/ /%20/g;s/{/%7B/g;s/}/%7D/g;s/"/%22/g;s/,/%2C/g;s/:/%3A/g;s/\[/%5B/g;s/\]/%5D/g')"
+            echo "![Health Status Chart](${DONUT_URL})"
+            echo ""
+
+            # ── Bar chart: metadata counts ────────────────────────────────────────
+            BAR_CFG=$(printf '{"type":"bar","data":{"labels":["Apex Classes","Triggers","Flows","Users"],"datasets":[{"label":"%s Metadata","data":[%s,%s,%s,%s],"backgroundColor":["#4bc0c0","#9966ff","#ff9f40","#36a2eb"]}]},"options":{"plugins":{"title":{"display":true,"text":"Metadata Counts — %s"},"legend":{"display":false}},"scales":{"y":{"beginAtZero":true}}}}' "$ENV" "$APEX" "$TRIG" "$FLOWS" "$USERS" "$ENV")
+            BAR_URL="https://quickchart.io/chart?w=400&h=200&c=$(printf '%s' "$BAR_CFG" | python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.stdin.read()))' 2>/dev/null || printf '%s' "$BAR_CFG" | sed 's/ /%20/g;s/{/%7B/g;s/}/%7D/g;s/"/%22/g;s/,/%2C/g;s/:/%3A/g;s/\[/%5B/g;s/\]/%5D/g')"
+            echo "![Metadata Chart](${BAR_URL})"
+            echo ""
             echo "| Metric | Value |"
             echo "|---|---|"
             echo "| Active Apex Classes | $APEX |"
@@ -422,6 +440,22 @@ jobs:
               | "| \(.name) | \(.remaining) | \(.max) | \($pct)% | \($badge) |"
             ' "$FILE" 2>/dev/null || echo "| N/A | — | — | — | — |"
             echo ""
+
+            if [[ $BATCH_COUNT -gt 0 ]]; then
+              echo "### ⚙️ Failed Batch Jobs (last 24h)"
+              echo "| Apex Class | Errors | Total Items | Created |"
+              echo "|---|---|---|---|"
+              jq -r '.failed_batches[] | "| \(.ApexClass.Name // "Unknown") | \(.NumberOfErrors) | \(.TotalJobItems) | \(.CreatedDate // "") |"' "$FILE"
+              echo ""
+            fi
+
+            if [[ $TEST_COUNT -gt 0 ]]; then
+              echo "### 🧪 Apex Test Failures (last 24h)"
+              echo "| Class | Method | Message |"
+              echo "|---|---|---|"
+              jq -r '.test_failures[] | "| \(.ApexClass.Name // "Unknown") | \(.MethodName) | \(.Message // "" | .[0:120]) |"' "$FILE"
+              echo ""
+            fi
           } >> $GITHUB_STEP_SUMMARY
 
       - name: Upload Health Artifact
@@ -460,6 +494,27 @@ jobs:
           OVERALL="healthy"
 
           HTML="<h2>🏥 Salesforce Org Health Report — ${SCAN_TIME}</h2>"
+
+          # ── Bar chart: failed batches + test failures per env ────────────────
+          DEV_BATCH=0; QA_BATCH=0; UAT_BATCH=0; PROD_BATCH=0
+          DEV_TEST=0;  QA_TEST=0;  UAT_TEST=0;  PROD_TEST=0
+          for ENV in DEV QA UAT PRODUCTION; do
+            FILE="health_${ENV}.json"
+            [[ ! -f "$FILE" ]] && continue
+            B=$(jq '.failed_batches | length' "$FILE")
+            T=$(jq '.test_failures  | length' "$FILE")
+            case "$ENV" in
+              DEV)        DEV_BATCH=$B;  DEV_TEST=$T  ;;
+              QA)         QA_BATCH=$B;   QA_TEST=$T   ;;
+              UAT)        UAT_BATCH=$B;  UAT_TEST=$T  ;;
+              PRODUCTION) PROD_BATCH=$B; PROD_TEST=$T ;;
+            esac
+          done
+          BAR_CFG=$(printf '{"type":"bar","data":{"labels":["DEV","QA","UAT","PRODUCTION"],"datasets":[{"label":"Failed Batches","data":[%s,%s,%s,%s],"backgroundColor":"#ff6384"},{"label":"Test Failures","data":[%s,%s,%s,%s],"backgroundColor":"#ffcd56"}]},"options":{"plugins":{"title":{"display":true,"text":"Failures by Environment (last 24h)"},"legend":{"position":"bottom"}},"scales":{"y":{"beginAtZero":true,"ticks":{"stepSize":1}}}}}' \
+            "$DEV_BATCH" "$QA_BATCH" "$UAT_BATCH" "$PROD_BATCH" \
+            "$DEV_TEST"  "$QA_TEST"  "$UAT_TEST"  "$PROD_TEST")
+          BAR_URL="https://quickchart.io/chart?w=500&h=250&c=$(printf '%s' "$BAR_CFG" | jq -sRr @uri 2>/dev/null || printf '%s' "$BAR_CFG" | sed 's/ /%20/g;s/{/%7B/g;s/}/%7D/g;s/"/%22/g;s/,/%2C/g;s/:/%3A/g;s/\[/%5B/g;s/\]/%5D/g')"
+          HTML+="<p><img src='${BAR_URL}' alt='Failures by Environment' style='max-width:100%;'/></p>"
           HTML+="<table border='1' cellpadding='6' cellspacing='0' style='border-collapse:collapse;font-family:Arial,sans-serif;'>"
           HTML+="<tr style='background:#f0f0f0;'><th>Environment</th><th>Apex Classes</th><th>Triggers</th><th>Flows</th><th>Users</th><th>Failed Batches</th><th>Test Failures</th><th>Critical Limits</th><th>Status</th></tr>"
 
@@ -490,6 +545,35 @@ jobs:
           done
 
           HTML+="</table>"
+
+          # ── Failure details per env ──────────────────────────────────────
+          for ENV in DEV QA UAT PRODUCTION; do
+            FILE="health_${ENV}.json"
+            [[ ! -f "$FILE" ]] && continue
+
+            BATCH=$(jq '.failed_batches | length' "$FILE")
+            TESTS=$(jq '.test_failures  | length' "$FILE")
+
+            if [[ $BATCH -gt 0 || $TESTS -gt 0 ]]; then
+              HTML+="<h3>&#x26A0;&#xFE0F; $ENV — Failure Details</h3>"
+
+              if [[ $BATCH -gt 0 ]]; then
+                HTML+="<p><strong>&#x2699;&#xFE0F; Failed Batch Jobs (last 24h)</strong></p>"
+                HTML+="<table border='1' cellpadding='5' cellspacing='0' style='border-collapse:collapse;font-family:Arial,sans-serif;'>"
+                HTML+="<tr style='background:#ffe0e0;'><th>Apex Class</th><th>Errors</th><th>Total Items</th><th>Created</th></tr>"
+                HTML+=$(jq -r '.failed_batches[] | "<tr><td>\(.ApexClass.Name // "Unknown")</td><td>\(.NumberOfErrors)</td><td>\(.TotalJobItems)</td><td>\(.CreatedDate // "")</td></tr>"' "$FILE")
+                HTML+="</table>"
+              fi
+
+              if [[ $TESTS -gt 0 ]]; then
+                HTML+="<p><strong>&#x1F9EA; Apex Test Failures (last 24h)</strong></p>"
+                HTML+="<table border='1' cellpadding='5' cellspacing='0' style='border-collapse:collapse;font-family:Arial,sans-serif;'>"
+                HTML+="<tr style='background:#ffe0e0;'><th>Class</th><th>Method</th><th>Message</th></tr>"
+                HTML+=$(jq -r '.test_failures[] | "<tr><td>\(.ApexClass.Name // "Unknown")</td><td>\(.MethodName)</td><td>\(.Message // "" | .[0:200])</td></tr>"' "$FILE")
+                HTML+="</table>"
+              fi
+            fi
+          done
           HTML+="<p><a href='https://github.com/${REPO}/actions/runs/${RUN_ID}'>View full run logs →</a></p>"
           HTML+="<p style='font-size:11px;color:#888;'>⚠️ Automated health report. Do not reply.</p>"
 
