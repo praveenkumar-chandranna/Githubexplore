@@ -301,10 +301,10 @@ jobs:
             --argjson apex_exceptions "$APEX_EXCEPTIONS" \
             --argjson failed_batch_count "$FAILED_BATCH_COUNT" \
             --argjson critical_limits    "$CRITICAL_LIMITS" \
-            --argjson sec_raw            "$SEC_RAW" \
-            --argjson priv_count         "$PRIV_COUNT" \
-            --argjson inactive_count     "$INACTIVE_COUNT" \
-            --argjson no_mfa_count       "$NO_MFA_COUNT" \
+            --arg    sec_raw            "$SEC_RAW" \
+            --arg    priv_count         "$PRIV_COUNT" \
+            --arg    inactive_count     "$INACTIVE_COUNT" \
+            --arg    no_mfa_count       "$NO_MFA_COUNT" \
             --argjson apex      "$APEX_COUNT" \
             --argjson triggers  "$TRIGGER_COUNT" \
             --argjson flows     "$FLOW_COUNT" \
@@ -414,10 +414,10 @@ jobs:
           echo "══════════════════════════════════════════════════════════════"
           echo ""
           echo "📊 SCORE BREAKDOWN"
-          SEC_RAW_D=$(jq -r '.scores.sec_raw       // 0' "$FILE")
-          PRIV_D=$(jq -r    '.scores.priv_count     // 0' "$FILE")
-          INACT_D=$(jq -r   '.scores.inactive_count // 0' "$FILE")
-          NOMFA_D=$(jq -r   '.scores.no_mfa_count   // 0' "$FILE")
+          SEC_RAW_D=$(jq -r '.scores.sec_raw       // "0"' "$FILE")
+          PRIV_D=$(jq -r    '.scores.priv_count     // "0"' "$FILE")
+          INACT_D=$(jq -r   '.scores.inactive_count // "0"' "$FILE")
+          NOMFA_D=$(jq -r   '.scores.no_mfa_count   // "0"' "$FILE")
           SEC_PTS=$(awk "BEGIN {printf \"%.2f\", ${SEC_RAW_D} * 0.25}")
           printf "  %-30s %s\n" "Security Health Check (25%)" "${SEC_RAW_D}/100 -> ${SEC_PTS} pts  (Priv:$PRIV_D Inactive:$INACT_D NoMFA:$NOMFA_D)"
           printf "  %-30s %s\n" "Apex Coverage (20%)"         "${COV}%  → $(awk "BEGIN {printf \"%.2f\", $COV * 0.20}") pts"
@@ -503,6 +503,13 @@ jobs:
           USERS=$(jq -r    '.metadata.active_users     // 0' "$FILE")
           BATCH_COUNT=$(jq '.failed_batches | length'        "$FILE")
           TEST_COUNT=$(jq  '.test_failures  | length'        "$FILE")
+
+          SEC_RAW=$(jq -r '.scores.sec_raw       // "0"' "$FILE")
+          PRIV_C=$(jq -r  '.scores.priv_count     // "0"' "$FILE")
+          INACT_C=$(jq -r '.scores.inactive_count // "0"' "$FILE")
+          NOMFA_C=$(jq -r '.scores.no_mfa_count   // "0"' "$FILE")
+          P_SEC=$(awk  "BEGIN {printf \"%.1f\", (${SEC_RAW}+0)*0.25}")
+          P_SEC2=$(awk "BEGIN {printf \"%.2f\", (${SEC_RAW}+0)*0.25}")
 
           # Pre-compute all awk values to avoid nested quoting issues in printf
           P_COV=$(awk    "BEGIN {v=${COV}+0;    if(v>100)v=100; printf \"%.1f\", v*0.20}")
