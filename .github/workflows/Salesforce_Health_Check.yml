@@ -1,4 +1,4 @@
-name: Salesforce Org Health Check
+﻿name: Salesforce Org Health Check
 
 on:
   workflow_dispatch:
@@ -145,6 +145,18 @@ jobs:
           RAW_USERS=$(sf data query --query "SELECT COUNT() FROM User WHERE IsActive=true AND Profile.UserLicense.LicenseDefinitionKey != 'PID_CHATTER'" --target-org "$USERNAME" --json 2>/dev/null)
           USER_COUNT=$(safe_int "$RAW_USERS" '.result.totalSize')
 
+          # -- Security Metrics ------------------------------------------------
+          RAW_PRIV=$(sf data query --query "SELECT COUNT() FROM Profile WHERE PermissionsModifyAllData=true" --target-org "$USERNAME" --json 2>/dev/null)
+          PRIV_COUNT=$(safe_int "$RAW_PRIV" '.result.totalSize')
+
+          RAW_INACTIVE=$(sf data query --query "SELECT COUNT() FROM User WHERE IsActive=false AND LastLoginDate != null AND Profile.UserLicense.LicenseDefinitionKey != 'PID_CHATTER'" --target-org "$USERNAME" --json 2>/dev/null)
+          INACTIVE_COUNT=$(safe_int "$RAW_INACTIVE" '.result.totalSize')
+
+          RAW_NO_MFA=$(sf data query --query "SELECT COUNT() FROM User WHERE IsActive=true AND Profile.PermissionsMultiFactorAuthentication=false AND Profile.UserLicense.LicenseDefinitionKey != 'PID_CHATTER'" --target-org "$USERNAME" --json 2>/dev/null)
+          NO_MFA_COUNT=$(safe_int "$RAW_NO_MFA" '.result.totalSize')
+
+          SEC_RAW=$(awk "BEGIN {v=100-(${PRIV_COUNT}*10)-(${INACTIVE_COUNT}*2)-(${NO_MFA_COUNT}*1); if(v<0)v=0; printf \"%.0f\", v}")
+
           # ── Apex Coverage ───────────────────────────────────────────────────
           RAW_COV=$(sf data query \
             --query "SELECT NumLinesCovered, NumLinesUncovered FROM ApexOrgWideCoverage" \
@@ -257,8 +269,8 @@ jobs:
           GOV_RAW=$(awk "BEGIN {v=100 - ($CRITICAL_LIMITS * 10); if(v<0)v=0; printf \"%.2f\", v * 0.10}")
           GOV_SCORE=$GOV_RAW
 
-          # 7. Security Health Check placeholder (25%) — default 80 until integrated
-          SEC_SCORE=$(awk "BEGIN {printf \"%.2f\", 80 * 0.25}")
+          # 7. Security Health Check (25%) -- over-privileged profiles, inactive users, MFA
+          SEC_SCORE=$(awk "BEGIN {printf \"%.2f\", ${SEC_RAW} * 0.25}")
 
           HEALTH_SCORE=$(awk "BEGIN {printf \"%.0f\", $SEC_SCORE + $COV_SCORE + $TEST_SCORE + $PMD_SCORE + $DEPLOY_SCORE + $STAB_SCORE + $GOV_SCORE}")
 
@@ -289,6 +301,10 @@ jobs:
             --argjson apex_exceptions "$APEX_EXCEPTIONS" \
             --argjson failed_batch_count "$FAILED_BATCH_COUNT" \
             --argjson critical_limits    "$CRITICAL_LIMITS" \
+            --argjson sec_raw            "$SEC_RAW" \
+            --argjson priv_count         "$PRIV_COUNT" \
+            --argjson inactive_count     "$INACTIVE_COUNT" \
+            --argjson no_mfa_count       "$NO_MFA_COUNT" \
             --argjson apex      "$APEX_COUNT" \
             --argjson triggers  "$TRIGGER_COUNT" \
             --argjson flows     "$FLOW_COUNT" \
@@ -318,7 +334,11 @@ jobs:
                 pmd_medium:       $pmd_medium,
                 apex_exceptions:  $apex_exceptions,
                 failed_batch_count: $failed_batch_count,
-                critical_limits:  $critical_limits
+                critical_limits:  $critical_limits,
+                sec_raw:          $sec_raw,
+                priv_count:       $priv_count,
+                inactive_count:   $inactive_count,
+                no_mfa_count:     $no_mfa_count
               },
               metadata: {
                 apex_classes:  $apex,
@@ -394,7 +414,12 @@ jobs:
           echo "══════════════════════════════════════════════════════════════"
           echo ""
           echo "📊 SCORE BREAKDOWN"
-          printf "  %-30s %s\n" "Security Health Check (25%)" "80/100  → 20.00 pts  [placeholder]"
+          SEC_RAW_D=$(jq -r '.scores.sec_raw       // 0' "$FILE")
+          PRIV_D=$(jq -r    '.scores.priv_count     // 0' "$FILE")
+          INACT_D=$(jq -r   '.scores.inactive_count // 0' "$FILE")
+          NOMFA_D=$(jq -r   '.scores.no_mfa_count   // 0' "$FILE")
+          SEC_PTS=$(awk "BEGIN {printf \"%.2f\", ${SEC_RAW_D} * 0.25}")
+          printf "  %-30s %s\n" "Security Health Check (25%)" "${SEC_RAW_D}/100 -> ${SEC_PTS} pts  (Priv:$PRIV_D Inactive:$INACT_D NoMFA:$NOMFA_D)"
           printf "  %-30s %s\n" "Apex Coverage (20%)"         "${COV}%  → $(awk "BEGIN {printf \"%.2f\", $COV * 0.20}") pts"
           printf "  %-30s %s\n" "Test Results (15%)"          "${T_PASS}/${T_TOTAL} passed  → $(awk "BEGIN {if($T_TOTAL>0) printf \"%.2f\", ($T_PASS/$T_TOTAL)*100*0.15; else print \"15.00\"}") pts"
           printf "  %-30s %s\n" "Code Quality/PMD (15%)"      "Critical:$PMD_C High:$PMD_H Med:$PMD_M"
@@ -494,8 +519,8 @@ jobs:
           P_GOV2=$(awk   "BEGIN {v=100-(${CRIT_LIM}+0)*10; if(v<0)v=0; printf \"%.2f\", v*0.10}")
 
           # Score bar chart
-          BAR_CFG=$(printf '{"type":"bar","data":{"labels":["Security (25%%)","Apex Coverage (20%%)","Test Results (15%%)","Code Quality (15%%)","Deployment (10%%)","Org Stability (5%%)","Gov Limits (10%%)"],"datasets":[{"label":"Score","data":[20,%s,%s,%s,%s,%s,%s],"backgroundColor":["#9966ff","#4bc0c0","#36a2eb","#ff9f40","#ffcd56","#ff6384","#c9cbcf"]}]},"options":{"indexAxis":"y","plugins":{"title":{"display":true,"text":"Health Score Breakdown - %s (%s/100)"},"legend":{"display":false}},"scales":{"x":{"min":0,"max":25}}}}' \
-            "$P_COV" "$P_TEST" "$P_PMD" "$P_DEP" "$P_STAB" "$P_GOV" "$ENV" "$SCORE")
+          BAR_CFG=$(printf '{"type":"bar","data":{"labels":["Security (25%%)","Apex Coverage (20%%)","Test Results (15%%)","Code Quality (15%%)","Deployment (10%%)","Org Stability (5%%)","Gov Limits (10%%)"],"datasets":[{"label":"Score","data":[%s,%s,%s,%s,%s,%s,%s],"backgroundColor":["#9966ff","#4bc0c0","#36a2eb","#ff9f40","#ffcd56","#ff6384","#c9cbcf"]}]},"options":{"indexAxis":"y","plugins":{"title":{"display":true,"text":"Health Score Breakdown - %s (%s/100)"},"legend":{"display":false}},"scales":{"x":{"min":0,"max":25}}}}' \
+            "$P_SEC" "$P_COV" "$P_TEST" "$P_PMD" "$P_DEP" "$P_STAB" "$P_GOV" "$ENV" "$SCORE")
           BAR_URL="https://quickchart.io/chart?w=500&h=250&c=$(printf '%s' "$BAR_CFG" | jq -sRr @uri 2>/dev/null || printf '%s' "$BAR_CFG" | sed 's/ /%20/g;s/{/%7B/g;s/}/%7D/g;s/"/%22/g;s/,/%2C/g;s/:/%3A/g;s/\[/%5B/g;s/\]/%5D/g')"
 
           {
@@ -509,7 +534,7 @@ jobs:
             echo "### 📊 Score Breakdown"
             echo "| Category | Weight | Raw Value | Points |"
             echo "|---|---|---|---|"
-            echo "| 🔒 Security Health Check | 25% | 80/100 _(placeholder)_ | 20.00 |"
+            echo "| :lock: Security Health Check | 25% | ${SEC_RAW}/100 (Priv:${PRIV_C} Inactive:${INACT_C} NoMFA:${NOMFA_C}) | ${P_SEC2} |"
             echo "| 🧪 Apex Coverage | 20% | ${COV}% | ${P_COV2} |"
             echo "| ✅ Test Results | 15% | ${T_PASS}/${T_TOTAL} passed | ${P_TEST2} |"
             echo "| 🔍 Code Quality (PMD) | 15% | Critical:$PMD_C High:$PMD_H Med:$PMD_M | ${P_PMD2} |"
