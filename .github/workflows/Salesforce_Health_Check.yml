@@ -32,16 +32,22 @@ jobs:
         id: gate
         shell: bash
         env:
-          EVENT:        ${{ github.event_name }}
-          INPUT_ENV:    ${{ github.event.inputs.environment }}
-          MATRIX_ENV:   ${{ matrix.environment }}
+          EVENT:      ${{ github.event_name }}
+          INPUT_ENV:  ${{ github.event.inputs.environment }}
+          MATRIX_ENV: ${{ matrix.environment }}
         run: |
-          if [[ "$EVENT" == 'schedule' || "$INPUT_ENV" == 'ALL' || "$INPUT_ENV" == "$MATRIX_ENV" ]]; then
+          if [[ "$INPUT_ENV" == 'ALL' || "$INPUT_ENV" == "$MATRIX_ENV" ]]; then
             echo "run=true" >> $GITHUB_OUTPUT
           else
             echo "run=false" >> $GITHUB_OUTPUT
             echo "⏭️ Skipping $MATRIX_ENV — input is $INPUT_ENV"
           fi
+
+      - name: Checkout Code
+        if: steps.gate.outputs.run == 'true'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Node.js
         if: steps.gate.outputs.run == 'true'
@@ -111,7 +117,6 @@ jobs:
           SCAN_TIME=$(TZ='Asia/Kolkata' date +'%d-%m-%Y %H:%M IST')
           echo "📊 Collecting health metrics for $ENV at $SCAN_TIME..."
 
-          # Safe helpers — capture output first, then parse with fallback
           safe_array() { echo "$1" | jq -c "$2 // []" 2>/dev/null || echo '[]'; }
           safe_obj()   { echo "$1" | jq -c "$2 // {}" 2>/dev/null || echo '{}'; }
           safe_int()   { echo "$1" | jq -r "$2 // 0"  2>/dev/null || echo '0';  }
@@ -120,41 +125,66 @@ jobs:
           RAW_ORG=$(sf org display --target-org "$USERNAME" --json 2>/dev/null)
           ORG_JSON=$(safe_obj "$RAW_ORG" '.result')
 
-          # ── Governor Limits (normalize camelCase and PascalCase keys) ────────
+          # ── Governor Limits ─────────────────────────────────────────────────
           RAW_LIMITS=$(sf org list limits --target-org "$USERNAME" --json 2>/dev/null)
-          echo "DEBUG limits sample: $(echo "$RAW_LIMITS" | jq '.result[0:2]' 2>/dev/null)"
-          LIMITS_JSON=$(echo "$RAW_LIMITS" | jq -c '
-            [.result[]? | {
-              name:      (.name      // .Name      // ""),
-              remaining: (.remaining // .Remaining // 0 | tonumber),
-              max:       (.max       // .Max       // 0 | tonumber)
-            } | select(.name != "" and .max > 0)]
-          ' 2>/dev/null || echo '[]')
-          echo "DEBUG limits parsed count: $(echo "$LIMITS_JSON" | jq 'length' 2>/dev/null)"
+          LIMITS_JSON=$(echo "$RAW_LIMITS" | jq -c '[.result[]? | {name: (.name // .Name // ""), remaining: (.remaining // .Remaining // 0), max: (.max // .Max // 0)}]' 2>/dev/null || echo '[]')
 
           # ── Active Apex Classes ─────────────────────────────────────────────
-          RAW_APEX=$(sf data query \
-            --query "SELECT COUNT() FROM ApexClass WHERE Status='Active'" \
-            --target-org "$USERNAME" --json 2>/dev/null)
+          RAW_APEX=$(sf data query --query "SELECT COUNT() FROM ApexClass WHERE Status='Active'" --target-org "$USERNAME" --json 2>/dev/null)
           APEX_COUNT=$(safe_int "$RAW_APEX" '.result.totalSize')
 
           # ── Active Apex Triggers ────────────────────────────────────────────
-          RAW_TRIGGER=$(sf data query \
-            --query "SELECT COUNT() FROM ApexTrigger WHERE Status='Active'" \
-            --target-org "$USERNAME" --json 2>/dev/null)
+          RAW_TRIGGER=$(sf data query --query "SELECT COUNT() FROM ApexTrigger WHERE Status='Active'" --target-org "$USERNAME" --json 2>/dev/null)
           TRIGGER_COUNT=$(safe_int "$RAW_TRIGGER" '.result.totalSize')
 
-          # ── Active Flows ────────────────────────────────────────────────────
-          RAW_FLOWS=$(sf data query \
-            --query "SELECT COUNT() FROM FlowDefinition WHERE ActiveVersionId != null" \
-            --target-org "$USERNAME" --use-tooling-api --json 2>/dev/null)
+          # ── Active Flows (Tooling API) ──────────────────────────────────────
+          RAW_FLOWS=$(sf data query --query "SELECT COUNT() FROM FlowDefinition WHERE ActiveVersionId != null" --target-org "$USERNAME" --use-tooling-api --json 2>/dev/null)
           FLOW_COUNT=$(safe_int "$RAW_FLOWS" '.result.totalSize')
 
           # ── Active Users ────────────────────────────────────────────────────
-          RAW_USERS=$(sf data query \
-            --query "SELECT COUNT() FROM User WHERE IsActive=true AND Profile.UserLicense.LicenseDefinitionKey != 'PID_CHATTER'" \
-            --target-org "$USERNAME" --json 2>/dev/null)
+          RAW_USERS=$(sf data query --query "SELECT COUNT() FROM User WHERE IsActive=true AND Profile.UserLicense.LicenseDefinitionKey != 'PID_CHATTER'" --target-org "$USERNAME" --json 2>/dev/null)
           USER_COUNT=$(safe_int "$RAW_USERS" '.result.totalSize')
+
+          # ── Apex Coverage ───────────────────────────────────────────────────
+          RAW_COV=$(sf data query \
+            --query "SELECT NumLinesCovered, NumLinesUncovered FROM ApexOrgWideCoverage" \
+            --target-org "$USERNAME" --json 2>/dev/null)
+          COV_COVERED=$(safe_int "$RAW_COV" '.result.records[0].NumLinesCovered')
+          COV_UNCOVERED=$(safe_int "$RAW_COV" '.result.records[0].NumLinesUncovered')
+          COV_TOTAL=$((COV_COVERED + COV_UNCOVERED))
+          if [[ $COV_TOTAL -gt 0 ]]; then
+            APEX_COVERAGE=$(awk "BEGIN {printf \"%.1f\", ($COV_COVERED / $COV_TOTAL) * 100}")
+          else
+            APEX_COVERAGE="0.0"
+          fi
+
+          # ── Apex Test Results (last 7 days) ─────────────────────────────────
+          RAW_TEST_PASS=$(sf data query --query "SELECT COUNT() FROM ApexTestResult WHERE Outcome='Pass' AND CreatedDate = LAST_N_DAYS:7" --target-org "$USERNAME" --json 2>/dev/null)
+          RAW_TEST_FAIL=$(sf data query --query "SELECT COUNT() FROM ApexTestResult WHERE Outcome='Fail' AND CreatedDate = LAST_N_DAYS:7" --target-org "$USERNAME" --json 2>/dev/null)
+          TEST_PASS=$(safe_int "$RAW_TEST_PASS" '.result.totalSize')
+          TEST_FAIL=$(safe_int "$RAW_TEST_FAIL" '.result.totalSize')
+          TEST_TOTAL=$((TEST_PASS + TEST_FAIL))
+
+          # ── Apex Test Failure Details (last 24h) ────────────────────────────
+          RAW_TESTS=$(sf data query \
+            --query "SELECT Id, ApexClass.Name, MethodName, Outcome, Message, CreatedDate FROM ApexTestResult WHERE Outcome='Fail' AND CreatedDate = LAST_N_DAYS:1 ORDER BY CreatedDate DESC LIMIT 20" \
+            --target-org "$USERNAME" --json 2>/dev/null)
+          TESTS_JSON=$(safe_array "$RAW_TESTS" '.result.records')
+
+          # ── Recent Deployments ──────────────────────────────────────────────
+          RAW_DEPLOYS=$(sf data query \
+            --query "SELECT Id, Status, StartDate, CompletedDate, NumberComponentsDeployed, NumberComponentErrors FROM DeployRequest ORDER BY StartDate DESC LIMIT 10" \
+            --target-org "$USERNAME" --json 2>/dev/null)
+          DEPLOYS_JSON=$(safe_array "$RAW_DEPLOYS" '.result.records')
+
+          # Deployment success rate (last 10)
+          DEPLOY_TOTAL=$(echo "$DEPLOYS_JSON" | jq 'length')
+          DEPLOY_SUCCESS=$(echo "$DEPLOYS_JSON" | jq '[.[] | select(.Status == "Succeeded")] | length')
+          if [[ $DEPLOY_TOTAL -gt 0 ]]; then
+            DEPLOY_RATE=$(awk "BEGIN {printf \"%.1f\", ($DEPLOY_SUCCESS / $DEPLOY_TOTAL) * 100}")
+          else
+            DEPLOY_RATE="100.0"
+          fi
 
           # ── Failed Batch Jobs (last 24h) ────────────────────────────────────
           RAW_BATCHES=$(sf data query \
@@ -162,11 +192,11 @@ jobs:
             --target-org "$USERNAME" --json 2>/dev/null)
           BATCHES_JSON=$(safe_array "$RAW_BATCHES" '.result.records')
 
-          # ── Apex Test Failures (last 24h) ───────────────────────────────────
-          RAW_TESTS=$(sf data query \
-            --query "SELECT Id, ApexClass.Name, MethodName, Outcome, Message, CreatedDate FROM ApexTestResult WHERE Outcome='Fail' AND CreatedDate = LAST_N_DAYS:1 ORDER BY CreatedDate DESC LIMIT 20" \
+          # ── Apex Exceptions (last 24h) ──────────────────────────────────────
+          RAW_EXCEPTIONS=$(sf data query \
+            --query "SELECT COUNT() FROM ApexLog WHERE LogLength > 0 AND Operation='ApexTrigger' AND Status='Unexpected exception' AND StartTime = LAST_N_DAYS:1" \
             --target-org "$USERNAME" --json 2>/dev/null)
-          TESTS_JSON=$(safe_array "$RAW_TESTS" '.result.records')
+          APEX_EXCEPTIONS=$(safe_int "$RAW_EXCEPTIONS" '.result.totalSize')
 
           # ── Scheduled Jobs ──────────────────────────────────────────────────
           RAW_SCHED=$(sf data query \
@@ -174,22 +204,91 @@ jobs:
             --target-org "$USERNAME" --json 2>/dev/null)
           SCHED_JSON=$(safe_array "$RAW_SCHED" '.result.records')
 
-          # ── Long-Running Batch Jobs (queued/processing) ─────────────────────
+          # ── Running Batch Jobs ──────────────────────────────────────────────
           RAW_RUNNING=$(sf data query \
             --query "SELECT Id, ApexClass.Name, Status, JobItemsProcessed, TotalJobItems, NumberOfErrors, CreatedDate FROM AsyncApexJob WHERE Status IN ('Processing','Queued','Preparing') ORDER BY CreatedDate DESC LIMIT 10" \
             --target-org "$USERNAME" --json 2>/dev/null)
           RUNNING_JSON=$(safe_array "$RAW_RUNNING" '.result.records')
 
-          # ── Recent Deploy History ───────────────────────────────────────────
-          RAW_DEPLOYS=$(sf data query \
-            --query "SELECT Id, Status, StartDate, CompletedDate, NumberComponentsDeployed, NumberComponentErrors FROM DeployRequest ORDER BY StartDate DESC LIMIT 5" \
-            --target-org "$USERNAME" --json 2>/dev/null)
-          DEPLOYS_JSON=$(safe_array "$RAW_DEPLOYS" '.result.records')
+          # ── PMD / Code Analyzer (scan source if available) ──────────────────
+          PMD_CRITICAL=0; PMD_HIGH=0; PMD_MEDIUM=0
+          if [[ -d "force-app" ]]; then
+            echo "🔍 Running Salesforce Code Analyzer..."
+            npm install -g @salesforce/sfdx-scanner --silent 2>/dev/null || true
+            sf scanner run \
+              --target "force-app/**/*.cls,force-app/**/*.trigger" \
+              --format json \
+              --severity-threshold 1 \
+              --output-file pmd_results.json 2>/dev/null || true
+            if [[ -f pmd_results.json ]]; then
+              PMD_CRITICAL=$(jq '[.[] | select(.severity == 1)] | length' pmd_results.json 2>/dev/null || echo 0)
+              PMD_HIGH=$(jq     '[.[] | select(.severity == 2)] | length' pmd_results.json 2>/dev/null || echo 0)
+              PMD_MEDIUM=$(jq   '[.[] | select(.severity == 3)] | length' pmd_results.json 2>/dev/null || echo 0)
+            fi
+          else
+            echo "⚠️ force-app not found — skipping PMD scan"
+          fi
+
+          # ── Health Score Calculation ─────────────────────────────────────────
+          # 1. Apex Coverage (20%) — score = coverage% capped at 100
+          COV_SCORE=$(awk "BEGIN {v=$APEX_COVERAGE; if(v>100)v=100; printf \"%.2f\", v * 0.20}")
+
+          # 2. Test Results (15%) — score = (pass/total)*100 * 0.15
+          if [[ $TEST_TOTAL -gt 0 ]]; then
+            TEST_SCORE=$(awk "BEGIN {printf \"%.2f\", ($TEST_PASS / $TEST_TOTAL) * 100 * 0.15}")
+          else
+            TEST_SCORE="15.00"
+          fi
+
+          # 3. PMD / Code Quality (15%) — deduct 5 per critical, 2 per high, capped at 0
+          PMD_RAW=$(awk "BEGIN {v=100 - ($PMD_CRITICAL * 5) - ($PMD_HIGH * 2); if(v<0)v=0; printf \"%.2f\", v * 0.15}")
+          PMD_SCORE=$PMD_RAW
+
+          # 4. Deployment Success (10%) — score = deploy_rate * 0.10
+          DEPLOY_SCORE=$(awk "BEGIN {printf \"%.2f\", $DEPLOY_RATE * 0.10}")
+
+          # 5. Org Stability (5%) — deduct per failed batch/exception
+          FAILED_BATCH_COUNT=$(echo "$BATCHES_JSON" | jq 'length')
+          STAB_RAW=$(awk "BEGIN {v=100 - ($FAILED_BATCH_COUNT * 10) - ($APEX_EXCEPTIONS * 5); if(v<0)v=0; printf \"%.2f\", v * 0.05}")
+          STAB_SCORE=$STAB_RAW
+
+          # 6. Governor Limits (10%) — score based on critical limits
+          CRITICAL_LIMITS=$(echo "$LIMITS_JSON" | jq '[.[] | select(.max > 0 and ((.remaining / .max) < 0.20))] | length' 2>/dev/null || echo 0)
+          GOV_RAW=$(awk "BEGIN {v=100 - ($CRITICAL_LIMITS * 10); if(v<0)v=0; printf \"%.2f\", v * 0.10}")
+          GOV_SCORE=$GOV_RAW
+
+          # 7. Security Health Check placeholder (25%) — default 80 until integrated
+          SEC_SCORE=$(awk "BEGIN {printf \"%.2f\", 80 * 0.25}")
+
+          HEALTH_SCORE=$(awk "BEGIN {printf \"%.0f\", $SEC_SCORE + $COV_SCORE + $TEST_SCORE + $PMD_SCORE + $DEPLOY_SCORE + $STAB_SCORE + $GOV_SCORE}")
+
+          # Health band
+          if   [[ $HEALTH_SCORE -ge 95 ]]; then HEALTH_BAND="🟢 Excellent"
+          elif [[ $HEALTH_SCORE -ge 85 ]]; then HEALTH_BAND="🟢 Healthy"
+          elif [[ $HEALTH_SCORE -ge 75 ]]; then HEALTH_BAND="🟡 Warning"
+          elif [[ $HEALTH_SCORE -ge 60 ]]; then HEALTH_BAND="🟠 Risk"
+          else                                   HEALTH_BAND="🔴 Critical"
+          fi
 
           # ── Build health JSON ───────────────────────────────────────────────
           HEALTH_JSON=$(jq -n \
-            --arg  env          "$ENV" \
-            --arg  scan_time    "$SCAN_TIME" \
+            --arg  env            "$ENV" \
+            --arg  scan_time      "$SCAN_TIME" \
+            --arg  health_band    "$HEALTH_BAND" \
+            --argjson health_score  "$HEALTH_SCORE" \
+            --arg  apex_coverage  "$APEX_COVERAGE" \
+            --argjson test_pass   "$TEST_PASS" \
+            --argjson test_fail   "$TEST_FAIL" \
+            --argjson test_total  "$TEST_TOTAL" \
+            --arg  deploy_rate    "$DEPLOY_RATE" \
+            --argjson deploy_success "$DEPLOY_SUCCESS" \
+            --argjson deploy_total   "$DEPLOY_TOTAL" \
+            --argjson pmd_critical "$PMD_CRITICAL" \
+            --argjson pmd_high     "$PMD_HIGH" \
+            --argjson pmd_medium   "$PMD_MEDIUM" \
+            --argjson apex_exceptions "$APEX_EXCEPTIONS" \
+            --argjson failed_batch_count "$FAILED_BATCH_COUNT" \
+            --argjson critical_limits    "$CRITICAL_LIMITS" \
             --argjson apex      "$APEX_COUNT" \
             --argjson triggers  "$TRIGGER_COUNT" \
             --argjson flows     "$FLOW_COUNT" \
@@ -202,8 +301,25 @@ jobs:
             --argjson running_jobs    "$RUNNING_JSON" \
             --argjson deploy_history  "$DEPLOYS_JSON" \
             '{
-              environment:   $env,
-              scan_time:     $scan_time,
+              environment:    $env,
+              scan_time:      $scan_time,
+              health_score:   $health_score,
+              health_band:    $health_band,
+              scores: {
+                apex_coverage:    $apex_coverage,
+                test_pass:        $test_pass,
+                test_fail:        $test_fail,
+                test_total:       $test_total,
+                deploy_rate:      $deploy_rate,
+                deploy_success:   $deploy_success,
+                deploy_total:     $deploy_total,
+                pmd_critical:     $pmd_critical,
+                pmd_high:         $pmd_high,
+                pmd_medium:       $pmd_medium,
+                apex_exceptions:  $apex_exceptions,
+                failed_batch_count: $failed_batch_count,
+                critical_limits:  $critical_limits
+              },
               metadata: {
                 apex_classes:  $apex,
                 apex_triggers: $triggers,
@@ -220,151 +336,15 @@ jobs:
             }')
 
           echo "$HEALTH_JSON" > health_${{ matrix.environment }}.json
-          echo "✅ Health data collected for $ENV"
+          echo "✅ Health data collected for $ENV | Score: $HEALTH_SCORE | $HEALTH_BAND"
 
-          # Quick counts for downstream steps
-          FAILED_BATCH_COUNT=$(echo "$HEALTH_JSON" | jq '.failed_batches  | length')
-          TEST_FAIL_COUNT=$(echo    "$HEALTH_JSON" | jq '.test_failures   | length')
-          CRITICAL_LIMITS=$(echo    "$HEALTH_JSON" | jq '[.governor_limits[] | select(.max > 0 and ((.remaining / .max) < 0.20))] | length')
-
+          echo "health_score=$HEALTH_SCORE"         >> $GITHUB_OUTPUT
+          echo "health_band=$HEALTH_BAND"           >> $GITHUB_OUTPUT
+          echo "apex_coverage=$APEX_COVERAGE"       >> $GITHUB_OUTPUT
           echo "failed_batches=$FAILED_BATCH_COUNT" >> $GITHUB_OUTPUT
-          echo "test_failures=$TEST_FAIL_COUNT"     >> $GITHUB_OUTPUT
+          echo "test_failures=$TEST_FAIL"           >> $GITHUB_OUTPUT
           echo "critical_limits=$CRITICAL_LIMITS"   >> $GITHUB_OUTPUT
           echo "scan_time=$SCAN_TIME"               >> $GITHUB_OUTPUT
-
-      - name: Calculate Health Score
-        if: steps.gate.outputs.run == 'true'
-        id: score
-        shell: bash
-        env:
-          USERNAME: ${{ steps.set-org.outputs.USERNAME }}
-          ENV:      ${{ matrix.environment }}
-        run: |
-          set +e
-          FILE="health_${ENV}.json"
-          safe_int() { echo "$1" | jq -r "$2 // 0" 2>/dev/null || echo '0'; }
-
-          # ── 1. Salesforce Health Check Score (25%) ──────────────────────────
-          RAW_HC=$(sf data query \
-            --query "SELECT Score FROM SecurityHealthCheck LIMIT 1" \
-            --target-org "$USERNAME" --use-tooling-api --json 2>/dev/null)
-          SF_HC_SCORE=$(safe_int "$RAW_HC" '.result.records[0].Score')
-          [[ -z "$SF_HC_SCORE" || "$SF_HC_SCORE" == "null" ]] && SF_HC_SCORE=0
-
-          # ── 2. Apex Coverage Score (20%) ────────────────────────────────────
-          RAW_COV=$(sf data query \
-            --query "SELECT NumLinesCovered, NumLinesUncovered FROM ApexCodeCoverageAggregate" \
-            --target-org "$USERNAME" --use-tooling-api --json 2>/dev/null)
-          echo "DEBUG coverage raw: $(echo "$RAW_COV" | jq '{totalSize: .result.totalSize, first: .result.records[0]}' 2>/dev/null)"
-          COVERAGE=$(echo "$RAW_COV" | jq -r '
-            if (.result.records | length) > 0 then
-              (.result.records | map(.NumLinesCovered // 0) | add) as $covered |
-              (.result.records | map((.NumLinesCovered // 0) + (.NumLinesUncovered // 0)) | add) as $total |
-              if $total > 0 then ($covered * 100 / $total | floor) else 0 end
-            else 0 end
-          ' 2>/dev/null || echo 0)
-          [[ -z "$COVERAGE" || "$COVERAGE" == "null" ]] && COVERAGE=0
-          echo "DEBUG coverage computed: $COVERAGE"
-
-          # ── 3. Test Results Score (15%) ─────────────────────────────────────
-          RAW_PASS=$(sf data query \
-            --query "SELECT COUNT() FROM ApexTestResult WHERE Outcome='Pass' AND CreatedDate = LAST_N_DAYS:7" \
-            --target-org "$USERNAME" --json 2>/dev/null)
-          RAW_FAIL=$(sf data query \
-            --query "SELECT COUNT() FROM ApexTestResult WHERE Outcome='Fail' AND CreatedDate = LAST_N_DAYS:7" \
-            --target-org "$USERNAME" --json 2>/dev/null)
-          PASS_COUNT=$(safe_int "$RAW_PASS" '.result.totalSize')
-          FAIL_COUNT=$(safe_int "$RAW_FAIL" '.result.totalSize')
-          TOTAL_TESTS=$((PASS_COUNT + FAIL_COUNT))
-          if [[ $TOTAL_TESTS -gt 0 ]]; then
-            TEST_SCORE=$(echo "scale=1; $PASS_COUNT * 100 / $TOTAL_TESTS" | bc 2>/dev/null || echo 0)
-          else
-            TEST_SCORE=100
-          fi
-
-          # ── 4. Deployment Success Score (10%) ───────────────────────────────
-          DEPLOY_TOTAL=$(jq '.deploy_history | length' "$FILE" 2>/dev/null || echo 0)
-          DEPLOY_OK=$(jq '[.deploy_history[] | select(.Status=="Succeeded")] | length' "$FILE" 2>/dev/null || echo 0)
-          if [[ $DEPLOY_TOTAL -gt 0 ]]; then
-            DEPLOY_SCORE=$(echo "scale=1; $DEPLOY_OK * 100 / $DEPLOY_TOTAL" | bc 2>/dev/null || echo 0)
-          else
-            DEPLOY_SCORE=100
-          fi
-
-          # ── 5. Org Stability Score (5%) ─────────────────────────────────────
-          FAILED_BATCHES=$(jq '.failed_batches | length' "$FILE" 2>/dev/null || echo 0)
-          STABILITY_DEDUCT=$(( FAILED_BATCHES * 10 ))
-          STABILITY_SCORE=$(( 100 - STABILITY_DEDUCT ))
-          [[ $STABILITY_SCORE -lt 0 ]] && STABILITY_SCORE=0
-
-          # ── Static Analysis (15%) and Security Scan (10%) ───────────────────
-          # These are set to 100 here; override by passing outputs from
-          # Code Analyzer / Gitleaks jobs when chaining workflows.
-          STATIC_SCORE=100
-          SECURITY_SCAN_SCORE=100
-
-          # ── Weighted Score (awk — always available, handles decimals) ────────
-          echo "DEBUG score inputs: hc=$SF_HC_SCORE cov=$COVERAGE ts=$TEST_SCORE st=$STATIC_SCORE ss=$SECURITY_SCAN_SCORE ds=$DEPLOY_SCORE stab=$STABILITY_SCORE"
-          HEALTH_SCORE=$(awk -v hc="$SF_HC_SCORE" -v cov="$COVERAGE" \
-            -v ts="$TEST_SCORE" -v st="$STATIC_SCORE" \
-            -v ss="$SECURITY_SCAN_SCORE" -v ds="$DEPLOY_SCORE" \
-            -v stab="$STABILITY_SCORE" \
-            'BEGIN { printf "%d", (hc*25 + cov*20 + ts*15 + st*15 + ss*10 + ds*10 + stab*5) / 100 }')
-          echo "DEBUG health_score computed: $HEALTH_SCORE"
-
-          # ── Status Band ─────────────────────────────────────────────────────
-          HS_INT=$(printf '%d' "$HEALTH_SCORE" 2>/dev/null || echo 0)
-          if   [[ $HS_INT -ge 95 ]]; then BAND="🟢 Excellent"
-          elif [[ $HS_INT -ge 85 ]]; then BAND="🟢 Healthy"
-          elif [[ $HS_INT -ge 75 ]]; then BAND="🟡 Warning"
-          elif [[ $HS_INT -ge 60 ]]; then BAND="🟠 Risk"
-          else                            BAND="🔴 Critical"
-          fi
-          HEALTH_SCORE=$HS_INT
-
-          # ── Persist score into health JSON ──────────────────────────────────
-          jq --argjson hs   "$HEALTH_SCORE" \
-             --arg     band "$BAND" \
-             --argjson hc   "$SF_HC_SCORE" \
-             --argjson cov  "$COVERAGE" \
-             --argjson ts   "$TEST_SCORE" \
-             --argjson ds   "$DEPLOY_SCORE" \
-             --argjson ss   "$STABILITY_SCORE" \
-             --argjson pass "$PASS_COUNT" \
-             --argjson fail "$FAIL_COUNT" \
-             '.health_score = {
-               score: $hs, band: $band,
-               components: {
-                 sf_health_check: $hc,
-                 apex_coverage:   $cov,
-                 test_success:    $ts,
-                 deployment:      $ds,
-                 org_stability:   $ss
-               },
-               test_counts: { passed: $pass, failed: $fail }
-             }' "$FILE" > tmp_health.json && mv tmp_health.json "$FILE"
-
-          echo "health_score=$HEALTH_SCORE" >> $GITHUB_OUTPUT
-          echo "band=$BAND"                 >> $GITHUB_OUTPUT
-          echo "sf_hc=$SF_HC_SCORE"         >> $GITHUB_OUTPUT
-          echo "coverage=$COVERAGE"         >> $GITHUB_OUTPUT
-          echo "test_score=$TEST_SCORE"      >> $GITHUB_OUTPUT
-          echo "deploy_score=$DEPLOY_SCORE" >> $GITHUB_OUTPUT
-          echo "pass_count=$PASS_COUNT"     >> $GITHUB_OUTPUT
-          echo "fail_count=$FAIL_COUNT"     >> $GITHUB_OUTPUT
-
-          echo ""
-          echo "══════════════════════════════════════════════════════════════"
-          echo "  🏥 ORG HEALTH SCORE: $HEALTH_SCORE / 100  |  $BAND"
-          echo "══════════════════════════════════════════════════════════════"
-          printf "  %-32s %s\n" "Security Health Check (25%)" "$SF_HC_SCORE / 100"
-          printf "  %-32s %s\n" "Apex Coverage (20%)"         "${COVERAGE}%"
-          printf "  %-32s %s\n" "Test Success (15%)"          "${TEST_SCORE}%  ($PASS_COUNT passed / $FAIL_COUNT failed)"
-          printf "  %-32s %s\n" "Static Analysis (15%)"      "${STATIC_SCORE} / 100  (Code Analyzer)"
-          printf "  %-32s %s\n" "Security Scan (10%)"        "${SECURITY_SCAN_SCORE} / 100  (Gitleaks)"
-          printf "  %-32s %s\n" "Deployment Success (10%)"   "${DEPLOY_SCORE}%  ($DEPLOY_OK / $DEPLOY_TOTAL recent)"
-          printf "  %-32s %s\n" "Org Stability (5%)"         "$STABILITY_SCORE / 100"
-          echo "══════════════════════════════════════════════════════════════"
 
       - name: Display Health Results
         if: steps.gate.outputs.run == 'true'
@@ -373,54 +353,67 @@ jobs:
           ENV: ${{ matrix.environment }}
         run: |
           FILE="health_${ENV}.json"
+          [[ ! -f "$FILE" ]] && echo "❌ $FILE not found" && exit 0
 
-          if [[ ! -f "$FILE" ]]; then
-            echo "❌ $FILE not found — collection step failed"
-            exit 0
-          fi
+          SCORE=$(jq -r      '.health_score'              "$FILE")
+          BAND=$(jq -r       '.health_band'               "$FILE")
+          SCAN_TIME=$(jq -r  '.scan_time'                 "$FILE")
+          ORG_NAME=$(jq -r   '.org_info.name   // "N/A"'  "$FILE")
+          ORG_ID=$(jq -r     '.org_info.id     // "N/A"'  "$FILE")
+          INSTANCE=$(jq -r   '.org_info.instanceUrl // "N/A"' "$FILE")
+          COV=$(jq -r        '.scores.apex_coverage'      "$FILE")
+          T_PASS=$(jq -r     '.scores.test_pass'          "$FILE")
+          T_FAIL=$(jq -r     '.scores.test_fail'          "$FILE")
+          T_TOTAL=$(jq -r    '.scores.test_total'         "$FILE")
+          D_RATE=$(jq -r     '.scores.deploy_rate'        "$FILE")
+          D_OK=$(jq -r       '.scores.deploy_success'     "$FILE")
+          D_TOT=$(jq -r      '.scores.deploy_total'       "$FILE")
+          PMD_C=$(jq -r      '.scores.pmd_critical'       "$FILE")
+          PMD_H=$(jq -r      '.scores.pmd_high'           "$FILE")
+          PMD_M=$(jq -r      '.scores.pmd_medium'         "$FILE")
+          APEX_EX=$(jq -r    '.scores.apex_exceptions'    "$FILE")
+          BATCHES=$(jq -r    '.scores.failed_batch_count' "$FILE")
+          CRIT_LIM=$(jq -r   '.scores.critical_limits'    "$FILE")
+          APEX=$(jq -r       '.metadata.apex_classes'     "$FILE")
+          TRIG=$(jq -r       '.metadata.apex_triggers'    "$FILE")
+          FLOWS=$(jq -r      '.metadata.active_flows'     "$FILE")
+          USERS=$(jq -r      '.metadata.active_users'     "$FILE")
 
           echo ""
           echo "╔══════════════════════════════════════════════════════════════╗"
-          printf  "║   🏥  SALESFORCE HEALTH REPORT — %-27s║\n" "$ENV"
+          printf "║   🏥  SALESFORCE HEALTH REPORT — %-27s║\n" "$ENV"
           echo "╚══════════════════════════════════════════════════════════════╝"
           echo ""
-
-          # ── Org Info ──────────────────────────────────────────────────────
-          ORG_ID=$(jq -r    '.org_info.id           // "N/A"' "$FILE")
-          ORG_NAME=$(jq -r  '.org_info.name         // "N/A"' "$FILE")
-          ORG_TYPE=$(jq -r  '.org_info.orgType      // "N/A"' "$FILE")
-          INSTANCE=$(jq -r  '.org_info.instanceUrl  // "N/A"' "$FILE")
-          SCAN_TIME=$(jq -r '.scan_time             // "N/A"' "$FILE")
-
-          echo "📋 ORG INFORMATION"
           echo "  Org Name     : $ORG_NAME"
           echo "  Org ID       : $ORG_ID"
-          echo "  Org Type     : $ORG_TYPE"
           echo "  Instance URL : $INSTANCE"
           echo "  Scanned At   : $SCAN_TIME"
           echo ""
-
-          # ── Metadata Counts ───────────────────────────────────────────────
-          APEX=$(jq -r   '.metadata.apex_classes  // 0' "$FILE")
-          TRIG=$(jq -r   '.metadata.apex_triggers // 0' "$FILE")
-          FLOWS=$(jq -r  '.metadata.active_flows  // 0' "$FILE")
-          USERS=$(jq -r  '.metadata.active_users  // 0' "$FILE")
-
+          echo "══════════════════════════════════════════════════════════════"
+          echo "  🏆 HEALTH SCORE : $SCORE / 100   $BAND"
+          echo "══════════════════════════════════════════════════════════════"
+          echo ""
+          echo "📊 SCORE BREAKDOWN"
+          printf "  %-30s %s\n" "Security Health Check (25%)" "80/100  → 20.00 pts  [placeholder]"
+          printf "  %-30s %s\n" "Apex Coverage (20%)"         "${COV}%  → $(awk "BEGIN {printf \"%.2f\", $COV * 0.20}") pts"
+          printf "  %-30s %s\n" "Test Results (15%)"          "${T_PASS}/${T_TOTAL} passed  → $(awk "BEGIN {if($T_TOTAL>0) printf \"%.2f\", ($T_PASS/$T_TOTAL)*100*0.15; else print \"15.00\"}") pts"
+          printf "  %-30s %s\n" "Code Quality/PMD (15%)"      "Critical:$PMD_C High:$PMD_H Med:$PMD_M"
+          printf "  %-30s %s\n" "Deployment Success (10%)"    "${D_RATE}%  (${D_OK}/${D_TOT})  → $(awk "BEGIN {printf \"%.2f\", $D_RATE * 0.10}") pts"
+          printf "  %-30s %s\n" "Org Stability (5%)"          "Batches:$BATCHES Exceptions:$APEX_EX"
+          printf "  %-30s %s\n" "Governor Limits (10%)"       "Critical:$CRIT_LIM"
+          echo ""
           echo "📦 METADATA COUNTS"
           echo "  Active Apex Classes  : $APEX"
           echo "  Active Apex Triggers : $TRIG"
           echo "  Active Flows         : $FLOWS"
           echo "  Active Users         : $USERS"
           echo ""
-
-          # ── Governor Limits ───────────────────────────────────────────────
           echo "📊 GOVERNOR LIMITS (Top 15 most consumed)"
-          printf "  %-48s %10s %10s %7s %6s\n" "Limit Name" "Remaining" "Max" "Used%" "Status"
-          printf "  %-48s %10s %10s %7s %6s\n" "────────────────────────────────────────────────" "─────────" "───" "─────" "──────"
-
+          printf "  %-48s %10s %10s %7s\n" "Limit Name" "Remaining" "Max" "Used%"
+          printf "  %-48s %10s %10s %7s\n" "────────────────────────────────────────────────" "─────────" "───" "─────"
           jq -r '
             .governor_limits
-            | map(select((.max | type) == "number" and .max > 0))
+            | map(select(.max > 0))
             | sort_by(.remaining / .max)
             | .[0:15][]
             | (.max - .remaining) as $used
@@ -430,91 +423,29 @@ jobs:
             | "  \($badge) \(.name | .[0:46] | . + " " * (46 - length)) \(.remaining | tostring | . + " " * (10 - length)) \(.max | tostring | . + " " * (10 - length)) \($pct)%"
           ' "$FILE" 2>/dev/null || echo "  (no limit data)"
           echo ""
-
-          # ── Failed Batch Jobs ─────────────────────────────────────────────
           BATCH_COUNT=$(jq '.failed_batches | length' "$FILE")
           echo "⚙️  FAILED BATCH JOBS (last 24h): $BATCH_COUNT"
           if [[ $BATCH_COUNT -gt 0 ]]; then
-            jq -r '.failed_batches[] |
-              "  🔴 \(.ApexClass.Name // "Unknown") | Errors: \(.NumberOfErrors)/\(.TotalJobItems) items | \(.CreatedDate // "")"
-            ' "$FILE"
+            jq -r '.failed_batches[] | "  🔴 \(.ApexClass.Name // "Unknown") | Errors: \(.NumberOfErrors)/\(.TotalJobItems) | \(.CreatedDate // "")"' "$FILE"
           else
             echo "  ✅ None"
           fi
           echo ""
-
-          # ── Apex Test Failures ────────────────────────────────────────────
           TEST_COUNT=$(jq '.test_failures | length' "$FILE")
           echo "🧪 APEX TEST FAILURES (last 24h): $TEST_COUNT"
           if [[ $TEST_COUNT -gt 0 ]]; then
-            jq -r '.test_failures[] |
-              "  🔴 \(.ApexClass.Name // "Unknown").\(.MethodName) | \(.Message // "" | .[0:80])"
-            ' "$FILE"
+            jq -r '.test_failures[] | "  🔴 \(.ApexClass.Name // "Unknown").\(.MethodName) | \(.Message // "" | .[0:80])"' "$FILE"
           else
             echo "  ✅ None"
           fi
           echo ""
-
-          # ── Running / Queued Jobs ─────────────────────────────────────────
-          RUNNING_COUNT=$(jq '.running_jobs | length' "$FILE")
-          echo "🔄 RUNNING / QUEUED BATCH JOBS: $RUNNING_COUNT"
-          if [[ $RUNNING_COUNT -gt 0 ]]; then
-            jq -r '.running_jobs[] |
-              "  ⏳ \(.ApexClass.Name // "Unknown") | Status: \(.Status) | Progress: \(.JobItemsProcessed)/\(.TotalJobItems)"
-            ' "$FILE"
-          else
-            echo "  (none)"
-          fi
-          echo ""
-
-          # ── Scheduled Jobs ────────────────────────────────────────────────
-          SCHED_COUNT=$(jq '.scheduled_jobs | length' "$FILE")
-          echo "🕐 SCHEDULED JOBS (WAITING/ACQUIRED): $SCHED_COUNT"
-          if [[ $SCHED_COUNT -gt 0 ]]; then
-            jq -r '.scheduled_jobs[] |
-              "  ✅ \(.CronJobDetail.Name // "Unknown") | State: \(.State) | Next: \(.NextFireTime // "N/A")"
-            ' "$FILE"
-          else
-            echo "  (none)"
-          fi
-          echo ""
-
-          # ── Recent Deployments ────────────────────────────────────────────
           DEPLOY_COUNT=$(jq '.deploy_history | length' "$FILE")
-          echo "🚀 RECENT DEPLOYMENTS (last 5)"
+          echo "🚀 RECENT DEPLOYMENTS (last 10)"
           if [[ $DEPLOY_COUNT -gt 0 ]]; then
-            jq -r '.deploy_history[] |
-              "  \(if .Status == "Succeeded" then "✅" else "❌" end) Status: \(.Status) | Components: \(.NumberComponentsDeployed) | Errors: \(.NumberComponentErrors) | \(.CompletedDate // .StartDate // "")"
-            ' "$FILE"
+            jq -r '.deploy_history[] | "  \(if .Status == "Succeeded" then "✅" else "❌" end) \(.Status) | Components: \(.NumberComponentsDeployed) | Errors: \(.NumberComponentErrors) | \(.CompletedDate // .StartDate // "")"' "$FILE"
           else
-            echo "  (no deploy history available)"
+            echo "  (no deploy history)"
           fi
-          echo ""
-
-          # ── Overall Status ────────────────────────────────────────────────
-          CRITICAL_LIMITS=$(jq '[.governor_limits[] | select(.max > 0 and ((.remaining / .max) < 0.20))] | length' "$FILE" 2>/dev/null || echo 0)
-          HEALTH_SCORE=$(jq -r '.health_score.score // "N/A"' "$FILE")
-          BAND=$(jq -r         '.health_score.band  // "N/A"' "$FILE")
-          SF_HC=$(jq -r        '.health_score.components.sf_health_check // "N/A"' "$FILE")
-          COVERAGE=$(jq -r     '.health_score.components.apex_coverage   // "N/A"' "$FILE")
-          TEST_SCORE=$(jq -r   '.health_score.components.test_success     // "N/A"' "$FILE")
-          DEPLOY_SCORE=$(jq -r '.health_score.components.deployment       // "N/A"' "$FILE")
-          PASS=$(jq -r         '.health_score.test_counts.passed          // 0'     "$FILE")
-          FAIL=$(jq -r         '.health_score.test_counts.failed          // 0'     "$FILE")
-
-          echo "══════════════════════════════════════════════════════════════"
-          echo "  🏥 ORG HEALTH SCORE: $HEALTH_SCORE / 100  |  $BAND"
-          echo "══════════════════════════════════════════════════════════════"
-          printf "  %-32s %s\n" "Security Health Check (25%)" "$SF_HC / 100"
-          printf "  %-32s %s\n" "Apex Coverage (20%)"         "${COVERAGE}%"
-          printf "  %-32s %s\n" "Test Success (15%)"          "${TEST_SCORE}%  ($PASS passed / $FAIL failed)"
-          printf "  %-32s %s\n" "Static Analysis (15%)"      "100 / 100  (Code Analyzer)"
-          printf "  %-32s %s\n" "Security Scan (10%)"        "100 / 100  (Gitleaks)"
-          printf "  %-32s %s\n" "Deployment Success (10%)"   "${DEPLOY_SCORE}%"
-          printf "  %-32s %s\n" "Failed Batches"             "$BATCH_COUNT"
-          printf "  %-32s %s\n" "Test Failures (24h)"        "$TEST_COUNT"
-          printf "  %-32s %s\n" "Critical Governor Limits"   "$CRITICAL_LIMITS"
-          echo "══════════════════════════════════════════════════════════════"
 
       - name: Write Step Summary
         if: steps.gate.outputs.run == 'true'
@@ -525,74 +456,79 @@ jobs:
           FILE="health_${ENV}.json"
           [[ ! -f "$FILE" ]] && echo "❌ No health data for $ENV" >> $GITHUB_STEP_SUMMARY && exit 0
 
-          SCAN_TIME=$(jq -r '.scan_time // "N/A"' "$FILE")
-          APEX=$(jq -r      '.metadata.apex_classes  // 0' "$FILE")
-          TRIG=$(jq -r      '.metadata.apex_triggers // 0' "$FILE")
-          FLOWS=$(jq -r     '.metadata.active_flows  // 0' "$FILE")
-          USERS=$(jq -r     '.metadata.active_users  // 0' "$FILE")
-          BATCH_COUNT=$(jq  '.failed_batches | length' "$FILE")
-          TEST_COUNT=$(jq   '.test_failures  | length' "$FILE")
-          CRITICAL_LIMITS=$(jq '[.governor_limits[] | select(.max > 0 and ((.remaining / .max) < 0.20))] | length' "$FILE" 2>/dev/null || echo 0)
+          SCORE=$(jq -r    '.health_score'              "$FILE")
+          BAND=$(jq -r     '.health_band'               "$FILE")
+          SCAN_TIME=$(jq -r '.scan_time'                "$FILE")
+          COV=$(jq -r      '.scores.apex_coverage'      "$FILE")
+          T_PASS=$(jq -r   '.scores.test_pass'          "$FILE")
+          T_FAIL=$(jq -r   '.scores.test_fail'          "$FILE")
+          T_TOTAL=$(jq -r  '.scores.test_total'         "$FILE")
+          D_RATE=$(jq -r   '.scores.deploy_rate'        "$FILE")
+          D_OK=$(jq -r     '.scores.deploy_success'     "$FILE")
+          D_TOT=$(jq -r    '.scores.deploy_total'       "$FILE")
+          PMD_C=$(jq -r    '.scores.pmd_critical'       "$FILE")
+          PMD_H=$(jq -r    '.scores.pmd_high'           "$FILE")
+          PMD_M=$(jq -r    '.scores.pmd_medium'         "$FILE")
+          APEX_EX=$(jq -r  '.scores.apex_exceptions'    "$FILE")
+          BATCHES=$(jq -r  '.scores.failed_batch_count' "$FILE")
+          CRIT_LIM=$(jq -r '.scores.critical_limits'    "$FILE")
+          APEX=$(jq -r     '.metadata.apex_classes'     "$FILE")
+          TRIG=$(jq -r     '.metadata.apex_triggers'    "$FILE")
+          FLOWS=$(jq -r    '.metadata.active_flows'     "$FILE")
+          USERS=$(jq -r    '.metadata.active_users'     "$FILE")
+          BATCH_COUNT=$(jq '.failed_batches | length'   "$FILE")
+          TEST_COUNT=$(jq  '.test_failures  | length'   "$FILE")
 
-          HEALTH_SCORE=$(jq -r '.health_score.score // 0'  "$FILE")
-          BAND=$(jq -r         '.health_score.band  // "N/A"' "$FILE")
-          SF_HC=$(jq -r        '.health_score.components.sf_health_check // 0' "$FILE")
-          COVERAGE=$(jq -r     '.health_score.components.apex_coverage   // 0' "$FILE")
-          TEST_SCORE=$(jq -r   '.health_score.components.test_success     // 0' "$FILE")
-          DEPLOY_SCORE=$(jq -r '.health_score.components.deployment       // 0' "$FILE")
-          PASS=$(jq -r         '.health_score.test_counts.passed          // 0' "$FILE")
-          FAIL=$(jq -r         '.health_score.test_counts.failed          // 0' "$FILE")
-
-          # ── Derive verdict and donut slice from weighted health score ───────────
-          HS_INT=$(printf '%d' "$HEALTH_SCORE" 2>/dev/null || echo 0)
-          if   [[ $HS_INT -ge 85 ]]; then VERDICT="🟢 STABLE"
-          elif [[ $HS_INT -ge 60 ]]; then VERDICT="🟡 MONITOR"
-          else                            VERDICT="🔴 CRITICAL"
-          fi
+          # Score bar chart (horizontal bar showing score/100)
+          BAR_CFG=$(printf '{"type":"horizontalBar","data":{"labels":["Security (25%)","Apex Coverage (20%)","Test Results (15%)","Code Quality (15%)","Deployment (10%)","Org Stability (5%)","Gov Limits (10%)"],"datasets":[{"label":"Score","data":[20,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f],"backgroundColor":["#9966ff","#4bc0c0","#36a2eb","#ff9f40","#ffcd56","#ff6384","#c9cbcf"]}]},"options":{"indexAxis":"y","plugins":{"title":{"display":true,"text":"Health Score Breakdown — %s (%s/100)"},"legend":{"display":false}},"scales":{"x":{"min":0,"max":25}}}}' \
+            "$(awk "BEGIN {printf \"%.1f\", $COV * 0.20}")" \
+            "$(awk "BEGIN {if($T_TOTAL>0) printf \"%.1f\", ($T_PASS/$T_TOTAL)*100*0.15; else print \"15.0\"}")" \
+            "$(awk "BEGIN {v=100-($PMD_C*5)-($PMD_H*2); if(v<0)v=0; printf \"%.1f\", v*0.15}")" \
+            "$(awk "BEGIN {printf \"%.1f\", $D_RATE * 0.10}")" \
+            "$(awk "BEGIN {v=100-($BATCHES*10)-($APEX_EX*5); if(v<0)v=0; printf \"%.1f\", v*0.05}")" \
+            "$(awk "BEGIN {v=100-($CRIT_LIM*10); if(v<0)v=0; printf \"%.1f\", v*0.10}")" \
+            "$ENV" "$SCORE")
+          BAR_URL="https://quickchart.io/chart?w=500&h=250&c=$(printf '%s' "$BAR_CFG" | jq -sRr @uri 2>/dev/null || printf '%s' "$BAR_CFG" | sed 's/ /%20/g;s/{/%7B/g;s/}/%7D/g;s/"/%22/g;s/,/%2C/g;s/:/%3A/g;s/\[/%5B/g;s/\]/%5D/g')"
 
           {
-            echo "## 🏥 Health Check — $ENV | $BAND"
+            echo "## 🏥 Salesforce Health Check — $ENV"
             echo "_Scanned at: $SCAN_TIME_"
             echo ""
-
-            # ── Doughnut chart: driven by weighted health score ─────────────────────
-            STABLE=0; MONITOR=0; CRITICAL_C=0
-            if   [[ $HS_INT -ge 85 ]]; then STABLE=1
-            elif [[ $HS_INT -ge 60 ]]; then MONITOR=1
-            else                            CRITICAL_C=1
-            fi
-            DONUT_CFG=$(printf '{"type":"doughnut","data":{"labels":["Stable","Monitor","Critical"],"datasets":[{"data":[%s,%s,%s],"backgroundColor":["#36a2eb","#ffcd56","#ff6384"]}]},"options":{"plugins":{"title":{"display":true,"text":"Health Status — %s"},"legend":{"position":"bottom"}}}}' "$STABLE" "$MONITOR" "$CRITICAL_C" "$ENV")
-            DONUT_URL="https://quickchart.io/chart?w=300&h=200&c=$(jq -rn --argjson c "$DONUT_CFG" '$c' | python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.stdin.read()))' 2>/dev/null || printf '%s' "$DONUT_CFG" | sed 's/ /%20/g;s/{/%7B/g;s/}/%7D/g;s/"/%22/g;s/,/%2C/g;s/:/%3A/g;s/\[/%5B/g;s/\]/%5D/g')"
-            echo "![Health Status Chart](${DONUT_URL})"
+            echo "### 🏆 Overall Health Score: \`$SCORE / 100\` — $BAND"
             echo ""
-
-            # ── Bar chart: metadata counts ────────────────────────────────────────
-            BAR_CFG=$(printf '{"type":"bar","data":{"labels":["Apex Classes","Triggers","Flows","Users"],"datasets":[{"label":"%s Metadata","data":[%s,%s,%s,%s],"backgroundColor":["#4bc0c0","#9966ff","#ff9f40","#36a2eb"]}]},"options":{"plugins":{"title":{"display":true,"text":"Metadata Counts — %s"},"legend":{"display":false}},"scales":{"y":{"beginAtZero":true}}}}' "$ENV" "$APEX" "$TRIG" "$FLOWS" "$USERS" "$ENV")
-            BAR_URL="https://quickchart.io/chart?w=400&h=200&c=$(printf '%s' "$BAR_CFG" | python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.stdin.read()))' 2>/dev/null || printf '%s' "$BAR_CFG" | sed 's/ /%20/g;s/{/%7B/g;s/}/%7D/g;s/"/%22/g;s/,/%2C/g;s/:/%3A/g;s/\[/%5B/g;s/\]/%5D/g')"
-            echo "![Metadata Chart](${BAR_URL})"
+            echo "![Health Score Breakdown](${BAR_URL})"
             echo ""
-            echo "### 🏥 Health Score"
-            echo "| Component | Score | Weight |"
+            echo "### 📊 Score Breakdown"
+            echo "| Category | Weight | Raw Value | Points |"
+            echo "|---|---|---|---|"
+            echo "| 🔒 Security Health Check | 25% | 80/100 _(placeholder)_ | 20.00 |"
+            echo "| 🧪 Apex Coverage | 20% | ${COV}% | $(awk "BEGIN {printf \"%.2f\", $COV * 0.20}") |"
+            echo "| ✅ Test Results | 15% | ${T_PASS}/${T_TOTAL} passed | $(awk "BEGIN {if($T_TOTAL>0) printf \"%.2f\", ($T_PASS/$T_TOTAL)*100*0.15; else print \"15.00\"}") |"
+            echo "| 🔍 Code Quality (PMD) | 15% | Critical:$PMD_C High:$PMD_H Med:$PMD_M | $(awk "BEGIN {v=100-($PMD_C*5)-($PMD_H*2); if(v<0)v=0; printf \"%.2f\", v*0.15}") |"
+            echo "| 🚀 Deployment Success | 10% | ${D_RATE}% (${D_OK}/${D_TOT}) | $(awk "BEGIN {printf \"%.2f\", $D_RATE * 0.10}") |"
+            echo "| ⚙️ Org Stability | 5% | Batches:$BATCHES Exceptions:$APEX_EX | $(awk "BEGIN {v=100-($BATCHES*10)-($APEX_EX*5); if(v<0)v=0; printf \"%.2f\", v*0.05}") |"
+            echo "| 📊 Governor Limits | 10% | Critical:$CRIT_LIM | $(awk "BEGIN {v=100-($CRIT_LIM*10); if(v<0)v=0; printf \"%.2f\", v*0.10}") |"
+            echo ""
+            echo "### 📋 Health Status Bands"
+            echo "| Band | Score Range | Status |"
             echo "|---|---|---|"
-            echo "| **Overall Health Score** | **$HEALTH_SCORE / 100** | **$BAND** |"
-            echo "| Security Health Check | $SF_HC / 100 | 25% |"
-            echo "| Apex Coverage | ${COVERAGE}% | 20% |"
-            echo "| Test Success | ${TEST_SCORE}% ($PASS passed / $FAIL failed) | 15% |"
-            echo "| Static Analysis | 100 / 100 | 15% |"
-            echo "| Security Scan | 100 / 100 | 10% |"
-            echo "| Deployment Success | ${DEPLOY_SCORE}% | 10% |"
-            echo "| Org Stability | — | 5% |"
+            echo "| 🟢 Excellent | 95–100 | $([ "$SCORE" -ge 95 ] && echo "**← YOU ARE HERE**" || echo "") |"
+            echo "| 🟢 Healthy   | 85–94  | $([ "$SCORE" -ge 85 ] && [ "$SCORE" -lt 95 ] && echo "**← YOU ARE HERE**" || echo "") |"
+            echo "| 🟡 Warning   | 75–84  | $([ "$SCORE" -ge 75 ] && [ "$SCORE" -lt 85 ] && echo "**← YOU ARE HERE**" || echo "") |"
+            echo "| 🟠 Risk      | 60–74  | $([ "$SCORE" -ge 60 ] && [ "$SCORE" -lt 75 ] && echo "**← YOU ARE HERE**" || echo "") |"
+            echo "| 🔴 Critical  | < 60   | $([ "$SCORE" -lt 60 ] && echo "**← YOU ARE HERE**" || echo "") |"
             echo ""
-            echo "### 📊 Org Metrics"
+            echo "### 📦 Metadata Counts"
             echo "| Metric | Value |"
             echo "|---|---|"
             echo "| Active Apex Classes | $APEX |"
             echo "| Active Apex Triggers | $TRIG |"
             echo "| Active Flows | $FLOWS |"
             echo "| Active Users | $USERS |"
-            echo "| Failed Batch Jobs (24h) | $BATCH_COUNT |"
+            echo "| Apex Exceptions (24h) | $APEX_EX |"
+            echo "| Failed Batch Jobs (24h) | $BATCHES |"
             echo "| Apex Test Failures (24h) | $TEST_COUNT |"
-            echo "| Critical Governor Limits | $CRITICAL_LIMITS |"
+            echo "| Critical Governor Limits | $CRIT_LIM |"
             echo ""
             echo "### 📊 Governor Limits (Top 10 most consumed)"
             echo "| Limit | Remaining | Max | Used% | Status |"
@@ -662,73 +598,96 @@ jobs:
           SCAN_TIME=$(TZ='Asia/Kolkata' date +'%d-%m-%Y %H:%M IST')
           OVERALL="healthy"
 
-          HTML="<h2>🏥 Salesforce Org Health Report — ${SCAN_TIME}</h2>"
-
-          # ── Bar chart: failed batches + test failures per env ────────────────
+          # ── Collect scores per env for chart ────────────────────────────────
+          DEV_SCORE=0; QA_SCORE=0; UAT_SCORE=0; PROD_SCORE=0
           DEV_BATCH=0; QA_BATCH=0; UAT_BATCH=0; PROD_BATCH=0
           DEV_TEST=0;  QA_TEST=0;  UAT_TEST=0;  PROD_TEST=0
+
           for ENV in DEV QA UAT PRODUCTION; do
             FILE="health_${ENV}.json"
             [[ ! -f "$FILE" ]] && continue
-            B=$(jq '.failed_batches | length' "$FILE")
-            T=$(jq '.test_failures  | length' "$FILE")
+            S=$(jq -r '.health_score // 0'           "$FILE")
+            B=$(jq    '.failed_batches | length'      "$FILE")
+            T=$(jq    '.test_failures  | length'      "$FILE")
             case "$ENV" in
-              DEV)        DEV_BATCH=$B;  DEV_TEST=$T  ;;
-              QA)         QA_BATCH=$B;   QA_TEST=$T   ;;
-              UAT)        UAT_BATCH=$B;  UAT_TEST=$T  ;;
-              PRODUCTION) PROD_BATCH=$B; PROD_TEST=$T ;;
+              DEV)        DEV_SCORE=$S;  DEV_BATCH=$B;  DEV_TEST=$T  ;;
+              QA)         QA_SCORE=$S;   QA_BATCH=$B;   QA_TEST=$T   ;;
+              UAT)        UAT_SCORE=$S;  UAT_BATCH=$B;  UAT_TEST=$T  ;;
+              PRODUCTION) PROD_SCORE=$S; PROD_BATCH=$B; PROD_TEST=$T ;;
             esac
           done
-          BAR_CFG=$(printf '{"type":"bar","data":{"labels":["DEV","QA","UAT","PRODUCTION"],"datasets":[{"label":"Failed Batches","data":[%s,%s,%s,%s],"backgroundColor":"#ff6384"},{"label":"Test Failures","data":[%s,%s,%s,%s],"backgroundColor":"#ffcd56"}]},"options":{"plugins":{"title":{"display":true,"text":"Failures by Environment (last 24h)"},"legend":{"position":"bottom"}},"scales":{"y":{"beginAtZero":true,"ticks":{"stepSize":1}}}}}' \
+
+          # ── Health score bar chart across all envs ───────────────────────────
+          SCORE_CFG=$(printf '{"type":"bar","data":{"labels":["DEV","QA","UAT","PRODUCTION"],"datasets":[{"label":"Health Score","data":[%s,%s,%s,%s],"backgroundColor":["#4bc0c0","#36a2eb","#9966ff","#ff9f40"]}]},"options":{"plugins":{"title":{"display":true,"text":"Org Health Score by Environment"},"legend":{"display":false}},"scales":{"y":{"min":0,"max":100,"ticks":{"stepSize":10}}}}}' \
+            "$DEV_SCORE" "$QA_SCORE" "$UAT_SCORE" "$PROD_SCORE")
+          SCORE_URL="https://quickchart.io/chart?w=500&h=250&c=$(printf '%s' "$SCORE_CFG" | jq -sRr @uri 2>/dev/null || printf '%s' "$SCORE_CFG" | sed 's/ /%20/g;s/{/%7B/g;s/}/%7D/g;s/"/%22/g;s/,/%2C/g;s/:/%3A/g;s/\[/%5B/g;s/\]/%5D/g')"
+
+          # ── Failures bar chart ───────────────────────────────────────────────
+          FAIL_CFG=$(printf '{"type":"bar","data":{"labels":["DEV","QA","UAT","PRODUCTION"],"datasets":[{"label":"Failed Batches","data":[%s,%s,%s,%s],"backgroundColor":"#ff6384"},{"label":"Test Failures","data":[%s,%s,%s,%s],"backgroundColor":"#ffcd56"}]},"options":{"plugins":{"title":{"display":true,"text":"Failures by Environment (last 24h)"},"legend":{"position":"bottom"}},"scales":{"y":{"beginAtZero":true,"ticks":{"stepSize":1}}}}}' \
             "$DEV_BATCH" "$QA_BATCH" "$UAT_BATCH" "$PROD_BATCH" \
             "$DEV_TEST"  "$QA_TEST"  "$UAT_TEST"  "$PROD_TEST")
-          BAR_URL="https://quickchart.io/chart?w=500&h=250&c=$(printf '%s' "$BAR_CFG" | jq -sRr @uri 2>/dev/null || printf '%s' "$BAR_CFG" | sed 's/ /%20/g;s/{/%7B/g;s/}/%7D/g;s/"/%22/g;s/,/%2C/g;s/:/%3A/g;s/\[/%5B/g;s/\]/%5D/g')"
-          HTML+="<p><img src='${BAR_URL}' alt='Failures by Environment' style='max-width:100%;'/></p>"
+          FAIL_URL="https://quickchart.io/chart?w=500&h=250&c=$(printf '%s' "$FAIL_CFG" | jq -sRr @uri 2>/dev/null || printf '%s' "$FAIL_CFG" | sed 's/ /%20/g;s/{/%7B/g;s/}/%7D/g;s/"/%22/g;s/,/%2C/g;s/:/%3A/g;s/\[/%5B/g;s/\]/%5D/g')"
+
+          HTML="<h2>🏥 Salesforce Org Health Report — ${SCAN_TIME}</h2>"
+          HTML+="<p><img src='${SCORE_URL}' alt='Health Score by Environment' style='max-width:100%;'/></p>"
+          HTML+="<p><img src='${FAIL_URL}'  alt='Failures by Environment'     style='max-width:100%;'/></p>"
+
           HTML+="<table border='1' cellpadding='6' cellspacing='0' style='border-collapse:collapse;font-family:Arial,sans-serif;'>"
-          HTML+="<tr style='background:#f0f0f0;'><th>Environment</th><th>Health Score</th><th>SF Health Check</th><th>Coverage</th><th>Apex Classes</th><th>Triggers</th><th>Flows</th><th>Users</th><th>Failed Batches</th><th>Test Failures</th><th>Critical Limits</th><th>Status</th></tr>"
+          HTML+="<tr style='background:#f0f0f0;'><th>Environment</th><th>Health Score</th><th>Band</th><th>Coverage</th><th>Tests</th><th>Deploy Rate</th><th>PMD Critical</th><th>Failed Batches</th><th>Test Failures</th><th>Crit Limits</th></tr>"
 
           for ENV in DEV QA UAT PRODUCTION; do
             FILE="health_${ENV}.json"
             if [[ ! -f "$FILE" ]]; then
-              HTML+="<tr><td>$ENV</td><td colspan='8'>⚠️ No data</td></tr>"
+              HTML+="<tr><td>$ENV</td><td colspan='9'>⚠️ No data</td></tr>"
               continue
             fi
 
-            APEX=$(jq -r      '.metadata.apex_classes  // 0' "$FILE")
-            TRIG=$(jq -r      '.metadata.apex_triggers // 0' "$FILE")
-            FLOWS=$(jq -r     '.metadata.active_flows  // 0' "$FILE")
-            USERS=$(jq -r     '.metadata.active_users  // 0' "$FILE")
-            BATCH=$(jq        '.failed_batches | length' "$FILE")
-            TESTS=$(jq        '.test_failures  | length' "$FILE")
-            CRIT=$(jq '[.governor_limits[] | select(.max > 0 and ((.remaining / .max) < 0.20))] | length' "$FILE" 2>/dev/null || echo 0)
-            HS=$(jq -r        '.health_score.score // "N/A"' "$FILE")
-            HBAND=$(jq -r     '.health_score.band  // "N/A"' "$FILE")
-            HCOV=$(jq -r      '.health_score.components.apex_coverage   // "N/A"' "$FILE")
-            HHC=$(jq -r       '.health_score.components.sf_health_check // "N/A"' "$FILE")
+            SCORE=$(jq -r  '.health_score'              "$FILE")
+            BAND=$(jq -r   '.health_band'               "$FILE")
+            COV=$(jq -r    '.scores.apex_coverage'      "$FILE")
+            T_P=$(jq -r    '.scores.test_pass'          "$FILE")
+            T_T=$(jq -r    '.scores.test_total'         "$FILE")
+            D_R=$(jq -r    '.scores.deploy_rate'        "$FILE")
+            PMD=$(jq -r    '.scores.pmd_critical'       "$FILE")
+            BATCH=$(jq     '.failed_batches | length'   "$FILE")
+            TESTS=$(jq     '.test_failures  | length'   "$FILE")
+            CRIT=$(jq -r   '.scores.critical_limits'    "$FILE")
 
-            HS_VAL=$(jq -r '.health_score.score // 0' "$FILE")
-            HS_N=$(printf '%d' "$HS_VAL" 2>/dev/null || echo 0)
-            if   [[ $HS_N -ge 85 ]]; then BADGE="🟢 STABLE"
-            elif [[ $HS_N -ge 60 ]]; then BADGE="🟡 MONITOR"; [[ "$OVERALL" != "critical" ]] && OVERALL="warning"
-            else                          BADGE="🔴 CRITICAL"; OVERALL="critical"
+            if   [[ $SCORE -ge 95 ]]; then ROW_COLOR="#e6ffe6"
+            elif [[ $SCORE -ge 85 ]]; then ROW_COLOR="#f0fff0"
+            elif [[ $SCORE -ge 75 ]]; then ROW_COLOR="#fffde6"
+            elif [[ $SCORE -ge 60 ]]; then ROW_COLOR="#fff3e0"
+            else                           ROW_COLOR="#ffe6e6"
             fi
 
-            HTML+="<tr><td><strong>$ENV</strong></td><td><strong>$HS / 100</strong><br/><small>$HBAND</small></td><td>$HHC</td><td>${HCOV}%</td><td>$APEX</td><td>$TRIG</td><td>$FLOWS</td><td>$USERS</td><td>$BATCH</td><td>$TESTS</td><td>$CRIT</td><td>$BADGE</td></tr>"
-          done
+            HTML+="<tr style='background:${ROW_COLOR};'>"
+            HTML+="<td><strong>$ENV</strong></td>"
+            HTML+="<td><strong>${SCORE}/100</strong></td>"
+            HTML+="<td>${BAND}</td>"
+            HTML+="<td>${COV}%</td>"
+            HTML+="<td>${T_P}/${T_T}</td>"
+            HTML+="<td>${D_R}%</td>"
+            HTML+="<td>${PMD}</td>"
+            HTML+="<td>${BATCH}</td>"
+            HTML+="<td>${TESTS}</td>"
+            HTML+="<td>${CRIT}</td>"
+            HTML+="</tr>"
 
+            if   [[ $SCORE -lt 60 ]]; then OVERALL="critical"
+            elif [[ $SCORE -lt 75 && "$OVERALL" != "critical" ]]; then OVERALL="risk"
+            elif [[ $SCORE -lt 85 && "$OVERALL" != "critical" && "$OVERALL" != "risk" ]]; then OVERALL="warning"
+            fi
+          done
           HTML+="</table>"
 
-          # ── Failure details per env ──────────────────────────────────────
+          # ── Failure details per env ──────────────────────────────────────────
           for ENV in DEV QA UAT PRODUCTION; do
             FILE="health_${ENV}.json"
             [[ ! -f "$FILE" ]] && continue
-
             BATCH=$(jq '.failed_batches | length' "$FILE")
             TESTS=$(jq '.test_failures  | length' "$FILE")
-
             if [[ $BATCH -gt 0 || $TESTS -gt 0 ]]; then
               HTML+="<h3>&#x26A0;&#xFE0F; $ENV — Failure Details</h3>"
-
               if [[ $BATCH -gt 0 ]]; then
                 HTML+="<p><strong>&#x2699;&#xFE0F; Failed Batch Jobs (last 24h)</strong></p>"
                 HTML+="<table border='1' cellpadding='5' cellspacing='0' style='border-collapse:collapse;font-family:Arial,sans-serif;'>"
@@ -736,7 +695,6 @@ jobs:
                 HTML+=$(jq -r '.failed_batches[] | "<tr><td>\(.ApexClass.Name // "Unknown")</td><td>\(.NumberOfErrors)</td><td>\(.TotalJobItems)</td><td>\(.CreatedDate // "")</td></tr>"' "$FILE")
                 HTML+="</table>"
               fi
-
               if [[ $TESTS -gt 0 ]]; then
                 HTML+="<p><strong>&#x1F9EA; Apex Test Failures (last 24h)</strong></p>"
                 HTML+="<table border='1' cellpadding='5' cellspacing='0' style='border-collapse:collapse;font-family:Arial,sans-serif;'>"
@@ -746,15 +704,16 @@ jobs:
               fi
             fi
           done
+
           HTML+="<p><a href='https://github.com/${REPO}/actions/runs/${RUN_ID}'>View full run logs →</a></p>"
           HTML+="<p style='font-size:11px;color:#888;'>⚠️ Automated health report. Do not reply.</p>"
-
           echo "$HTML" > email_body.html
 
           case "$OVERALL" in
             critical) echo "subject_status=🔴 CRITICAL" >> $GITHUB_OUTPUT ;;
-            warning)  echo "subject_status=🟡 MONITOR"  >> $GITHUB_OUTPUT ;;
-            *)        echo "subject_status=🟢 STABLE"   >> $GITHUB_OUTPUT ;;
+            risk)     echo "subject_status=🟠 RISK"     >> $GITHUB_OUTPUT ;;
+            warning)  echo "subject_status=🟡 WARNING"  >> $GITHUB_OUTPUT ;;
+            *)        echo "subject_status=🟢 HEALTHY"  >> $GITHUB_OUTPUT ;;
           esac
 
       - name: Send Email
