@@ -456,38 +456,46 @@ jobs:
           FILE="health_${ENV}.json"
           [[ ! -f "$FILE" ]] && echo "❌ No health data for $ENV" >> $GITHUB_STEP_SUMMARY && exit 0
 
-          SCORE=$(jq -r    '.health_score'              "$FILE")
-          BAND=$(jq -r     '.health_band'               "$FILE")
-          SCAN_TIME=$(jq -r '.scan_time'                "$FILE")
-          COV=$(jq -r      '.scores.apex_coverage'      "$FILE")
-          T_PASS=$(jq -r   '.scores.test_pass'          "$FILE")
-          T_FAIL=$(jq -r   '.scores.test_fail'          "$FILE")
-          T_TOTAL=$(jq -r  '.scores.test_total'         "$FILE")
-          D_RATE=$(jq -r   '.scores.deploy_rate'        "$FILE")
-          D_OK=$(jq -r     '.scores.deploy_success'     "$FILE")
-          D_TOT=$(jq -r    '.scores.deploy_total'       "$FILE")
-          PMD_C=$(jq -r    '.scores.pmd_critical'       "$FILE")
-          PMD_H=$(jq -r    '.scores.pmd_high'           "$FILE")
-          PMD_M=$(jq -r    '.scores.pmd_medium'         "$FILE")
-          APEX_EX=$(jq -r  '.scores.apex_exceptions'    "$FILE")
-          BATCHES=$(jq -r  '.scores.failed_batch_count' "$FILE")
-          CRIT_LIM=$(jq -r '.scores.critical_limits'    "$FILE")
-          APEX=$(jq -r     '.metadata.apex_classes'     "$FILE")
-          TRIG=$(jq -r     '.metadata.apex_triggers'    "$FILE")
-          FLOWS=$(jq -r    '.metadata.active_flows'     "$FILE")
-          USERS=$(jq -r    '.metadata.active_users'     "$FILE")
-          BATCH_COUNT=$(jq '.failed_batches | length'   "$FILE")
-          TEST_COUNT=$(jq  '.test_failures  | length'   "$FILE")
+          SCORE=$(jq -r    '.health_score              // "0"' "$FILE")
+          BAND=$(jq -r     '.health_band               // "N/A"' "$FILE")
+          SCAN_TIME=$(jq -r '.scan_time                // "N/A"' "$FILE")
+          COV=$(jq -r      '.scores.apex_coverage      // "0"' "$FILE")
+          T_PASS=$(jq -r   '.scores.test_pass          // 0' "$FILE")
+          T_FAIL=$(jq -r   '.scores.test_fail          // 0' "$FILE")
+          T_TOTAL=$(jq -r  '.scores.test_total         // 0' "$FILE")
+          D_RATE=$(jq -r   '.scores.deploy_rate        // "0"' "$FILE")
+          D_OK=$(jq -r     '.scores.deploy_success     // 0' "$FILE")
+          D_TOT=$(jq -r    '.scores.deploy_total       // 0' "$FILE")
+          PMD_C=$(jq -r    '.scores.pmd_critical       // 0' "$FILE")
+          PMD_H=$(jq -r    '.scores.pmd_high           // 0' "$FILE")
+          PMD_M=$(jq -r    '.scores.pmd_medium         // 0' "$FILE")
+          APEX_EX=$(jq -r  '.scores.apex_exceptions    // 0' "$FILE")
+          BATCHES=$(jq -r  '.scores.failed_batch_count // 0' "$FILE")
+          CRIT_LIM=$(jq -r '.scores.critical_limits    // 0' "$FILE")
+          APEX=$(jq -r     '.metadata.apex_classes     // 0' "$FILE")
+          TRIG=$(jq -r     '.metadata.apex_triggers    // 0' "$FILE")
+          FLOWS=$(jq -r    '.metadata.active_flows     // 0' "$FILE")
+          USERS=$(jq -r    '.metadata.active_users     // 0' "$FILE")
+          BATCH_COUNT=$(jq '.failed_batches | length'        "$FILE")
+          TEST_COUNT=$(jq  '.test_failures  | length'        "$FILE")
 
-          # Score bar chart (horizontal bar showing score/100)
-          BAR_CFG=$(printf '{"type":"horizontalBar","data":{"labels":["Security (25%)","Apex Coverage (20%)","Test Results (15%)","Code Quality (15%)","Deployment (10%)","Org Stability (5%)","Gov Limits (10%)"],"datasets":[{"label":"Score","data":[20,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f],"backgroundColor":["#9966ff","#4bc0c0","#36a2eb","#ff9f40","#ffcd56","#ff6384","#c9cbcf"]}]},"options":{"indexAxis":"y","plugins":{"title":{"display":true,"text":"Health Score Breakdown — %s (%s/100)"},"legend":{"display":false}},"scales":{"x":{"min":0,"max":25}}}}' \
-            "$(awk "BEGIN {printf \"%.1f\", $COV * 0.20}")" \
-            "$(awk "BEGIN {if($T_TOTAL>0) printf \"%.1f\", ($T_PASS/$T_TOTAL)*100*0.15; else print \"15.0\"}")" \
-            "$(awk "BEGIN {v=100-($PMD_C*5)-($PMD_H*2); if(v<0)v=0; printf \"%.1f\", v*0.15}")" \
-            "$(awk "BEGIN {printf \"%.1f\", $D_RATE * 0.10}")" \
-            "$(awk "BEGIN {v=100-($BATCHES*10)-($APEX_EX*5); if(v<0)v=0; printf \"%.1f\", v*0.05}")" \
-            "$(awk "BEGIN {v=100-($CRIT_LIM*10); if(v<0)v=0; printf \"%.1f\", v*0.10}")" \
-            "$ENV" "$SCORE")
+          # Pre-compute all awk values to avoid nested quoting issues in printf
+          P_COV=$(awk    "BEGIN {v=${COV}+0;    if(v>100)v=100; printf \"%.1f\", v*0.20}")
+          P_TEST=$(awk   "BEGIN {t=${T_TOTAL}+0; p=${T_PASS}+0; if(t>0) printf \"%.1f\", (p/t)*100*0.15; else printf \"15.0\"}")
+          P_PMD=$(awk    "BEGIN {v=100-(${PMD_C}+0)*5-(${PMD_H}+0)*2; if(v<0)v=0; printf \"%.1f\", v*0.15}")
+          P_DEP=$(awk    "BEGIN {printf \"%.1f\", (${D_RATE}+0)*0.10}")
+          P_STAB=$(awk   "BEGIN {v=100-(${BATCHES}+0)*10-(${APEX_EX}+0)*5; if(v<0)v=0; printf \"%.1f\", v*0.05}")
+          P_GOV=$(awk    "BEGIN {v=100-(${CRIT_LIM}+0)*10; if(v<0)v=0; printf \"%.1f\", v*0.10}")
+          P_COV2=$(awk   "BEGIN {v=${COV}+0;    if(v>100)v=100; printf \"%.2f\", v*0.20}")
+          P_TEST2=$(awk  "BEGIN {t=${T_TOTAL}+0; p=${T_PASS}+0; if(t>0) printf \"%.2f\", (p/t)*100*0.15; else printf \"15.00\"}")
+          P_PMD2=$(awk   "BEGIN {v=100-(${PMD_C}+0)*5-(${PMD_H}+0)*2; if(v<0)v=0; printf \"%.2f\", v*0.15}")
+          P_DEP2=$(awk   "BEGIN {printf \"%.2f\", (${D_RATE}+0)*0.10}")
+          P_STAB2=$(awk  "BEGIN {v=100-(${BATCHES}+0)*10-(${APEX_EX}+0)*5; if(v<0)v=0; printf \"%.2f\", v*0.05}")
+          P_GOV2=$(awk   "BEGIN {v=100-(${CRIT_LIM}+0)*10; if(v<0)v=0; printf \"%.2f\", v*0.10}")
+
+          # Score bar chart
+          BAR_CFG=$(printf '{"type":"bar","data":{"labels":["Security (25%%)","Apex Coverage (20%%)","Test Results (15%%)","Code Quality (15%%)","Deployment (10%%)","Org Stability (5%%)","Gov Limits (10%%)"],"datasets":[{"label":"Score","data":[20,%s,%s,%s,%s,%s,%s],"backgroundColor":["#9966ff","#4bc0c0","#36a2eb","#ff9f40","#ffcd56","#ff6384","#c9cbcf"]}]},"options":{"indexAxis":"y","plugins":{"title":{"display":true,"text":"Health Score Breakdown - %s (%s/100)"},"legend":{"display":false}},"scales":{"x":{"min":0,"max":25}}}}' \
+            "$P_COV" "$P_TEST" "$P_PMD" "$P_DEP" "$P_STAB" "$P_GOV" "$ENV" "$SCORE")
           BAR_URL="https://quickchart.io/chart?w=500&h=250&c=$(printf '%s' "$BAR_CFG" | jq -sRr @uri 2>/dev/null || printf '%s' "$BAR_CFG" | sed 's/ /%20/g;s/{/%7B/g;s/}/%7D/g;s/"/%22/g;s/,/%2C/g;s/:/%3A/g;s/\[/%5B/g;s/\]/%5D/g')"
 
           {
@@ -502,12 +510,12 @@ jobs:
             echo "| Category | Weight | Raw Value | Points |"
             echo "|---|---|---|---|"
             echo "| 🔒 Security Health Check | 25% | 80/100 _(placeholder)_ | 20.00 |"
-            echo "| 🧪 Apex Coverage | 20% | ${COV}% | $(awk "BEGIN {printf \"%.2f\", $COV * 0.20}") |"
-            echo "| ✅ Test Results | 15% | ${T_PASS}/${T_TOTAL} passed | $(awk "BEGIN {if($T_TOTAL>0) printf \"%.2f\", ($T_PASS/$T_TOTAL)*100*0.15; else print \"15.00\"}") |"
-            echo "| 🔍 Code Quality (PMD) | 15% | Critical:$PMD_C High:$PMD_H Med:$PMD_M | $(awk "BEGIN {v=100-($PMD_C*5)-($PMD_H*2); if(v<0)v=0; printf \"%.2f\", v*0.15}") |"
-            echo "| 🚀 Deployment Success | 10% | ${D_RATE}% (${D_OK}/${D_TOT}) | $(awk "BEGIN {printf \"%.2f\", $D_RATE * 0.10}") |"
-            echo "| ⚙️ Org Stability | 5% | Batches:$BATCHES Exceptions:$APEX_EX | $(awk "BEGIN {v=100-($BATCHES*10)-($APEX_EX*5); if(v<0)v=0; printf \"%.2f\", v*0.05}") |"
-            echo "| 📊 Governor Limits | 10% | Critical:$CRIT_LIM | $(awk "BEGIN {v=100-($CRIT_LIM*10); if(v<0)v=0; printf \"%.2f\", v*0.10}") |"
+            echo "| 🧪 Apex Coverage | 20% | ${COV}% | ${P_COV2} |"
+            echo "| ✅ Test Results | 15% | ${T_PASS}/${T_TOTAL} passed | ${P_TEST2} |"
+            echo "| 🔍 Code Quality (PMD) | 15% | Critical:$PMD_C High:$PMD_H Med:$PMD_M | ${P_PMD2} |"
+            echo "| 🚀 Deployment Success | 10% | ${D_RATE}% (${D_OK}/${D_TOT}) | ${P_DEP2} |"
+            echo "| ⚙️ Org Stability | 5% | Batches:$BATCHES Exceptions:$APEX_EX | ${P_STAB2} |"
+            echo "| 📊 Governor Limits | 10% | Critical:$CRIT_LIM | ${P_GOV2} |"
             echo ""
             echo "### 📋 Health Status Bands"
             echo "| Band | Score Range | Status |"
