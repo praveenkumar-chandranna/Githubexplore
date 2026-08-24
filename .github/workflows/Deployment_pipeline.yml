@@ -1081,7 +1081,7 @@ jobs:
           server_port:    ${{ secrets.SMTP_PORT }}
           username:       ${{ secrets.SMTP_USERNAME }}
           password:       ${{ secrets.SMTP_PASSWORD }}
-          subject:        ${{ steps.build-email.outputs.email_subject }}
+          subject:        "Post-Deploy Health: ${{ needs.Deployment_Build.outputs.environment }} | ${{ needs.Deployment_Build.outputs.deploy_package }}"
           to:             ${{ secrets.NOTIFY_EMAILS }}
           from:           "Do not Reply <${{ secrets.GMAIL_USERNAME }}>"
           html_body:      file://email_body.html
