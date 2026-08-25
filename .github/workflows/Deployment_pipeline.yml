@@ -1113,7 +1113,7 @@ jobs:
           ENVIRONMENT: ${{ needs.Deployment_Build.outputs.environment }}
         run: |
           BRANCH_INPUT="${SOURCE_BRANCHES:-$PACKAGE}"
-          BRANCH_TICKETS=$(echo "$BRANCH_INPUT" | grep -oP '[A-Z]+[-_]\d+' | sort -u || true)
+          BRANCH_TICKETS=$(echo "$BRANCH_INPUT" | grep -oP '(?<![A-Z0-9])[A-Z][A-Z0-9]+[-_]\d+' | sort -u || true)
 
           COMMIT_TICKETS=""
           if [[ "$ENVIRONMENT" == "PRODUCTION" ]]; then
@@ -1123,11 +1123,11 @@ jobs:
             else
               COMMIT_LOG=$(git log -50 --pretty=format:"%s %b")
             fi
-            COMMIT_TICKETS=$(echo "$COMMIT_LOG" | grep -oP '[A-Z]+[-_]\d+' | sort -u || true)
+            COMMIT_TICKETS=$(echo "$COMMIT_LOG" | grep -oP '(?<![A-Z0-9])[A-Z][A-Z0-9]+[-_]\d+' | sort -u || true)
           fi
 
           ALL_TICKETS=$(printf '%s\n%s\n' "$BRANCH_TICKETS" "$COMMIT_TICKETS" \
-            | grep -oP '[A-Z]+[-_]\d+' | sort -u | tr '\n' ',' | sed 's/,$//' || true)
+            | grep -oP '(?<![A-Z0-9])[A-Z][A-Z0-9]+[-_]\d+' | sort -u | tr '\n' ',' | sed 's/,$//' || true)
 
           if [[ -z "$ALL_TICKETS" ]]; then
             echo "⚠️ No Jira tickets found — skipping transition"
