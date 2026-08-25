@@ -1092,6 +1092,100 @@ jobs:
         run: rm -f server.key
 
 
+  Jira_Transition:
+    runs-on: ubuntu-latest
+    needs: Deployment_Build
+    if: |
+      needs.Deployment_Build.result == 'success' &&
+      contains(fromJSON('["QA","UAT","PRODUCTION"]'), needs.Deployment_Build.outputs.environment)
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 50
+
+      - name: Extract Jira Tickets
+        id: extract_tickets
+        shell: bash
+        env:
+          PACKAGE: ${{ needs.Deployment_Build.outputs.deploy_package }}
+          SOURCE_BRANCHES: ${{ needs.Deployment_Build.outputs.source_branches }}
+          ENVIRONMENT: ${{ needs.Deployment_Build.outputs.environment }}
+        run: |
+          BRANCH_INPUT="${SOURCE_BRANCHES:-$PACKAGE}"
+          BRANCH_TICKETS=$(echo "$BRANCH_INPUT" | grep -oP '[A-Z]+[-_]\d+' | sort -u || true)
+
+          COMMIT_TICKETS=""
+          if [[ "$ENVIRONMENT" == "PRODUCTION" ]]; then
+            LAST_TAG=$(git tag --list 'PRODUCTION/*' --sort=-creatordate | head -1 || true)
+            if [[ -n "$LAST_TAG" ]]; then
+              COMMIT_LOG=$(git log "${LAST_TAG}..HEAD" --pretty=format:"%s %b" 2>/dev/null || git log -50 --pretty=format:"%s %b")
+            else
+              COMMIT_LOG=$(git log -50 --pretty=format:"%s %b")
+            fi
+            COMMIT_TICKETS=$(echo "$COMMIT_LOG" | grep -oP '[A-Z]+[-_]\d+' | sort -u || true)
+          fi
+
+          ALL_TICKETS=$(printf '%s\n%s\n' "$BRANCH_TICKETS" "$COMMIT_TICKETS" \
+            | grep -oP '[A-Z]+[-_]\d+' | sort -u | tr '\n' ',' | sed 's/,$//' || true)
+
+          if [[ -z "$ALL_TICKETS" ]]; then
+            echo "⚠️ No Jira tickets found — skipping transition"
+            echo "has_tickets=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "✅ Tickets: $ALL_TICKETS"
+            echo "tickets=$ALL_TICKETS" >> "$GITHUB_OUTPUT"
+            echo "has_tickets=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Transition Jira Tickets
+        if: steps.extract_tickets.outputs.has_tickets == 'true'
+        shell: bash
+        env:
+          TICKETS:             ${{ steps.extract_tickets.outputs.tickets }}
+          ENVIRONMENT:         ${{ needs.Deployment_Build.outputs.environment }}
+          JIRA_BASE_URL:       ${{ secrets.JIRA_BASE_URL }}
+          JIRA_USER_EMAIL:     ${{ secrets.JIRA_USER_EMAIL }}
+          ATLASSIAN_API_TOKEN: ${{ secrets.ATLASSIAN_API_TOKEN }}
+          TRANSITION_ID_QA:    ${{ secrets.JIRA_QA_TRANSITION_ID }}
+          TRANSITION_ID_UAT:   ${{ secrets.JIRA_UAT_TRANSITION_ID }}
+          TRANSITION_ID_PROD:  ${{ secrets.JIRA_PROD_TRANSITION_ID }}
+        run: |
+          case "$ENVIRONMENT" in
+            QA)         TRANSITION_ID="$TRANSITION_ID_QA" ;;
+            UAT)        TRANSITION_ID="$TRANSITION_ID_UAT" ;;
+            PRODUCTION) TRANSITION_ID="$TRANSITION_ID_PROD" ;;
+          esac
+
+          if [[ -z "$TRANSITION_ID" ]]; then
+            echo "⚠️ Transition ID not set for $ENVIRONMENT — skipping"
+            exit 0
+          fi
+
+          echo "🔄 Transitioning tickets to $ENVIRONMENT status..."
+          IFS=',' read -ra TICKET_ARRAY <<< "$TICKETS"
+          for TICKET in "${TICKET_ARRAY[@]}"; do
+            TICKET=$(echo "$TICKET" | xargs)
+            ISSUE_RESP=$(curl -s \
+              -u "${JIRA_USER_EMAIL}:${ATLASSIAN_API_TOKEN}" \
+              -H "Content-Type: application/json" \
+              "${JIRA_BASE_URL}/rest/api/3/issue/${TICKET}?fields=status")
+            CURRENT_STATUS=$(echo "$ISSUE_RESP" | jq -r '.fields.status.name // "Unknown"')
+
+            TRANS_HTTP=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+              -u "${JIRA_USER_EMAIL}:${ATLASSIAN_API_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d "{\"transition\": {\"id\": \"${TRANSITION_ID}\"}}" \
+              "${JIRA_BASE_URL}/rest/api/3/issue/${TICKET}/transitions")
+
+            if [[ "$TRANS_HTTP" == "204" ]]; then
+              echo "  ✅ $TICKET → $ENVIRONMENT (was: $CURRENT_STATUS)"
+            else
+              echo "  ⚠️ $TICKET transition failed (HTTP $TRANS_HTTP) — was: $CURRENT_STATUS"
+            fi
+          done
+
+
   Deployment_Success:
     runs-on: ubuntu-latest
     needs: Deployment_Build
@@ -1312,47 +1406,3 @@ jobs:
             exit 1
           fi
 
-      - name: Transition Jira Tickets to Deployed
-        if: always()
-        shell: bash
-        env:
-          TICKETS:             ${{ steps.extract_tickets.outputs.tickets }}
-          JIRA_BASE_URL:       ${{ secrets.JIRA_BASE_URL }}
-          JIRA_USER_EMAIL:     ${{ secrets.JIRA_USER_EMAIL }}
-          ATLASSIAN_API_TOKEN: ${{ secrets.ATLASSIAN_API_TOKEN }}
-          TRANSITION_ID:       ${{ secrets.JIRA_PROD_TRANSITION_ID }}
-        run: |
-          if [[ -z "$TICKETS" || -z "$TRANSITION_ID" ]]; then
-            echo "⚠️ No tickets or JIRA_PROD_TRANSITION_ID not set — skipping transition"
-            exit 0
-          fi
-
-          echo "🔄 Transitioning Jira tickets to production status..."
-          IFS=',' read -ra TICKET_ARRAY <<< "$TICKETS"
-
-          for TICKET in "${TICKET_ARRAY[@]}"; do
-            TICKET=$(echo "$TICKET" | xargs)
-            echo "  Transitioning: $TICKET"
-
-            ISSUE_RESP=$(curl -s -w "\n%{http_code}" \
-              -u "${JIRA_USER_EMAIL}:${ATLASSIAN_API_TOKEN}" \
-              -H "Content-Type: application/json" \
-              "${JIRA_BASE_URL}/rest/api/3/issue/${TICKET}?fields=status")
-            ISSUE_HTTP=$(echo "$ISSUE_RESP" | tail -1)
-            ISSUE_BODY=$(echo "$ISSUE_RESP" | sed '$d')
-            CURRENT_STATUS=$(echo "$ISSUE_BODY" | jq -r '.fields.status.name // "Unknown"')
-
-            TRANS_RESP=$(curl -s -w "\n%{http_code}" -X POST \
-              -u "${JIRA_USER_EMAIL}:${ATLASSIAN_API_TOKEN}" \
-              -H "Content-Type: application/json" \
-              -d "{\"transition\": {\"id\": \"${TRANSITION_ID}\"}}" \
-              "${JIRA_BASE_URL}/rest/api/3/issue/${TICKET}/transitions")
-            TRANS_HTTP=$(echo "$TRANS_RESP" | tail -1)
-
-            if [[ "$TRANS_HTTP" == "204" ]]; then
-              echo "  ✅ $TICKET transitioned (was: $CURRENT_STATUS)"
-            else
-              echo "  ⚠️ $TICKET transition failed (HTTP $TRANS_HTTP) — was: $CURRENT_STATUS"
-              echo "$TRANS_RESP" | sed '$d'
-            fi
-          done
