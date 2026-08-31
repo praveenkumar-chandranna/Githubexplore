@@ -155,7 +155,29 @@ jobs:
           RAW_NO_MFA=$(sf data query --query "SELECT COUNT() FROM User WHERE IsActive=true AND Profile.PermissionsMultiFactorAuthentication=false AND Profile.UserLicense.LicenseDefinitionKey != 'PID_CHATTER'" --target-org "$USERNAME" --json 2>/dev/null)
           NO_MFA_COUNT=$(safe_int "$RAW_NO_MFA" '.result.totalSize')
 
-          SEC_RAW=$(awk "BEGIN {v=100-(${PRIV_COUNT}*10)-(${INACTIVE_COUNT}*2)-(${NO_MFA_COUNT}*1); if(v<0)v=0; printf \"%.0f\", v}")
+          # -- Guest User Access ----------------------------------------------
+          RAW_GUEST=$(sf data query --query "SELECT COUNT() FROM User WHERE IsActive=true AND Profile.UserType='Guest'" --target-org "$USERNAME" --json 2>/dev/null)
+          GUEST_COUNT=$(safe_int "$RAW_GUEST" '.result.totalSize')
+
+          # -- Connected Apps without IP Restrictions -------------------------
+          RAW_CONN=$(sf data query --query "SELECT COUNT() FROM ConnectedApplication WHERE OptionsAllowAdminApprovedUsersOnly=false" --target-org "$USERNAME" --use-tooling-api --json 2>/dev/null)
+          CONN_APP_COUNT=$(safe_int "$RAW_CONN" '.result.totalSize')
+
+          # -- Deprecated API Versions (< 50.0) ------------------------------
+          RAW_OLD_API=$(sf data query --query "SELECT COUNT() FROM ApexClass WHERE ApiVersion < 50.0 AND Status='Active'" --target-org "$USERNAME" --json 2>/dev/null)
+          OLD_API_COUNT=$(safe_int "$RAW_OLD_API" '.result.totalSize')
+
+          # -- Sharing Settings: Public Read/Write objects -------------------
+          RAW_OWD=$(sf data query --query "SELECT QualifiedApiName, InternalSharingModel FROM EntityDefinition WHERE InternalSharingModel IN ('ReadWrite','ControlledByLeadOrContact') AND IsCustomizable=true" --target-org "$USERNAME" --use-tooling-api --json 2>/dev/null)
+          OWD_PUBLIC_COUNT=$(echo "$RAW_OWD" | jq -r '.result.totalSize // 0' 2>/dev/null || echo '0')
+
+          # -- Storage Usage (from governor limits) --------------------------
+          DATA_STORAGE_USED=$(echo "$LIMITS_JSON" | jq -r '[.[] | select(.name == "DataStorageMB")] | if length > 0 then (.[0] | (.max - .remaining)) else 0 end' 2>/dev/null || echo '0')
+          DATA_STORAGE_MAX=$(echo "$LIMITS_JSON" | jq -r '[.[] | select(.name == "DataStorageMB")] | if length > 0 then .[0].max else 0 end' 2>/dev/null || echo '0')
+          FILE_STORAGE_USED=$(echo "$LIMITS_JSON" | jq -r '[.[] | select(.name == "FileStorageMB")] | if length > 0 then (.[0] | (.max - .remaining)) else 0 end' 2>/dev/null || echo '0')
+          FILE_STORAGE_MAX=$(echo "$LIMITS_JSON" | jq -r '[.[] | select(.name == "FileStorageMB")] | if length > 0 then .[0].max else 0 end' 2>/dev/null || echo '0')
+
+          SEC_RAW=$(awk "BEGIN {v=100-(${PRIV_COUNT}*10)-(${INACTIVE_COUNT}*2)-(${NO_MFA_COUNT}*1)-(${GUEST_COUNT}*5)-(${CONN_APP_COUNT}*3)-(${OWD_PUBLIC_COUNT}*2); if(v<0)v=0; printf \"%.0f\", v}")
 
           # ── Apex Coverage ───────────────────────────────────────────────────
           RAW_COV=$(sf data query \
@@ -305,6 +327,14 @@ jobs:
             --arg    priv_count         "$PRIV_COUNT" \
             --arg    inactive_count     "$INACTIVE_COUNT" \
             --arg    no_mfa_count       "$NO_MFA_COUNT" \
+            --argjson guest_count       "$GUEST_COUNT" \
+            --argjson conn_app_count    "$CONN_APP_COUNT" \
+            --argjson old_api_count     "$OLD_API_COUNT" \
+            --argjson owd_public_count  "$OWD_PUBLIC_COUNT" \
+            --arg    data_storage_used  "$DATA_STORAGE_USED" \
+            --arg    data_storage_max   "$DATA_STORAGE_MAX" \
+            --arg    file_storage_used  "$FILE_STORAGE_USED" \
+            --arg    file_storage_max   "$FILE_STORAGE_MAX" \
             --argjson apex      "$APEX_COUNT" \
             --argjson triggers  "$TRIGGER_COUNT" \
             --argjson flows     "$FLOW_COUNT" \
@@ -338,7 +368,15 @@ jobs:
                 sec_raw:          $sec_raw,
                 priv_count:       $priv_count,
                 inactive_count:   $inactive_count,
-                no_mfa_count:     $no_mfa_count
+                no_mfa_count:     $no_mfa_count,
+                guest_count:      $guest_count,
+                conn_app_count:   $conn_app_count,
+                old_api_count:    $old_api_count,
+                owd_public_count: $owd_public_count,
+                data_storage_used: $data_storage_used,
+                data_storage_max:  $data_storage_max,
+                file_storage_used: $file_storage_used,
+                file_storage_max:  $file_storage_max
               },
               metadata: {
                 apex_classes:  $apex,
@@ -414,12 +452,23 @@ jobs:
           echo "══════════════════════════════════════════════════════════════"
           echo ""
           echo "📊 SCORE BREAKDOWN"
-          SEC_RAW_D=$(jq -r '.scores.sec_raw       // "0"' "$FILE")
-          PRIV_D=$(jq -r    '.scores.priv_count     // "0"' "$FILE")
-          INACT_D=$(jq -r   '.scores.inactive_count // "0"' "$FILE")
-          NOMFA_D=$(jq -r   '.scores.no_mfa_count   // "0"' "$FILE")
+          SEC_RAW_D=$(jq -r '.scores.sec_raw         // "0"' "$FILE")
+          PRIV_D=$(jq -r    '.scores.priv_count       // "0"' "$FILE")
+          INACT_D=$(jq -r   '.scores.inactive_count   // "0"' "$FILE")
+          NOMFA_D=$(jq -r   '.scores.no_mfa_count     // "0"' "$FILE")
+          GUEST_D=$(jq -r   '.scores.guest_count      // "0"' "$FILE")
+          CONN_D=$(jq -r    '.scores.conn_app_count   // "0"' "$FILE")
+          OWD_D=$(jq -r     '.scores.owd_public_count // "0"' "$FILE")
+          OLD_API_D=$(jq -r '.scores.old_api_count    // "0"' "$FILE")
+          DS_USED=$(jq -r   '.scores.data_storage_used // "0"' "$FILE")
+          DS_MAX=$(jq -r    '.scores.data_storage_max  // "0"' "$FILE")
+          FS_USED=$(jq -r   '.scores.file_storage_used // "0"' "$FILE")
+          FS_MAX=$(jq -r    '.scores.file_storage_max  // "0"' "$FILE")
           SEC_PTS=$(awk "BEGIN {printf \"%.2f\", ${SEC_RAW_D} * 0.25}")
-          printf "  %-30s %s\n" "Security Health Check (25%)" "${SEC_RAW_D}/100 -> ${SEC_PTS} pts  (Priv:$PRIV_D Inactive:$INACT_D NoMFA:$NOMFA_D)"
+          printf "  %-30s %s\n" "Security Health Check (25%)" "${SEC_RAW_D}/100 -> ${SEC_PTS} pts  (Priv:$PRIV_D Inactive:$INACT_D NoMFA:$NOMFA_D Guest:$GUEST_D ConnApps:$CONN_D OWD:$OWD_D)"
+          printf "  %-30s %s\n" "Deprecated API Classes"       "${OLD_API_D} classes on API < v50 (deducted from Code Quality)"
+          printf "  %-30s %s\n" "Data Storage"                 "${DS_USED}/${DS_MAX} MB used"
+          printf "  %-30s %s\n" "File Storage"                 "${FS_USED}/${FS_MAX} MB used"
           printf "  %-30s %s\n" "Apex Coverage (20%)"         "${COV}%  → $(awk "BEGIN {printf \"%.2f\", $COV * 0.20}") pts"
           printf "  %-30s %s\n" "Test Results (15%)"          "${T_PASS}/${T_TOTAL} passed  → $(awk "BEGIN {if($T_TOTAL>0) printf \"%.2f\", ($T_PASS/$T_TOTAL)*100*0.15; else print \"15.00\"}") pts"
           printf "  %-30s %s\n" "Code Quality/PMD (15%)"      "Critical:$PMD_C High:$PMD_H Med:$PMD_M"
@@ -541,13 +590,37 @@ jobs:
             echo "### 📊 Score Breakdown"
             echo "| Category | Weight | Raw Value | Points |"
             echo "|---|---|---|---|"
-            echo "| :lock: Security Health Check | 25% | ${SEC_RAW}/100 (Priv:${PRIV_C} Inactive:${INACT_C} NoMFA:${NOMFA_C}) | ${P_SEC2} |"
+            GUEST_C=$(jq -r   '.scores.guest_count      // "0"' "$FILE")
+            CONN_C=$(jq -r    '.scores.conn_app_count   // "0"' "$FILE")
+            OWD_C=$(jq -r     '.scores.owd_public_count // "0"' "$FILE")
+            OLD_API_C=$(jq -r '.scores.old_api_count    // "0"' "$FILE")
+            DS_USED_C=$(jq -r '.scores.data_storage_used // "0"' "$FILE")
+            DS_MAX_C=$(jq -r  '.scores.data_storage_max  // "0"' "$FILE")
+            FS_USED_C=$(jq -r '.scores.file_storage_used // "0"' "$FILE")
+            FS_MAX_C=$(jq -r  '.scores.file_storage_max  // "0"' "$FILE")
+            echo "| :lock: Security Health Check | 25% | ${SEC_RAW}/100 (Priv:${PRIV_C} Inactive:${INACT_C} NoMFA:${NOMFA_C} Guest:${GUEST_C} ConnApps:${CONN_C} OWD:${OWD_C}) | ${P_SEC2} |"
             echo "| 🧪 Apex Coverage | 20% | ${COV}% | ${P_COV2} |"
             echo "| ✅ Test Results | 15% | ${T_PASS}/${T_TOTAL} passed | ${P_TEST2} |"
-            echo "| 🔍 Code Quality (PMD) | 15% | Critical:$PMD_C High:$PMD_H Med:$PMD_M | ${P_PMD2} |"
+            echo "| 🔍 Code Quality (PMD) | 15% | Critical:$PMD_C High:$PMD_H Med:$PMD_M DeprecatedAPI:${OLD_API_C} | ${P_PMD2} |"
             echo "| 🚀 Deployment Success | 10% | ${D_RATE}% (${D_OK}/${D_TOT}) | ${P_DEP2} |"
             echo "| ⚙️ Org Stability | 5% | Batches:$BATCHES Exceptions:$APEX_EX | ${P_STAB2} |"
             echo "| 📊 Governor Limits | 10% | Critical:$CRIT_LIM | ${P_GOV2} |"
+            echo ""
+            echo "### 💾 Storage Usage"
+            echo "| Type | Used (MB) | Max (MB) | Used% |"
+            echo "|---|---|---|---|"
+            if [[ "${DS_MAX_C}" -gt 0 ]]; then
+              DS_PCT=$(awk "BEGIN {printf \"%.1f\", (${DS_USED_C}+0)/(${DS_MAX_C}+0)*100}")
+              echo "| Data Storage | ${DS_USED_C} | ${DS_MAX_C} | ${DS_PCT}% |"
+            else
+              echo "| Data Storage | ${DS_USED_C} | N/A | N/A |"
+            fi
+            if [[ "${FS_MAX_C}" -gt 0 ]]; then
+              FS_PCT=$(awk "BEGIN {printf \"%.1f\", (${FS_USED_C}+0)/(${FS_MAX_C}+0)*100}")
+              echo "| File Storage | ${FS_USED_C} | ${FS_MAX_C} | ${FS_PCT}% |"
+            else
+              echo "| File Storage | ${FS_USED_C} | N/A | N/A |"
+            fi
             echo ""
             echo "### 📋 Health Status Bands"
             echo "| Band | Score Range | Status |"
