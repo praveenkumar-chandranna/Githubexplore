@@ -1175,7 +1175,7 @@ jobs:
     if: |
       needs.Deployment_Build.result == 'success' &&
       contains(fromJSON('["DEV","QA","UAT","PRODUCTION"]'), needs.Deployment_Build.outputs.environment) &&
-      (needs.Deployment_Build.outputs.environment != 'PRODUCTION' || needs.Post_Deployment_Health_Check.result == 'success')
+      (needs.Post_Deployment_Health_Check.result == 'success' || needs.Post_Deployment_Health_Check.result == 'skipped')
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
