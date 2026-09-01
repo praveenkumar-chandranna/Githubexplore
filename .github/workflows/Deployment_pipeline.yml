@@ -1171,10 +1171,11 @@ jobs:
 
   Jira_Transition:
     runs-on: ubuntu-latest
-    needs: Deployment_Build
+    needs: [Deployment_Build, Post_Deployment_Health_Check]
     if: |
       needs.Deployment_Build.result == 'success' &&
-      contains(fromJSON('["QA","UAT","PRODUCTION"]'), needs.Deployment_Build.outputs.environment)
+      contains(fromJSON('["DEV","QA","UAT","PRODUCTION"]'), needs.Deployment_Build.outputs.environment) &&
+      (needs.Deployment_Build.outputs.environment != 'PRODUCTION' || needs.Post_Deployment_Health_Check.result == 'success')
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -1262,51 +1263,14 @@ jobs:
           done
 
 
-  Deployment_Success:
-    runs-on: ubuntu-latest
-    needs: Deployment_Build
-    if: needs.Deployment_Build.result == 'success' && needs.Deployment_Build.outputs.environment != 'PRODUCTION'
-    steps:
-      - name: Deployment Successful
-        shell: bash
-        env:
-          ENVIRONMENT: ${{ needs.Deployment_Build.outputs.environment }}
-          PACKAGE: ${{ needs.Deployment_Build.outputs.deploy_package }}
-          ACTOR: ${{ needs.Deployment_Build.outputs.actor }}
-          RUN_ID: ${{ needs.Deployment_Build.outputs.run_id }}
-          REPO: ${{ needs.Deployment_Build.outputs.repo }}
-          SOURCE_BRANCHES: ${{ needs.Deployment_Build.outputs.source_branches }}
-        run: |
-          echo "=========================================="
-          echo "✅ DEPLOYMENT SUCCESSFUL"
-          echo "=========================================="
-          echo "  Environment : $ENVIRONMENT"
-          echo "  Package     : $PACKAGE"
-          echo "  Deployed by : $ACTOR"
-          echo "  Run         : https://github.com/${REPO}/actions/runs/${RUN_ID}"
-          if [[ -n "$SOURCE_BRANCHES" ]]; then
-            echo "  Branches    :"
-            IFS=',' read -ra BS <<< "$SOURCE_BRANCHES"
-            for B in "${BS[@]}"; do echo "    - $(echo "$B" | xargs)"; done
-          fi
-          echo "=========================================="
-          {
-            echo "## ✅ Deployment Successful"
-            echo "| Field | Value |"
-            echo "|---|---|"
-            echo "| **Environment** | \`${ENVIRONMENT}\` |"
-            echo "| **Package** | \`${PACKAGE}\` |"
-            echo "| **Deployed by** | ${ACTOR} |"
-            echo "| **Run** | [${RUN_ID}](https://github.com/${REPO}/actions/runs/${RUN_ID}) |"
-            if [[ -n "$SOURCE_BRANCHES" ]]; then
-              echo "| **Source Branches** | $(echo "$SOURCE_BRANCHES" | tr ',' '<br>') |"
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
-
   Update_Release_Notes:
     runs-on: ubuntu-latest
-    needs: Deployment_Build
-    if: needs.Deployment_Build.result == 'success' && needs.Deployment_Build.outputs.environment == 'PRODUCTION'
+    needs: [Deployment_Build, Post_Deployment_Health_Check, Jira_Transition]
+    if: |
+      needs.Deployment_Build.result == 'success' &&
+      needs.Post_Deployment_Health_Check.result == 'success' &&
+      needs.Jira_Transition.result == 'success' &&
+      needs.Deployment_Build.outputs.environment == 'PRODUCTION'
 
     env:
       JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
