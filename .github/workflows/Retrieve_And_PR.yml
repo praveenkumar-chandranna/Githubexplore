@@ -346,16 +346,13 @@ jobs:
             exit 1
           fi
           mkdir -p ~/.ssh
-          printf '%s' "$SSH_SIGNING_KEY" > ~/.ssh/signing_key
-          # Ensure key ends with a newline — required by OpenSSH
-          echo >> ~/.ssh/signing_key
+          printf '%s\n' "$SSH_SIGNING_KEY" > ~/.ssh/signing_key
           chmod 600 ~/.ssh/signing_key
-          # Validate key is readable
-          ssh-keygen -l -f ~/.ssh/signing_key > /dev/null 2>&1 || {
-            echo "❌ SSH signing key is invalid or corrupted"
-            exit 1
-          }
+          # Derive public key from private key
+          ssh-keygen -y -f ~/.ssh/signing_key > ~/.ssh/signing_key.pub
+          chmod 644 ~/.ssh/signing_key.pub
           echo "✅ SSH signing key ready"
+          echo "🔑 Public key: $(cat ~/.ssh/signing_key.pub)"
 
       - name: Create feature branch and push
         if: steps.check-changes.outputs.has_changes == 'true'
@@ -374,7 +371,7 @@ jobs:
           git config user.name  "$GIT_USER_NAME"
           git config user.email "$GIT_USER_EMAIL"
           git config gpg.format ssh
-          git config user.signingkey ~/.ssh/signing_key
+          git config user.signingkey ~/.ssh/signing_key.pub
           git config commit.gpgsign true
           git remote set-url origin "https://x-access-token:${GH_PAT}@github.com/${REPO}.git"
 
