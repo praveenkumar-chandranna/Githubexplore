@@ -341,9 +341,20 @@ jobs:
         env:
           SSH_SIGNING_KEY: ${{ secrets.SSH_SIGNING_KEY }}
         run: |
+          if [[ -z "$SSH_SIGNING_KEY" ]]; then
+            echo "❌ SSH_SIGNING_KEY secret is not set"
+            exit 1
+          fi
           mkdir -p ~/.ssh
-          echo "$SSH_SIGNING_KEY" > ~/.ssh/signing_key
+          printf '%s' "$SSH_SIGNING_KEY" > ~/.ssh/signing_key
+          # Ensure key ends with a newline — required by OpenSSH
+          echo >> ~/.ssh/signing_key
           chmod 600 ~/.ssh/signing_key
+          # Validate key is readable
+          ssh-keygen -l -f ~/.ssh/signing_key > /dev/null 2>&1 || {
+            echo "❌ SSH signing key is invalid or corrupted"
+            exit 1
+          }
           echo "✅ SSH signing key ready"
 
       - name: Create feature branch and push
