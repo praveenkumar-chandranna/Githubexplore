@@ -346,13 +346,11 @@ jobs:
             exit 1
           fi
           mkdir -p ~/.ssh
-          printf '%s\n' "$SSH_SIGNING_KEY" > ~/.ssh/signing_key
+          echo "$SSH_SIGNING_KEY" | sed 's/\\n/\n/g' > ~/.ssh/signing_key
           chmod 600 ~/.ssh/signing_key
-          # Derive public key from private key
           ssh-keygen -y -f ~/.ssh/signing_key > ~/.ssh/signing_key.pub
           chmod 644 ~/.ssh/signing_key.pub
           echo "✅ SSH signing key ready"
-          echo "🔑 Public key: $(cat ~/.ssh/signing_key.pub)"
 
       - name: Create feature branch and push
         if: steps.check-changes.outputs.has_changes == 'true'
@@ -388,7 +386,7 @@ jobs:
 
       - name: Cleanup SSH Signing Key
         if: always()
-        run: rm -f ~/.ssh/signing_key
+        run: rm -f ~/.ssh/signing_key ~/.ssh/signing_key.pub
 
       # ── Step 10: Raise PR using gh CLI (fixes 403) ───────────────────────────
       - name: Raise Pull Request → ${{ steps.resolve.outputs.TARGET_BRANCH }}
