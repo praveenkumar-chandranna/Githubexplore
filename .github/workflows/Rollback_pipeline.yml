@@ -439,7 +439,7 @@ jobs:
       CONFLUENCE_PAGE_ID:  ${{ secrets.CONFLUENCE_PAGE_ID }}
     steps:
       - name: Checkout branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.Rollback_Build.outputs.ref_name }}
           fetch-depth: 0
