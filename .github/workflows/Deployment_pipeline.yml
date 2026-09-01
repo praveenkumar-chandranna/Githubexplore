@@ -1173,8 +1173,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: [Deployment_Build, Post_Deployment_Health_Check]
     if: |
+      always() &&
       needs.Deployment_Build.result == 'success' &&
-      contains(fromJSON('["DEV","QA","UAT","PRODUCTION"]'), needs.Deployment_Build.outputs.environment) &&
+      contains(fromJSON('["DEV","QA","UAT","PRODUCTION","HOTFIX"]'), needs.Deployment_Build.outputs.environment) &&
       (needs.Post_Deployment_Health_Check.result == 'success' || needs.Post_Deployment_Health_Check.result == 'skipped')
     steps:
       - name: Checkout Code
