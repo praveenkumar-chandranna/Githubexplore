@@ -77,7 +77,6 @@ jobs:
           echo "ref_name=${REF_NAME}" >> $GITHUB_OUTPUT
           echo "repo=${REPO}" >> $GITHUB_OUTPUT
 
-
       - name: Set environment variables
         id: set-env
         shell: bash
@@ -151,7 +150,6 @@ jobs:
                 MAX_VERSION="$VERSION"
               fi
 
-              # Parse <types> blocks line by line — no awk/sed multi-char RS needed
               IN_BLOCK=0
               CUR_TYPE=""
               CUR_MEMBERS=""
@@ -408,12 +406,9 @@ jobs:
             "https://api.github.com/repos/${REPO}/git/refs/tags" \
             | jq -r '.[].ref | ltrimstr("refs/tags/")' 2>/dev/null || echo "")
 
-          # Find highest patch version for today's date + env prefix
           MAX_PATCH=-1
           while IFS= read -r TAG; do
-            # Match pattern: ENV/DDMMYYYY_HHMM_vMAJOR.MINOR.PATCH
             if [[ "$TAG" =~ ^${ENVIRONMENT}/[0-9]{8}_[0-9]{4}_v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
-              # Check same day (date portion matches)
               TAG_DAY=$(echo "$TAG" | sed 's|.*/\([0-9]\{8\}\)_.*|\1|')
               if [[ "$TAG_DAY" == "$TAG_DATE" ]]; then
                 PATCH=${BASH_REMATCH[3]}
@@ -424,7 +419,6 @@ jobs:
             fi
           done <<< "$EXISTING_TAGS"
 
-          # Determine version
           if [[ $MAX_PATCH -eq -1 ]]; then
             VERSION="v1.0.0"
           else
@@ -503,51 +497,780 @@ jobs:
           echo "ref_name=${REF_NAME}" >> $GITHUB_OUTPUT
           echo "repo=${REPO}" >> $GITHUB_OUTPUT
 
-  Deployment_Success:
-    runs-on: ubuntu-latest
-    needs: Deployment_Build
-    if: needs.Deployment_Build.result == 'success' && needs.Deployment_Build.outputs.environment != 'PRODUCTION'
-    steps:
-      - name: Deployment Successful
-        shell: bash
-        env:
-          ENVIRONMENT: ${{ needs.Deployment_Build.outputs.environment }}
-          PACKAGE: ${{ needs.Deployment_Build.outputs.deploy_package }}
-          ACTOR: ${{ needs.Deployment_Build.outputs.actor }}
-          RUN_ID: ${{ needs.Deployment_Build.outputs.run_id }}
-          REPO: ${{ needs.Deployment_Build.outputs.repo }}
-          SOURCE_BRANCHES: ${{ needs.Deployment_Build.outputs.source_branches }}
-        run: |
-          echo "=========================================="
-          echo "✅ DEPLOYMENT SUCCESSFUL"
-          echo "=========================================="
-          echo "  Environment : $ENVIRONMENT"
-          echo "  Package     : $PACKAGE"
-          echo "  Deployed by : $ACTOR"
-          echo "  Run         : https://github.com/${REPO}/actions/runs/${RUN_ID}"
-          if [[ -n "$SOURCE_BRANCHES" ]]; then
-            echo "  Branches    :"
-            IFS=',' read -ra BS <<< "$SOURCE_BRANCHES"
-            for B in "${BS[@]}"; do echo "    - $(echo "$B" | xargs)"; done
-          fi
-          echo "=========================================="
-          {
-            echo "## ✅ Deployment Successful"
-            echo "| Field | Value |"
-            echo "|---|---|"
-            echo "| **Environment** | \`${ENVIRONMENT}\` |"
-            echo "| **Package** | \`${PACKAGE}\` |"
-            echo "| **Deployed by** | ${ACTOR} |"
-            echo "| **Run** | [${RUN_ID}](https://github.com/${REPO}/actions/runs/${RUN_ID}) |"
-            if [[ -n "$SOURCE_BRANCHES" ]]; then
-              echo "| **Source Branches** | $(echo "$SOURCE_BRANCHES" | tr ',' '<br>') |"
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
 
-  Update_Release_Notes:
+  Post_Deployment_Health_Check:
+    name: Post-Deploy Health Check - PRODUCTION
     runs-on: ubuntu-latest
     needs: Deployment_Build
     if: needs.Deployment_Build.result == 'success' && needs.Deployment_Build.outputs.environment == 'PRODUCTION'
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Salesforce CLI
+        run: npm install -g @salesforce/cli@latest --silent
+
+      - name: Generate JWT Key
+        run: |
+          echo "${{ secrets.SALESFORCE_JWT_SECRET_KEY }}" > server.key
+          chmod 600 server.key
+
+      - name: Set Org Credentials
+        id: set-org
+        shell: bash
+        env:
+          KEY_PROD:    ${{ secrets.SALESFORCE_CONSUMER_KEY_PROD }}
+          USER_PROD:   ${{ secrets.SFDX_AUTH_PROD_USERNAME }}
+          LOGIN_URL:   ${{ secrets.LOGIN_URL }}
+        run: |
+          echo "CLIENT_ID=$KEY_PROD"  >> $GITHUB_OUTPUT
+          echo "USERNAME=$USER_PROD"  >> $GITHUB_OUTPUT
+          echo "INSTANCE_URL=$LOGIN_URL" >> $GITHUB_OUTPUT
+
+      - name: Authenticate to Salesforce
+        shell: bash
+        env:
+          CLIENT_ID:    ${{ steps.set-org.outputs.CLIENT_ID }}
+          USERNAME:     ${{ steps.set-org.outputs.USERNAME }}
+          INSTANCE_URL: ${{ steps.set-org.outputs.INSTANCE_URL }}
+        run: |
+          sf org logout --all --no-prompt || true
+          sf org login jwt \
+            --client-id    "$CLIENT_ID" \
+            --jwt-key-file server.key \
+            --username     "$USERNAME" \
+            --instance-url "$INSTANCE_URL" \
+            --set-default
+
+
+      - name: Collect Health Metrics
+        id: collect
+        shell: bash
+        env:
+          USERNAME: ${{ steps.set-org.outputs.USERNAME }}
+          ENV:      ${{ needs.Deployment_Build.outputs.environment }}
+          PACKAGE:  ${{ needs.Deployment_Build.outputs.deploy_package }}
+        run: |
+          set +e
+          SCAN_TIME=$(TZ='Asia/Kolkata' date +'%d-%m-%Y %H:%M IST')
+          echo "📊 Post-deploy health check for $ENV at $SCAN_TIME..."
+
+          safe_array() { echo "$1" | jq -c "$2 // []" 2>/dev/null || echo '[]'; }
+          safe_obj()   { echo "$1" | jq -c "$2 // {}" 2>/dev/null || echo '{}'; }
+          safe_int()   { echo "$1" | jq -r "$2 // 0"  2>/dev/null || echo '0';  }
+
+          # -- Org Info -------------------------------------------------------
+          RAW_ORG=$(sf org display --target-org "$USERNAME" --json 2>/dev/null)
+          ORG_JSON=$(safe_obj "$RAW_ORG" '.result')
+
+          # -- Governor Limits ------------------------------------------------
+          RAW_LIMITS=$(sf org list limits --target-org "$USERNAME" --json 2>/dev/null)
+          LIMITS_JSON=$(echo "$RAW_LIMITS" | jq -c '[.result[]? | {name: (.name // .Name // ""), remaining: (.remaining // .Remaining // 0), max: (.max // .Max // 0)}]' 2>/dev/null || echo '[]')
+
+          # -- Active Apex Classes --------------------------------------------
+          RAW_APEX=$(sf data query --query "SELECT COUNT() FROM ApexClass WHERE Status='Active'" --target-org "$USERNAME" --json 2>/dev/null)
+          APEX_COUNT=$(safe_int "$RAW_APEX" '.result.totalSize')
+
+          # -- Active Apex Triggers -------------------------------------------
+          RAW_TRIGGER=$(sf data query --query "SELECT COUNT() FROM ApexTrigger WHERE Status='Active'" --target-org "$USERNAME" --json 2>/dev/null)
+          TRIGGER_COUNT=$(safe_int "$RAW_TRIGGER" '.result.totalSize')
+
+          # -- Active Flows (Tooling API) -------------------------------------
+          RAW_FLOWS=$(sf data query --query "SELECT COUNT() FROM FlowDefinition WHERE ActiveVersionId != null" --target-org "$USERNAME" --use-tooling-api --json 2>/dev/null)
+          FLOW_COUNT=$(safe_int "$RAW_FLOWS" '.result.totalSize')
+
+          # -- Active Users ---------------------------------------------------
+          RAW_USERS=$(sf data query --query "SELECT COUNT() FROM User WHERE IsActive=true AND Profile.UserLicense.LicenseDefinitionKey != 'PID_CHATTER'" --target-org "$USERNAME" --json 2>/dev/null)
+          USER_COUNT=$(safe_int "$RAW_USERS" '.result.totalSize')
+
+          # -- Security Metrics -----------------------------------------------
+          RAW_PRIV=$(sf data query --query "SELECT COUNT() FROM Profile WHERE PermissionsModifyAllData=true" --target-org "$USERNAME" --json 2>/dev/null)
+          PRIV_COUNT=$(safe_int "$RAW_PRIV" '.result.totalSize')
+
+          RAW_INACTIVE=$(sf data query --query "SELECT COUNT() FROM User WHERE IsActive=false AND LastLoginDate != null AND Profile.UserLicense.LicenseDefinitionKey != 'PID_CHATTER'" --target-org "$USERNAME" --json 2>/dev/null)
+          INACTIVE_COUNT=$(safe_int "$RAW_INACTIVE" '.result.totalSize')
+
+          RAW_NO_MFA=$(sf data query --query "SELECT COUNT() FROM User WHERE IsActive=true AND Profile.PermissionsMultiFactorAuthentication=false AND Profile.UserLicense.LicenseDefinitionKey != 'PID_CHATTER'" --target-org "$USERNAME" --json 2>/dev/null)
+          NO_MFA_COUNT=$(safe_int "$RAW_NO_MFA" '.result.totalSize')
+
+          # -- Guest User Access ----------------------------------------------
+          RAW_GUEST=$(sf data query --query "SELECT COUNT() FROM User WHERE IsActive=true AND Profile.UserType='Guest'" --target-org "$USERNAME" --json 2>/dev/null)
+          GUEST_COUNT=$(safe_int "$RAW_GUEST" '.result.totalSize')
+
+          # -- Connected Apps without IP Restrictions -------------------------
+          RAW_CONN=$(sf data query --query "SELECT COUNT() FROM ConnectedApplication WHERE OptionsAllowAdminApprovedUsersOnly=false" --target-org "$USERNAME" --use-tooling-api --json 2>/dev/null)
+          CONN_APP_COUNT=$(safe_int "$RAW_CONN" '.result.totalSize')
+
+          # -- Deprecated API Versions (< 50.0) ------------------------------
+          RAW_OLD_API=$(sf data query --query "SELECT COUNT() FROM ApexClass WHERE ApiVersion < 50.0 AND Status='Active'" --target-org "$USERNAME" --json 2>/dev/null)
+          OLD_API_COUNT=$(safe_int "$RAW_OLD_API" '.result.totalSize')
+
+          # -- Sharing Settings: Public Read/Write objects -------------------
+          RAW_OWD=$(sf data query --query "SELECT QualifiedApiName, InternalSharingModel FROM EntityDefinition WHERE InternalSharingModel IN ('ReadWrite','ControlledByLeadOrContact') AND IsCustomizable=true" --target-org "$USERNAME" --use-tooling-api --json 2>/dev/null)
+          OWD_PUBLIC_COUNT=$(echo "$RAW_OWD" | jq -r '.result.totalSize // 0' 2>/dev/null || echo '0')
+
+          # -- Storage Usage (from governor limits) --------------------------
+          DATA_STORAGE_USED=$(echo "$LIMITS_JSON" | jq -r '[.[] | select(.name == "DataStorageMB")] | if length > 0 then (.[0] | (.max - .remaining)) else 0 end' 2>/dev/null || echo '0')
+          DATA_STORAGE_MAX=$(echo "$LIMITS_JSON" | jq -r '[.[] | select(.name == "DataStorageMB")] | if length > 0 then .[0].max else 0 end' 2>/dev/null || echo '0')
+          FILE_STORAGE_USED=$(echo "$LIMITS_JSON" | jq -r '[.[] | select(.name == "FileStorageMB")] | if length > 0 then (.[0] | (.max - .remaining)) else 0 end' 2>/dev/null || echo '0')
+          FILE_STORAGE_MAX=$(echo "$LIMITS_JSON" | jq -r '[.[] | select(.name == "FileStorageMB")] | if length > 0 then .[0].max else 0 end' 2>/dev/null || echo '0')
+
+          SEC_RAW=$(awk "BEGIN {v=100-(${PRIV_COUNT}*10)-(${INACTIVE_COUNT}*2)-(${NO_MFA_COUNT}*1)-(${GUEST_COUNT}*5)-(${CONN_APP_COUNT}*3)-(${OWD_PUBLIC_COUNT}*2); if(v<0)v=0; printf \"%.0f\", v}")
+
+
+          # -- Apex Coverage --------------------------------------------------
+          RAW_COV=$(sf data query \
+            --query "SELECT NumLinesCovered, NumLinesUncovered FROM ApexOrgWideCoverage" \
+            --target-org "$USERNAME" --json 2>/dev/null)
+          COV_COVERED=$(safe_int "$RAW_COV" '.result.records[0].NumLinesCovered')
+          COV_UNCOVERED=$(safe_int "$RAW_COV" '.result.records[0].NumLinesUncovered')
+          COV_TOTAL=$((COV_COVERED + COV_UNCOVERED))
+          if [[ $COV_TOTAL -gt 0 ]]; then
+            APEX_COVERAGE=$(awk "BEGIN {printf \"%.1f\", ($COV_COVERED / $COV_TOTAL) * 100}")
+          else
+            APEX_COVERAGE="0.0"
+          fi
+
+          # -- Apex Test Results (last 7 days) --------------------------------
+          RAW_TEST_PASS=$(sf data query --query "SELECT COUNT() FROM ApexTestResult WHERE Outcome='Pass' AND CreatedDate = LAST_N_DAYS:7" --target-org "$USERNAME" --json 2>/dev/null)
+          RAW_TEST_FAIL=$(sf data query --query "SELECT COUNT() FROM ApexTestResult WHERE Outcome='Fail' AND CreatedDate = LAST_N_DAYS:7" --target-org "$USERNAME" --json 2>/dev/null)
+          TEST_PASS=$(safe_int "$RAW_TEST_PASS" '.result.totalSize')
+          TEST_FAIL=$(safe_int "$RAW_TEST_FAIL" '.result.totalSize')
+          TEST_TOTAL=$((TEST_PASS + TEST_FAIL))
+
+          # -- Apex Test Failure Details (last 24h) ---------------------------
+          RAW_TESTS=$(sf data query \
+            --query "SELECT Id, ApexClass.Name, MethodName, Outcome, Message, CreatedDate FROM ApexTestResult WHERE Outcome='Fail' AND CreatedDate = LAST_N_DAYS:1 ORDER BY CreatedDate DESC LIMIT 20" \
+            --target-org "$USERNAME" --json 2>/dev/null)
+          TESTS_JSON=$(safe_array "$RAW_TESTS" '.result.records')
+
+          # -- Recent Deployments ---------------------------------------------
+          RAW_DEPLOYS=$(sf data query \
+            --query "SELECT Id, Status, StartDate, CompletedDate, NumberComponentsDeployed, NumberComponentErrors FROM DeployRequest ORDER BY StartDate DESC LIMIT 10" \
+            --target-org "$USERNAME" --json 2>/dev/null)
+          DEPLOYS_JSON=$(safe_array "$RAW_DEPLOYS" '.result.records')
+
+          DEPLOY_TOTAL=$(echo "$DEPLOYS_JSON" | jq 'length')
+          DEPLOY_SUCCESS=$(echo "$DEPLOYS_JSON" | jq '[.[] | select(.Status == "Succeeded")] | length')
+          if [[ $DEPLOY_TOTAL -gt 0 ]]; then
+            DEPLOY_RATE=$(awk "BEGIN {printf \"%.1f\", ($DEPLOY_SUCCESS / $DEPLOY_TOTAL) * 100}")
+          else
+            DEPLOY_RATE="100.0"
+          fi
+
+          # -- Failed Batch Jobs (last 24h) -----------------------------------
+          RAW_BATCHES=$(sf data query \
+            --query "SELECT Id, ApexClass.Name, Status, NumberOfErrors, TotalJobItems, CreatedDate FROM AsyncApexJob WHERE Status='Failed' AND CreatedDate = LAST_N_DAYS:1 ORDER BY CreatedDate DESC LIMIT 20" \
+            --target-org "$USERNAME" --json 2>/dev/null)
+          BATCHES_JSON=$(safe_array "$RAW_BATCHES" '.result.records')
+
+          # -- Apex Exceptions (last 24h) -------------------------------------
+          RAW_EXCEPTIONS=$(sf data query \
+            --query "SELECT COUNT() FROM ApexLog WHERE LogLength > 0 AND Operation='ApexTrigger' AND Status='Unexpected exception' AND StartTime = LAST_N_DAYS:1" \
+            --target-org "$USERNAME" --json 2>/dev/null)
+          APEX_EXCEPTIONS=$(safe_int "$RAW_EXCEPTIONS" '.result.totalSize')
+
+          # -- Scheduled Jobs -------------------------------------------------
+          RAW_SCHED=$(sf data query \
+            --query "SELECT Id, CronJobDetail.Name, State, NextFireTime, PreviousFireTime FROM CronTrigger WHERE State IN ('WAITING','ACQUIRED') ORDER BY NextFireTime ASC LIMIT 20" \
+            --target-org "$USERNAME" --json 2>/dev/null)
+          SCHED_JSON=$(safe_array "$RAW_SCHED" '.result.records')
+
+          # -- Running Batch Jobs ---------------------------------------------
+          RAW_RUNNING=$(sf data query \
+            --query "SELECT Id, ApexClass.Name, Status, JobItemsProcessed, TotalJobItems, NumberOfErrors, CreatedDate FROM AsyncApexJob WHERE Status IN ('Processing','Queued','Preparing') ORDER BY CreatedDate DESC LIMIT 10" \
+            --target-org "$USERNAME" --json 2>/dev/null)
+          RUNNING_JSON=$(safe_array "$RAW_RUNNING" '.result.records')
+
+          # -- PMD / Code Analyzer --------------------------------------------
+          PMD_CRITICAL=0; PMD_HIGH=0; PMD_MEDIUM=0
+          if [[ -d "force-app" ]]; then
+            echo "🔍 Running Salesforce Code Analyzer..."
+            npm install -g @salesforce/sfdx-scanner --silent 2>/dev/null || true
+            sf scanner run \
+              --target "force-app/**/*.cls,force-app/**/*.trigger" \
+              --format json \
+              --severity-threshold 1 \
+              --output-file pmd_results.json 2>/dev/null || true
+            if [[ -f pmd_results.json ]]; then
+              PMD_CRITICAL=$(jq '[.[] | select(.severity == 1)] | length' pmd_results.json 2>/dev/null || echo 0)
+              PMD_HIGH=$(jq     '[.[] | select(.severity == 2)] | length' pmd_results.json 2>/dev/null || echo 0)
+              PMD_MEDIUM=$(jq   '[.[] | select(.severity == 3)] | length' pmd_results.json 2>/dev/null || echo 0)
+            fi
+          else
+            echo "⚠️ force-app not found — skipping PMD scan"
+          fi
+
+
+          # -- Health Score Calculation ---------------------------------------
+          COV_SCORE=$(awk "BEGIN {v=$APEX_COVERAGE; if(v>100)v=100; printf \"%.2f\", v * 0.20}")
+
+          if [[ $TEST_TOTAL -gt 0 ]]; then
+            TEST_SCORE=$(awk "BEGIN {printf \"%.2f\", ($TEST_PASS / $TEST_TOTAL) * 100 * 0.15}")
+          else
+            TEST_SCORE="15.00"
+          fi
+
+          PMD_SCORE=$(awk "BEGIN {v=100 - ($PMD_CRITICAL * 5) - ($PMD_HIGH * 2); if(v<0)v=0; printf \"%.2f\", v * 0.15}")
+          DEPLOY_SCORE=$(awk "BEGIN {printf \"%.2f\", $DEPLOY_RATE * 0.10}")
+
+          FAILED_BATCH_COUNT=$(echo "$BATCHES_JSON" | jq 'length')
+          STAB_SCORE=$(awk "BEGIN {v=100 - ($FAILED_BATCH_COUNT * 10) - ($APEX_EXCEPTIONS * 5); if(v<0)v=0; printf \"%.2f\", v * 0.05}")
+
+          CRITICAL_LIMITS=$(echo "$LIMITS_JSON" | jq '[.[] | select(.max > 0 and ((.remaining / .max) < 0.20))] | length' 2>/dev/null || echo 0)
+          GOV_SCORE=$(awk "BEGIN {v=100 - ($CRITICAL_LIMITS * 10); if(v<0)v=0; printf \"%.2f\", v * 0.10}")
+
+          SEC_SCORE=$(awk "BEGIN {printf \"%.2f\", ${SEC_RAW} * 0.25}")
+
+          HEALTH_SCORE=$(awk "BEGIN {printf \"%.0f\", $SEC_SCORE + $COV_SCORE + $TEST_SCORE + $PMD_SCORE + $DEPLOY_SCORE + $STAB_SCORE + $GOV_SCORE}")
+
+          if   [[ $HEALTH_SCORE -ge 95 ]]; then HEALTH_BAND="🟢 Excellent"
+          elif [[ $HEALTH_SCORE -ge 85 ]]; then HEALTH_BAND="🟢 Healthy"
+          elif [[ $HEALTH_SCORE -ge 75 ]]; then HEALTH_BAND="🟡 Warning"
+          elif [[ $HEALTH_SCORE -ge 60 ]]; then HEALTH_BAND="🟠 Risk"
+          else                                   HEALTH_BAND="🔴 Critical"
+          fi
+
+          # -- Build health JSON ----------------------------------------------
+          HEALTH_JSON=$(jq -n \
+            --arg  env               "$ENV" \
+            --arg  scan_time         "$SCAN_TIME" \
+            --arg  package           "$PACKAGE" \
+            --arg  health_band       "$HEALTH_BAND" \
+            --argjson health_score   "$HEALTH_SCORE" \
+            --arg  apex_coverage     "$APEX_COVERAGE" \
+            --argjson test_pass      "$TEST_PASS" \
+            --argjson test_fail      "$TEST_FAIL" \
+            --argjson test_total     "$TEST_TOTAL" \
+            --arg  deploy_rate       "$DEPLOY_RATE" \
+            --argjson deploy_success "$DEPLOY_SUCCESS" \
+            --argjson deploy_total   "$DEPLOY_TOTAL" \
+            --argjson pmd_critical   "$PMD_CRITICAL" \
+            --argjson pmd_high       "$PMD_HIGH" \
+            --argjson pmd_medium     "$PMD_MEDIUM" \
+            --argjson apex_exceptions "$APEX_EXCEPTIONS" \
+            --argjson failed_batch_count "$FAILED_BATCH_COUNT" \
+            --argjson critical_limits    "$CRITICAL_LIMITS" \
+            --arg    sec_raw             "$SEC_RAW" \
+            --arg    priv_count          "$PRIV_COUNT" \
+            --arg    inactive_count      "$INACTIVE_COUNT" \
+            --arg    no_mfa_count        "$NO_MFA_COUNT" \
+            --argjson guest_count        "$GUEST_COUNT" \
+            --argjson conn_app_count     "$CONN_APP_COUNT" \
+            --argjson old_api_count      "$OLD_API_COUNT" \
+            --argjson owd_public_count   "$OWD_PUBLIC_COUNT" \
+            --arg    data_storage_used   "$DATA_STORAGE_USED" \
+            --arg    data_storage_max    "$DATA_STORAGE_MAX" \
+            --arg    file_storage_used   "$FILE_STORAGE_USED" \
+            --arg    file_storage_max    "$FILE_STORAGE_MAX" \
+            --argjson apex              "$APEX_COUNT" \
+            --argjson triggers          "$TRIGGER_COUNT" \
+            --argjson flows             "$FLOW_COUNT" \
+            --argjson users             "$USER_COUNT" \
+            --argjson org_info          "$ORG_JSON" \
+            --argjson limits            "$LIMITS_JSON" \
+            --argjson failed_batches    "$BATCHES_JSON" \
+            --argjson test_failures     "$TESTS_JSON" \
+            --argjson scheduled_jobs    "$SCHED_JSON" \
+            --argjson running_jobs      "$RUNNING_JSON" \
+            --argjson deploy_history    "$DEPLOYS_JSON" \
+            '{
+              environment:   $env,
+              scan_time:     $scan_time,
+              package:       $package,
+              health_score:  $health_score,
+              health_band:   $health_band,
+              scores: {
+                apex_coverage:      $apex_coverage,
+                test_pass:          $test_pass,
+                test_fail:          $test_fail,
+                test_total:         $test_total,
+                deploy_rate:        $deploy_rate,
+                deploy_success:     $deploy_success,
+                deploy_total:       $deploy_total,
+                pmd_critical:       $pmd_critical,
+                pmd_high:           $pmd_high,
+                pmd_medium:         $pmd_medium,
+                apex_exceptions:    $apex_exceptions,
+                failed_batch_count: $failed_batch_count,
+                critical_limits:    $critical_limits,
+                sec_raw:            $sec_raw,
+                priv_count:         $priv_count,
+                inactive_count:     $inactive_count,
+                no_mfa_count:       $no_mfa_count,
+                guest_count:        $guest_count,
+                conn_app_count:     $conn_app_count,
+                old_api_count:      $old_api_count,
+                owd_public_count:   $owd_public_count,
+                data_storage_used:  $data_storage_used,
+                data_storage_max:   $data_storage_max,
+                file_storage_used:  $file_storage_used,
+                file_storage_max:   $file_storage_max
+              },
+              metadata: {
+                apex_classes:  $apex,
+                apex_triggers: $triggers,
+                active_flows:  $flows,
+                active_users:  $users
+              },
+              org_info:        $org_info,
+              governor_limits: $limits,
+              failed_batches:  $failed_batches,
+              test_failures:   $test_failures,
+              scheduled_jobs:  $scheduled_jobs,
+              running_jobs:    $running_jobs,
+              deploy_history:  $deploy_history
+            }')
+
+          echo "$HEALTH_JSON" > health_post_deploy.json
+          echo "✅ Post-deploy health collected | Score: $HEALTH_SCORE | $HEALTH_BAND"
+
+          echo "health_score=$HEALTH_SCORE"         >> $GITHUB_OUTPUT
+          echo "health_band=$HEALTH_BAND"           >> $GITHUB_OUTPUT
+          echo "apex_coverage=$APEX_COVERAGE"       >> $GITHUB_OUTPUT
+          echo "failed_batches=$FAILED_BATCH_COUNT" >> $GITHUB_OUTPUT
+          echo "test_fail=$TEST_FAIL"               >> $GITHUB_OUTPUT
+          echo "critical_limits=$CRITICAL_LIMITS"   >> $GITHUB_OUTPUT
+          echo "scan_time=$SCAN_TIME"               >> $GITHUB_OUTPUT
+
+
+      - name: Write Post-Deploy Health Summary
+        shell: bash
+        env:
+          ENV:     ${{ needs.Deployment_Build.outputs.environment }}
+          PACKAGE: ${{ needs.Deployment_Build.outputs.deploy_package }}
+          ACTOR:   ${{ needs.Deployment_Build.outputs.actor }}
+          RUN_ID:  ${{ needs.Deployment_Build.outputs.run_id }}
+          REPO:    ${{ needs.Deployment_Build.outputs.repo }}
+        run: |
+          FILE="health_post_deploy.json"
+          [[ ! -f "$FILE" ]] && echo "❌ No health data" >> $GITHUB_STEP_SUMMARY && exit 0
+
+          SCORE=$(jq -r    '.health_score              // "0"' "$FILE")
+          BAND=$(jq -r     '.health_band               // "N/A"' "$FILE")
+          SCAN_TIME=$(jq -r '.scan_time                // "N/A"' "$FILE")
+          COV=$(jq -r      '.scores.apex_coverage      // "0"' "$FILE")
+          T_PASS=$(jq -r   '.scores.test_pass          // 0' "$FILE")
+          T_FAIL=$(jq -r   '.scores.test_fail          // 0' "$FILE")
+          T_TOTAL=$(jq -r  '.scores.test_total         // 0' "$FILE")
+          D_RATE=$(jq -r   '.scores.deploy_rate        // "0"' "$FILE")
+          D_OK=$(jq -r     '.scores.deploy_success     // 0' "$FILE")
+          D_TOT=$(jq -r    '.scores.deploy_total       // 0' "$FILE")
+          PMD_C=$(jq -r    '.scores.pmd_critical       // 0' "$FILE")
+          PMD_H=$(jq -r    '.scores.pmd_high           // 0' "$FILE")
+          PMD_M=$(jq -r    '.scores.pmd_medium         // 0' "$FILE")
+          APEX_EX=$(jq -r  '.scores.apex_exceptions    // 0' "$FILE")
+          BATCHES=$(jq -r  '.scores.failed_batch_count // 0' "$FILE")
+          CRIT_LIM=$(jq -r '.scores.critical_limits    // 0' "$FILE")
+          SEC_RAW=$(jq -r  '.scores.sec_raw            // "0"' "$FILE")
+          PRIV_C=$(jq -r   '.scores.priv_count         // "0"' "$FILE")
+          INACT_C=$(jq -r  '.scores.inactive_count     // "0"' "$FILE")
+          NOMFA_C=$(jq -r  '.scores.no_mfa_count       // "0"' "$FILE")
+          GUEST_C=$(jq -r  '.scores.guest_count        // "0"' "$FILE")
+          CONN_C=$(jq -r   '.scores.conn_app_count     // "0"' "$FILE")
+          OWD_C=$(jq -r    '.scores.owd_public_count   // "0"' "$FILE")
+          OLD_API_C=$(jq -r '.scores.old_api_count     // "0"' "$FILE")
+          DS_USED_C=$(jq -r '.scores.data_storage_used // "0"' "$FILE")
+          DS_MAX_C=$(jq -r  '.scores.data_storage_max  // "0"' "$FILE")
+          FS_USED_C=$(jq -r '.scores.file_storage_used // "0"' "$FILE")
+          FS_MAX_C=$(jq -r  '.scores.file_storage_max  // "0"' "$FILE")
+          APEX=$(jq -r     '.metadata.apex_classes     // 0' "$FILE")
+          TRIG=$(jq -r     '.metadata.apex_triggers    // 0' "$FILE")
+          FLOWS=$(jq -r    '.metadata.active_flows     // 0' "$FILE")
+          USERS=$(jq -r    '.metadata.active_users     // 0' "$FILE")
+          BATCH_COUNT=$(jq '.failed_batches | length'        "$FILE")
+          TEST_COUNT=$(jq  '.test_failures  | length'        "$FILE")
+
+          SEC_RAW=$(jq -r '.scores.sec_raw       // "0"' "$FILE")
+          PRIV_C=$(jq -r  '.scores.priv_count     // "0"' "$FILE")
+          INACT_C=$(jq -r '.scores.inactive_count // "0"' "$FILE")
+          NOMFA_C=$(jq -r '.scores.no_mfa_count   // "0"' "$FILE")
+          P_SEC=$(awk  "BEGIN {printf \"%.1f\", (${SEC_RAW}+0)*0.25}")
+          P_SEC2=$(awk "BEGIN {printf \"%.2f\", (${SEC_RAW}+0)*0.25}")
+
+          # Pre-compute all awk values
+          P_COV=$(awk   "BEGIN {v=${COV}+0; if(v>100)v=100; printf \"%.1f\", v*0.20}")
+          P_TEST=$(awk  "BEGIN {t=${T_TOTAL}+0; p=${T_PASS}+0; if(t>0) printf \"%.1f\", (p/t)*100*0.15; else printf \"15.0\"}")
+          P_PMD=$(awk   "BEGIN {v=100-(${PMD_C}+0)*5-(${PMD_H}+0)*2; if(v<0)v=0; printf \"%.1f\", v*0.15}")
+          P_DEP=$(awk   "BEGIN {printf \"%.1f\", (${D_RATE}+0)*0.10}")
+          P_STAB=$(awk  "BEGIN {v=100-(${BATCHES}+0)*10-(${APEX_EX}+0)*5; if(v<0)v=0; printf \"%.1f\", v*0.05}")
+          P_GOV=$(awk   "BEGIN {v=100-(${CRIT_LIM}+0)*10; if(v<0)v=0; printf \"%.1f\", v*0.10}")
+          P_COV2=$(awk  "BEGIN {v=${COV}+0; if(v>100)v=100; printf \"%.2f\", v*0.20}")
+          P_TEST2=$(awk "BEGIN {t=${T_TOTAL}+0; p=${T_PASS}+0; if(t>0) printf \"%.2f\", (p/t)*100*0.15; else printf \"15.00\"}")
+          P_PMD2=$(awk  "BEGIN {v=100-(${PMD_C}+0)*5-(${PMD_H}+0)*2; if(v<0)v=0; printf \"%.2f\", v*0.15}")
+          P_DEP2=$(awk  "BEGIN {printf \"%.2f\", (${D_RATE}+0)*0.10}")
+          P_STAB2=$(awk "BEGIN {v=100-(${BATCHES}+0)*10-(${APEX_EX}+0)*5; if(v<0)v=0; printf \"%.2f\", v*0.05}")
+          P_GOV2=$(awk  "BEGIN {v=100-(${CRIT_LIM}+0)*10; if(v<0)v=0; printf \"%.2f\", v*0.10}")
+
+          BAR_CFG=$(printf '{"type":"bar","data":{"labels":["Security (25%%)","Apex Coverage (20%%)","Test Results (15%%)","Code Quality (15%%)","Deployment (10%%)","Org Stability (5%%)","Gov Limits (10%%)"],"datasets":[{"label":"Score","data":[%s,%s,%s,%s,%s,%s,%s],"backgroundColor":["#9966ff","#4bc0c0","#36a2eb","#ff9f40","#ffcd56","#ff6384","#c9cbcf"]}]},"options":{"indexAxis":"y","plugins":{"title":{"display":true,"text":"Post-Deploy Health Score - %s (%s/100)"},"legend":{"display":false}},"scales":{"x":{"min":0,"max":25}}}}' \
+            "$P_SEC" "$P_COV" "$P_TEST" "$P_PMD" "$P_DEP" "$P_STAB" "$P_GOV" "$ENV" "$SCORE")
+          BAR_URL="https://quickchart.io/chart?w=500&h=250&c=$(printf '%s' "$BAR_CFG" | jq -sRr @uri 2>/dev/null || printf '%s' "$BAR_CFG" | sed 's/ /%20/g;s/{/%7B/g;s/}/%7D/g;s/"/%22/g;s/,/%2C/g;s/:/%3A/g;s/\[/%5B/g;s/\]/%5D/g')"
+
+          {
+            echo "## 🏥 Post-Deployment Health Check — ${ENV}"
+            echo "_Scanned at: ${SCAN_TIME} | Package: \`${PACKAGE}\` | Deployed by: ${ACTOR}_"
+            echo ""
+            echo "### 🏆 Overall Health Score: \`$SCORE / 100\` — $BAND"
+            echo ""
+            echo "![Health Score Breakdown](${BAR_URL})"
+            echo ""
+            echo "### 📊 Score Breakdown"
+            echo "| Category | Weight | Raw Value | Points |"
+            echo "|---|---|---|---|"
+            echo "| 🔒 Security Health Check | 25% | ${SEC_RAW}/100 (Priv:${PRIV_C} Inactive:${INACT_C} NoMFA:${NOMFA_C} Guest:${GUEST_C} ConnApps:${CONN_C} OWD:${OWD_C}) | ${P_SEC2} |"
+            echo "| 🧪 Apex Coverage | 20% | ${COV}% | ${P_COV2} |"
+            echo "| ✅ Test Results | 15% | ${T_PASS}/${T_TOTAL} passed | ${P_TEST2} |"
+            echo "| 🔍 Code Quality (PMD) | 15% | Critical:$PMD_C High:$PMD_H Med:$PMD_M DeprecatedAPI:${OLD_API_C} | ${P_PMD2} |"
+            echo "| 🚀 Deployment Success | 10% | ${D_RATE}% (${D_OK}/${D_TOT}) | ${P_DEP2} |"
+            echo "| ⚙️ Org Stability | 5% | Batches:$BATCHES Exceptions:$APEX_EX | ${P_STAB2} |"
+            echo "| 📊 Governor Limits | 10% | Critical:$CRIT_LIM | ${P_GOV2} |"
+            echo ""
+            echo "### 💾 Storage Usage"
+            echo "| Type | Used (MB) | Max (MB) | Used% |"
+            echo "|---|---|---|---|"
+            if [[ "${DS_MAX_C}" -gt 0 ]]; then
+              DS_PCT=$(awk "BEGIN {printf \"%.1f\", (${DS_USED_C}+0)/(${DS_MAX_C}+0)*100}")
+              echo "| Data Storage | ${DS_USED_C} | ${DS_MAX_C} | ${DS_PCT}% |"
+            else
+              echo "| Data Storage | ${DS_USED_C} | N/A | N/A |"
+            fi
+            if [[ "${FS_MAX_C}" -gt 0 ]]; then
+              FS_PCT=$(awk "BEGIN {printf \"%.1f\", (${FS_USED_C}+0)/(${FS_MAX_C}+0)*100}")
+              echo "| File Storage | ${FS_USED_C} | ${FS_MAX_C} | ${FS_PCT}% |"
+            else
+              echo "| File Storage | ${FS_USED_C} | N/A | N/A |"
+            fi
+            echo ""
+            echo ""
+            echo "### 📋 Health Status Bands"
+            echo "| Band | Score Range | Status |"
+            echo "|---|---|---|"
+            echo "| 🟢 Excellent | 95–100 | $([ "$SCORE" -ge 95 ] && echo "**← YOU ARE HERE**" || echo "") |"
+            echo "| 🟢 Healthy   | 85–94  | $([ "$SCORE" -ge 85 ] && [ "$SCORE" -lt 95 ] && echo "**← YOU ARE HERE**" || echo "") |"
+            echo "| 🟡 Warning   | 75–84  | $([ "$SCORE" -ge 75 ] && [ "$SCORE" -lt 85 ] && echo "**← YOU ARE HERE**" || echo "") |"
+            echo "| 🟠 Risk      | 60–74  | $([ "$SCORE" -ge 60 ] && [ "$SCORE" -lt 75 ] && echo "**← YOU ARE HERE**" || echo "") |"
+            echo "| 🔴 Critical  | < 60   | $([ "$SCORE" -lt 60 ] && echo "**← YOU ARE HERE**" || echo "") |"
+            echo ""
+            echo "### 📦 Metadata Counts"
+            echo "| Metric | Value |"
+            echo "|---|---|"
+            echo "| Active Apex Classes | $APEX |"
+            echo "| Active Apex Triggers | $TRIG |"
+            echo "| Active Flows | $FLOWS |"
+            echo "| Active Users | $USERS |"
+            echo "| Apex Exceptions (24h) | $APEX_EX |"
+            echo "| Failed Batch Jobs (24h) | $BATCHES |"
+            echo "| Apex Test Failures (24h) | $TEST_COUNT |"
+            echo "| Critical Governor Limits | $CRIT_LIM |"
+            echo ""
+            echo "### 📊 Governor Limits (Top 10 most consumed)"
+            echo "| Limit | Remaining | Max | Used% | Status |"
+            echo "|---|---|---|---|---|"
+            jq -r '
+              .governor_limits
+              | map(select(.max > 0))
+              | sort_by(.remaining / .max)
+              | .[0:10][]
+              | (.max - .remaining) as $used
+              | (($used / .max) * 100 | floor) as $pct
+              | (.remaining / .max) as $ratio
+              | if $ratio < 0.20 then "🔴" elif $ratio < 0.50 then "🟡" else "🟢" end as $badge
+              | "| \(.name) | \(.remaining) | \(.max) | \($pct)% | \($badge) |"
+            ' "$FILE" 2>/dev/null || echo "| N/A | — | — | — | — |"
+            echo ""
+
+            if [[ $BATCH_COUNT -gt 0 ]]; then
+              echo "### ⚙️ Failed Batch Jobs (last 24h)"
+              echo "| Apex Class | Errors | Total Items | Created |"
+              echo "|---|---|---|---|"
+              jq -r '.failed_batches[] | "| \(.ApexClass.Name // "Unknown") | \(.NumberOfErrors) | \(.TotalJobItems) | \(.CreatedDate // "") |"' "$FILE"
+              echo ""
+            fi
+
+            if [[ $TEST_COUNT -gt 0 ]]; then
+              echo "### 🧪 Apex Test Failures (last 24h)"
+              echo "| Class | Method | Message |"
+              echo "|---|---|---|"
+              jq -r '.test_failures[] | "| \(.ApexClass.Name // "Unknown") | \(.MethodName) | \(.Message // "" | .[0:120]) |"' "$FILE"
+              echo ""
+            fi
+
+            echo "[View full run →](https://github.com/${REPO}/actions/runs/${RUN_ID})"
+          } >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload Health Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: post-deploy-health-${{ github.run_id }}
+          path: health_post_deploy.json
+          retention-days: 30
+
+      - name: Send Health Check Email
+        id: build-email
+        if: always()
+        shell: bash
+        env:
+          ENV:     ${{ needs.Deployment_Build.outputs.environment }}
+          PACKAGE: ${{ needs.Deployment_Build.outputs.deploy_package }}
+          ACTOR:   ${{ needs.Deployment_Build.outputs.actor }}
+          RUN_ID:  ${{ needs.Deployment_Build.outputs.run_id }}
+          REPO:    ${{ needs.Deployment_Build.outputs.repo }}
+        run: |
+          FILE="health_post_deploy.json"
+          [[ ! -f "$FILE" ]] && echo "⚠️ No health data — skipping email" && exit 0
+
+          SCORE=$(jq -r    '.health_score              // "0"'  "$FILE")
+          BAND=$(jq -r     '.health_band               // "N/A"' "$FILE")
+          SCAN_TIME=$(jq -r '.scan_time                // "N/A"' "$FILE")
+          COV=$(jq -r      '.scores.apex_coverage      // "0"'  "$FILE")
+          T_PASS=$(jq -r   '.scores.test_pass          // 0'    "$FILE")
+          T_FAIL=$(jq -r   '.scores.test_fail          // 0'    "$FILE")
+          T_TOTAL=$(jq -r  '.scores.test_total         // 0'    "$FILE")
+          D_RATE=$(jq -r   '.scores.deploy_rate        // "0"'  "$FILE")
+          PMD_C=$(jq -r    '.scores.pmd_critical       // 0'    "$FILE")
+          PMD_H=$(jq -r    '.scores.pmd_high           // 0'    "$FILE")
+          PMD_M=$(jq -r    '.scores.pmd_medium         // 0'    "$FILE")
+          APEX_EX=$(jq -r  '.scores.apex_exceptions    // 0'    "$FILE")
+          BATCHES=$(jq -r  '.scores.failed_batch_count // 0'    "$FILE")
+          CRIT_LIM=$(jq -r '.scores.critical_limits    // 0'    "$FILE")
+          SEC_RAW=$(jq -r  '.scores.sec_raw            // "0"'  "$FILE")
+          PRIV_C=$(jq -r   '.scores.priv_count         // "0"'  "$FILE")
+          INACT_C=$(jq -r  '.scores.inactive_count     // "0"'  "$FILE")
+          NOMFA_C=$(jq -r  '.scores.no_mfa_count       // "0"'  "$FILE")
+          GUEST_C=$(jq -r  '.scores.guest_count        // "0"'  "$FILE")
+          CONN_C=$(jq -r   '.scores.conn_app_count     // "0"'  "$FILE")
+          OWD_C=$(jq -r    '.scores.owd_public_count   // "0"'  "$FILE")
+          OLD_API_C=$(jq -r '.scores.old_api_count     // "0"'  "$FILE")
+          DS_USED_C=$(jq -r '.scores.data_storage_used // "0"'  "$FILE")
+          DS_MAX_C=$(jq -r  '.scores.data_storage_max  // "0"'  "$FILE")
+          FS_USED_C=$(jq -r '.scores.file_storage_used // "0"'  "$FILE")
+          FS_MAX_C=$(jq -r  '.scores.file_storage_max  // "0"'  "$FILE")
+          APEX=$(jq -r     '.metadata.apex_classes     // 0'    "$FILE")
+          TRIG=$(jq -r     '.metadata.apex_triggers    // 0'    "$FILE")
+          FLOWS=$(jq -r    '.metadata.active_flows     // 0'    "$FILE")
+          USERS=$(jq -r    '.metadata.active_users     // 0'    "$FILE")
+          BATCH_COUNT=$(jq '.failed_batches | length'           "$FILE")
+          TEST_COUNT=$(jq  '.test_failures  | length'           "$FILE")
+
+          P_SEC=$(awk   "BEGIN {printf \"%.2f\", (${SEC_RAW}+0)*0.25}")
+          P_COV=$(awk   "BEGIN {v=${COV}+0; if(v>100)v=100; printf \"%.2f\", v*0.20}")
+          P_TEST=$(awk  "BEGIN {t=${T_TOTAL}+0; p=${T_PASS}+0; if(t>0) printf \"%.2f\", (p/t)*100*0.15; else printf \"15.00\"}")
+          P_PMD=$(awk   "BEGIN {v=100-(${PMD_C}+0)*5-(${PMD_H}+0)*2; if(v<0)v=0; printf \"%.2f\", v*0.15}")
+          P_DEP=$(awk   "BEGIN {printf \"%.2f\", (${D_RATE}+0)*0.10}")
+          P_STAB=$(awk  "BEGIN {v=100-(${BATCHES}+0)*10-(${APEX_EX}+0)*5; if(v<0)v=0; printf \"%.2f\", v*0.05}")
+          P_GOV=$(awk   "BEGIN {v=100-(${CRIT_LIM}+0)*10; if(v<0)v=0; printf \"%.2f\", v*0.10}")
+
+          if   [[ $SCORE -ge 95 ]]; then BAND_COLOR="#28a745"
+          elif [[ $SCORE -ge 85 ]]; then BAND_COLOR="#5cb85c"
+          elif [[ $SCORE -ge 75 ]]; then BAND_COLOR="#f0ad4e"
+          elif [[ $SCORE -ge 60 ]]; then BAND_COLOR="#e67e22"
+          else                           BAND_COLOR="#dc3545"
+          fi
+
+          BAR_CFG=$(printf '{"type":"bar","data":{"labels":["Security (25%%)","Apex Coverage (20%%)","Test Results (15%%)","Code Quality (15%%)","Deployment (10%%)","Org Stability (5%%)","Gov Limits (10%%)"],"datasets":[{"label":"Score","data":[%s,%s,%s,%s,%s,%s,%s],"backgroundColor":["#9966ff","#4bc0c0","#36a2eb","#ff9f40","#ffcd56","#ff6384","#c9cbcf"]}]},"options":{"indexAxis":"y","plugins":{"title":{"display":true,"text":"Post-Deploy Health - %s (%s/100)"},"legend":{"display":false}},"scales":{"x":{"min":0,"max":25}}}}' \
+            "$P_SEC" "$P_COV" "$P_TEST" "$P_PMD" "$P_DEP" "$P_STAB" "$P_GOV" "$ENV" "$SCORE")
+          BAR_URL="https://quickchart.io/chart?w=500&h=250&c=$(printf '%s' "$BAR_CFG" | jq -sRr @uri 2>/dev/null)"
+
+          FAILED_BATCHES_HTML=""
+          if [[ $BATCH_COUNT -gt 0 ]]; then
+            FAILED_BATCHES_HTML+="<h3 style='color:#e67e22'>⚙️ Failed Batch Jobs (last 24h)</h3>"
+            FAILED_BATCHES_HTML+="<table border='1' cellpadding='6' cellspacing='0' style='border-collapse:collapse;width:100%'>"
+            FAILED_BATCHES_HTML+="<tr style='background:#f5f5f5'><th>Apex Class</th><th>Errors</th><th>Total Items</th><th>Created</th></tr>"
+            while IFS= read -r ROW; do
+              FAILED_BATCHES_HTML+="$ROW"
+            done < <(jq -r '.failed_batches[] | "<tr><td>\(.ApexClass.Name // "Unknown")</td><td>\(.NumberOfErrors)</td><td>\(.TotalJobItems)</td><td>\(.CreatedDate // "")</td></tr>"' "$FILE")
+            FAILED_BATCHES_HTML+="</table>"
+          fi
+
+          TEST_FAILURES_HTML=""
+          if [[ $TEST_COUNT -gt 0 ]]; then
+            TEST_FAILURES_HTML+="<h3 style='color:#dc3545'>🧪 Apex Test Failures (last 24h)</h3>"
+            TEST_FAILURES_HTML+="<table border='1' cellpadding='6' cellspacing='0' style='width:100%;border-collapse:collapse'>"
+            TEST_FAILURES_HTML+="<tr style='background:#f5f5f5'><th>Class</th><th>Method</th><th>Message</th></tr>"
+            while IFS= read -r ROW; do
+              TEST_FAILURES_HTML+="$ROW"
+            done < <(jq -r '.test_failures[] | "<tr><td>\(.ApexClass.Name // "Unknown")</td><td>\(.MethodName)</td><td>\(.Message // "" | .[0:120])</td></tr>"' "$FILE")
+            TEST_FAILURES_HTML+="</table>"
+          fi
+
+          RUN_URL="https://github.com/${REPO}/actions/runs/${RUN_ID}"
+
+          EMAIL_BODY=""
+          EMAIL_BODY+="<html><body style='font-family:Arial,sans-serif;max-width:800px;margin:auto'>"
+          EMAIL_BODY+="<div style='background:${BAND_COLOR};color:#fff;padding:20px;border-radius:8px 8px 0 0'>"
+          EMAIL_BODY+="<h1 style='margin:0'>🏥 Post-Deployment Health Check</h1>"
+          EMAIL_BODY+="<p style='margin:4px 0 0'>Environment: <strong>${ENV}</strong> | Package: <strong>${PACKAGE}</strong></p>"
+          EMAIL_BODY+="<p style='margin:4px 0 0'>Scanned: ${SCAN_TIME} | Deployed by: ${ACTOR}</p>"
+          EMAIL_BODY+="</div>"
+          EMAIL_BODY+="<div style='border:1px solid #ddd;padding:20px'>"
+          EMAIL_BODY+="<h2 style='color:${BAND_COLOR}'>Overall Score: ${SCORE}/100 — ${BAND}</h2>"
+          EMAIL_BODY+="<img src='${BAR_URL}' alt='Health Score Chart' style='max-width:100%'/>"
+          EMAIL_BODY+="<h3>📊 Score Breakdown</h3>"
+          EMAIL_BODY+="<table border='1' cellpadding='8' cellspacing='0' style='border-collapse:collapse;width:100%'>"
+          EMAIL_BODY+="<tr style='background:#f5f5f5'><th>Category</th><th>Weight</th><th>Raw Value</th><th>Points</th></tr>"
+          EMAIL_BODY+="<tr><td>🔒 Security</td><td>25%</td><td>${SEC_RAW}/100 (Priv:${PRIV_C} Inactive:${INACT_C} NoMFA:${NOMFA_C} Guest:${GUEST_C} ConnApps:${CONN_C} OWD:${OWD_C})</td><td>${P_SEC}</td></tr>"
+          EMAIL_BODY+="<tr><td>🧪 Apex Coverage</td><td>20%</td><td>${COV}%</td><td>${P_COV}</td></tr>"
+          EMAIL_BODY+="<tr><td>✅ Test Results</td><td>15%</td><td>${T_PASS}/${T_TOTAL} passed</td><td>${P_TEST}</td></tr>"
+          EMAIL_BODY+="<tr><td>🔍 Code Quality (PMD)</td><td>15%</td><td>Critical:${PMD_C} High:${PMD_H} Med:${PMD_M} DeprecatedAPI:${OLD_API_C}</td><td>${P_PMD}</td></tr>"
+          EMAIL_BODY+="<tr><td>🚀 Deployment Success</td><td>10%</td><td>${D_RATE}%</td><td>${P_DEP}</td></tr>"
+          EMAIL_BODY+="<tr><td>⚙️ Org Stability</td><td>5%</td><td>Batches:${BATCHES} Exceptions:${APEX_EX}</td><td>${P_STAB}</td></tr>"
+          EMAIL_BODY+="<tr><td>📊 Governor Limits</td><td>10%</td><td>Critical:${CRIT_LIM}</td><td>${P_GOV}</td></tr>"
+          EMAIL_BODY+="</table>"
+          EMAIL_BODY+="<h3>📦 Metadata Counts</h3>"
+          EMAIL_BODY+="<table border='1' cellpadding='6' cellspacing='0' style='border-collapse:collapse'>"
+          EMAIL_BODY+="<tr><td>Active Apex Classes</td><td><strong>${APEX}</strong></td></tr>"
+          EMAIL_BODY+="<tr><td>Active Apex Triggers</td><td><strong>${TRIG}</strong></td></tr>"
+          EMAIL_BODY+="<tr><td>Active Flows</td><td><strong>${FLOWS}</strong></td></tr>"
+          EMAIL_BODY+="<tr><td>Active Users</td><td><strong>${USERS}</strong></td></tr>"
+          EMAIL_BODY+="<tr><td>Apex Exceptions (24h)</td><td><strong>${APEX_EX}</strong></td></tr>"
+          EMAIL_BODY+="<tr><td>Failed Batch Jobs (24h)</td><td><strong>${BATCHES}</strong></td></tr>"
+          EMAIL_BODY+="<tr><td>Critical Governor Limits</td><td><strong>${CRIT_LIM}</strong></td></tr>"
+          EMAIL_BODY+="</table>"
+          EMAIL_BODY+="<h3>💾 Storage Usage</h3>"
+          EMAIL_BODY+="<table border='1' cellpadding='6' cellspacing='0' style='border-collapse:collapse'>"
+          EMAIL_BODY+="<tr style='background:#f5f5f5'><th>Type</th><th>Used (MB)</th><th>Max (MB)</th></tr>"
+          EMAIL_BODY+="<tr><td>Data Storage</td><td><strong>${DS_USED_C}</strong></td><td>${DS_MAX_C}</td></tr>"
+          EMAIL_BODY+="<tr><td>File Storage</td><td><strong>${FS_USED_C}</strong></td><td>${FS_MAX_C}</td></tr>"
+          EMAIL_BODY+="</table>"
+          EMAIL_BODY+="${FAILED_BATCHES_HTML}"
+          EMAIL_BODY+="${TEST_FAILURES_HTML}"
+          EMAIL_BODY+="<p style='margin-top:20px'><a href='${RUN_URL}' style='background:#0366d6;color:#fff;padding:8px 16px;border-radius:4px;text-decoration:none'>View Full Run →</a></p>"
+          EMAIL_BODY+="</div></body></html>"
+
+          echo "$EMAIL_BODY" > email_body.html
+          echo "email_subject=Post-Deploy Health: ${ENV} | Score: ${SCORE}/100 | ${PACKAGE}" >> $GITHUB_OUTPUT
+
+      - name: Dispatch Health Check Email
+        if: always()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_SERVER }}
+          server_port:    ${{ secrets.SMTP_PORT }}
+          username:       ${{ secrets.SMTP_USERNAME }}
+          password:       ${{ secrets.SMTP_PASSWORD }}
+          subject:        "Post-Deploy Health: ${{ needs.Deployment_Build.outputs.environment }} | ${{ needs.Deployment_Build.outputs.deploy_package }}"
+          to:             ${{ secrets.NOTIFY_EMAILS }}
+          from:           "Do not Reply <${{ secrets.GMAIL_USERNAME }}>"
+          html_body:      file://email_body.html
+          convert_markdown: false
+
+      - name: Cleanup JWT Key
+        if: always()
+        run: rm -f server.key
+
+
+  Jira_Transition:
+    runs-on: ubuntu-latest
+    needs: [Deployment_Build, Post_Deployment_Health_Check]
+    if: |
+      needs.Deployment_Build.result == 'success' &&
+      contains(fromJSON('["DEV","QA","UAT","PRODUCTION"]'), needs.Deployment_Build.outputs.environment) &&
+      (needs.Deployment_Build.outputs.environment != 'PRODUCTION' || needs.Post_Deployment_Health_Check.result == 'success')
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract Jira Tickets
+        id: extract_tickets
+        shell: bash
+        env:
+          PACKAGE: ${{ needs.Deployment_Build.outputs.deploy_package }}
+          SOURCE_BRANCHES: ${{ needs.Deployment_Build.outputs.source_branches }}
+          ENVIRONMENT: ${{ needs.Deployment_Build.outputs.environment }}
+        run: |
+          BRANCH_INPUT="${SOURCE_BRANCHES:-$PACKAGE}"
+          BRANCH_TICKETS=$(echo "$BRANCH_INPUT" | grep -oP '(?<![A-Z0-9])[A-Z][A-Z0-9]+[-_]\d+(?![A-Z0-9-])' | sort -u || true)
+
+          LAST_TAG=$(git tag --list "${ENVIRONMENT}/*" --sort=-creatordate | head -1 || true)
+          if [[ -n "$LAST_TAG" ]]; then
+            echo "  Scanning commits since tag: $LAST_TAG"
+            COMMIT_LOG=$(git log "${LAST_TAG}..HEAD" --pretty=format:"%s %b" 2>/dev/null || git log -50 --pretty=format:"%s %b")
+          else
+            echo "  No prior tag found — scanning last 50 commits"
+            COMMIT_LOG=$(git log -50 --pretty=format:"%s %b")
+          fi
+          COMMIT_TICKETS=$(echo "$COMMIT_LOG" | grep -oP '(?<![A-Z0-9])[A-Z][A-Z0-9]+[-_]\d+(?![A-Z0-9-])' | sort -u || true)
+
+          ALL_TICKETS=$(printf '%s\n%s\n' "$BRANCH_TICKETS" "$COMMIT_TICKETS" \
+            | grep -oP '(?<![A-Z0-9])[A-Z][A-Z0-9]+[-_]\d+(?![A-Z0-9-])' | sort -u | tr '\n' ',' | sed 's/,$//' || true)
+
+          if [[ -z "$ALL_TICKETS" ]]; then
+            echo "⚠️ No Jira tickets found — skipping transition"
+            echo "has_tickets=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "✅ Tickets: $ALL_TICKETS"
+            echo "tickets=$ALL_TICKETS" >> "$GITHUB_OUTPUT"
+            echo "has_tickets=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Transition Jira Tickets
+        if: steps.extract_tickets.outputs.has_tickets == 'true'
+        shell: bash
+        env:
+          TICKETS:             ${{ steps.extract_tickets.outputs.tickets }}
+          ENVIRONMENT:         ${{ needs.Deployment_Build.outputs.environment }}
+          JIRA_BASE_URL:       ${{ secrets.JIRA_BASE_URL }}
+          JIRA_USER_EMAIL:     ${{ secrets.JIRA_USER_EMAIL }}
+          ATLASSIAN_API_TOKEN: ${{ secrets.ATLASSIAN_API_TOKEN }}
+          TRANSITION_ID_QA:    ${{ secrets.JIRA_QA_TRANSITION_ID }}
+          TRANSITION_ID_UAT:   ${{ secrets.JIRA_UAT_TRANSITION_ID }}
+          TRANSITION_ID_PROD:  ${{ secrets.JIRA_PROD_TRANSITION_ID }}
+        run: |
+          case "$ENVIRONMENT" in
+            QA)         TRANSITION_ID="$TRANSITION_ID_QA" ;;
+            UAT)        TRANSITION_ID="$TRANSITION_ID_UAT" ;;
+            PRODUCTION) TRANSITION_ID="$TRANSITION_ID_PROD" ;;
+          esac
+
+          if [[ -z "$TRANSITION_ID" ]]; then
+            echo "⚠️ Transition ID not set for $ENVIRONMENT — skipping"
+            exit 0
+          fi
+
+          echo "🔄 Transitioning tickets to $ENVIRONMENT status..."
+          IFS=',' read -ra TICKET_ARRAY <<< "$TICKETS"
+          for TICKET in "${TICKET_ARRAY[@]}"; do
+            TICKET=$(echo "$TICKET" | xargs)
+            ISSUE_RESP=$(curl -s \
+              -u "${JIRA_USER_EMAIL}:${ATLASSIAN_API_TOKEN}" \
+              -H "Content-Type: application/json" \
+              "${JIRA_BASE_URL}/rest/api/3/issue/${TICKET}?fields=status")
+            CURRENT_STATUS=$(echo "$ISSUE_RESP" | jq -r '.fields.status.name // "Unknown"')
+
+            TRANS_HTTP=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+              -u "${JIRA_USER_EMAIL}:${ATLASSIAN_API_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d "{\"transition\": {\"id\": \"${TRANSITION_ID}\"}}" \
+              "${JIRA_BASE_URL}/rest/api/3/issue/${TICKET}/transitions")
+
+            if [[ "$TRANS_HTTP" == "204" ]]; then
+              echo "  ✅ $TICKET → $ENVIRONMENT (was: $CURRENT_STATUS)"
+            else
+              echo "  ⚠️ $TICKET transition failed (HTTP $TRANS_HTTP) — was: $CURRENT_STATUS"
+            fi
+          done
+
+
+  Update_Release_Notes:
+    runs-on: ubuntu-latest
+    needs: [Deployment_Build, Post_Deployment_Health_Check, Jira_Transition]
+    if: |
+      needs.Deployment_Build.result == 'success' &&
+      needs.Post_Deployment_Health_Check.result == 'success' &&
+      needs.Jira_Transition.result == 'success' &&
+      needs.Deployment_Build.outputs.environment == 'PRODUCTION'
 
     env:
       JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
@@ -562,26 +1285,39 @@ jobs:
         with:
           fetch-depth: 50
 
-      - name: Extract Jira Tickets from Commits
+      - name: Extract Jira Tickets from Branch Names and Commits
         id: extract_tickets
         shell: bash
         env:
           PACKAGE: ${{ needs.Deployment_Build.outputs.deploy_package }}
           SOURCE_BRANCHES: ${{ needs.Deployment_Build.outputs.source_branches }}
         run: |
-          echo "🔍 Extracting Jira ticket IDs from branch name(s)..."
+          echo "🔍 Extracting Jira tickets from branch names AND git commits..."
 
-          # Use source_branches if multi-package, else deploy_package
-          INPUT="${SOURCE_BRANCHES:-$PACKAGE}"
+          BRANCH_INPUT="${SOURCE_BRANCHES:-$PACKAGE}"
+          BRANCH_TICKETS=$(echo "$BRANCH_INPUT" | grep -oP '(?<![A-Z0-9])[A-Z][A-Z0-9]+[-_]\d+(?![A-Z0-9-])' | sort -u || true)
+          echo "  Branch tickets : $(echo "$BRANCH_TICKETS" | tr '\n' ' ')"
 
-          TICKETS=$(echo "$INPUT" | grep -oP '[A-Z]+[-_]\d+' | sort -u | tr '\n' ',' | sed 's/,$//' || true)
+          LAST_TAG=$(git tag --list 'PRODUCTION/*' --sort=-creatordate | head -1 || true)
+          if [[ -n "$LAST_TAG" ]]; then
+            echo "  Scanning commits since tag: $LAST_TAG"
+            COMMIT_LOG=$(git log "${LAST_TAG}..HEAD" --pretty=format:"%s %b" 2>/dev/null || git log -50 --pretty=format:"%s %b")
+          else
+            echo "  No prior tag found — scanning last 50 commits"
+            COMMIT_LOG=$(git log -50 --pretty=format:"%s %b")
+          fi
+          COMMIT_TICKETS=$(echo "$COMMIT_LOG" | grep -oP '(?<![A-Z0-9])[A-Z][A-Z0-9]+[-_]\d+(?![A-Z0-9-])' | sort -u || true)
+          echo "  Commit tickets : $(echo "$COMMIT_TICKETS" | tr '\n' ' ')"
 
-          if [[ -z "$TICKETS" ]]; then
-            echo "⚠️ No Jira tickets found in branch name(s): $INPUT"
+          ALL_TICKETS=$(printf '%s\n%s\n' "$BRANCH_TICKETS" "$COMMIT_TICKETS" \
+            | grep -oP '(?<![A-Z0-9])[A-Z][A-Z0-9]+[-_]\d+(?![A-Z0-9-])' | sort -u | tr '\n' ',' | sed 's/,$//' || true)
+
+          if [[ -z "$ALL_TICKETS" ]]; then
+            echo "⚠️ No Jira tickets found in branch names or commits"
             echo "has_tickets=false" >> "$GITHUB_OUTPUT"
           else
-            echo "✅ Found tickets: $TICKETS"
-            echo "tickets=$TICKETS" >> "$GITHUB_OUTPUT"
+            echo "✅ All tickets (deduplicated): $ALL_TICKETS"
+            echo "tickets=$ALL_TICKETS" >> "$GITHUB_OUTPUT"
             echo "has_tickets=true" >> "$GITHUB_OUTPUT"
           fi
 
@@ -606,7 +1342,6 @@ jobs:
           TAG_URL="https://github.com/${REPO}/releases/tag/${TAG_NAME}"
           RUN_URL="https://github.com/${REPO}/actions/runs/${RUN_ID}"
 
-          # ── Release header block ────────────────────────────────────────────
           RELEASE_HTML="<h2>🚀 Release — ${ENVIRONMENT} | ${RELEASE_DATE}</h2>"
           RELEASE_HTML+="<table>"
           RELEASE_HTML+="<tr><th>Field</th><th>Details</th></tr>"
@@ -628,14 +1363,12 @@ jobs:
           RELEASE_HTML+="<tr><td><strong>GitHub Actions Run</strong></td><td><a href=\"${RUN_URL}\">${RUN_ID}</a></td></tr>"
           RELEASE_HTML+="</table>"
 
-          # ── Jira tickets table ───────────────────────────────────────────────
           TICKET_COUNT=0
           if [[ -n "$TICKETS" ]]; then
             RELEASE_HTML+="<h3>📋 Jira Tickets</h3>"
             RELEASE_HTML+="<table><tr><th>Ticket</th><th>Summary</th><th>Type</th><th>Status</th><th>Priority</th></tr>"
 
             IFS=',' read -ra TICKET_ARRAY <<< "$TICKETS"
-
             for TICKET in "${TICKET_ARRAY[@]}"; do
               TICKET=$(echo "$TICKET" | xargs)
               echo "  Fetching: $TICKET"
@@ -660,7 +1393,6 @@ jobs:
                 RELEASE_HTML+="<tr><td>${TICKET}</td><td colspan=\"4\">Could not fetch details</td></tr>"
               fi
             done
-
             RELEASE_HTML+="</table><p><em>Total tickets: ${TICKET_COUNT}</em></p>"
           else
             RELEASE_HTML+="<p><em>No Jira tickets found in recent commits.</em></p>"
@@ -691,7 +1423,6 @@ jobs:
 
           NEW_VERSION=$((CURRENT_VERSION + 1))
           echo "📝 Updating: $PAGE_TITLE (v$CURRENT_VERSION → v$NEW_VERSION)"
-
           NEW_BODY="${RELEASE_HTML}${CURRENT_BODY}"
 
           UPDATE_RESPONSE=$(curl -s -w "\n%{http_code}" \
@@ -706,7 +1437,6 @@ jobs:
             "${CONFLUENCE_BASE_URL}/rest/api/content/${PAGE_ID}")
 
           UPDATE_CODE=$(echo "$UPDATE_RESPONSE" | tail -1)
-
           if [[ "$UPDATE_CODE" == "200" ]]; then
             echo "✅ Confluence page updated successfully!"
             echo "🔗 ${CONFLUENCE_BASE_URL}/pages/viewpage.action?pageId=${PAGE_ID}"
@@ -715,310 +1445,4 @@ jobs:
             echo "$UPDATE_RESPONSE" | sed '$d'
             exit 1
           fi
-
-  # ── Job: Post-Production Health Check ────────────────────────────────────────
-  Production_Health_Check:
-    name: Production Health Check
-    runs-on: ubuntu-latest
-    needs: [Deployment_Build, Update_Release_Notes]
-    if: >
-      needs.Deployment_Build.result == 'success' &&
-      needs.Deployment_Build.outputs.environment == 'PRODUCTION'
-    permissions:
-      contents: read
-
-    steps:
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
-      - name: Install Salesforce CLI
-        run: npm install -g @salesforce/cli@latest --silent
-
-      - name: Generate JWT Key
-        run: |
-          echo "${{ secrets.SALESFORCE_JWT_SECRET_KEY }}" > server.key
-          chmod 600 server.key
-
-      - name: Authenticate to Production
-        run: |
-          sf org logout --all --no-prompt || true
-          sf org login jwt \
-            --client-id "${{ secrets.SALESFORCE_CONSUMER_KEY_PROD }}" \
-            --jwt-key-file server.key \
-            --username "${{ secrets.SFDX_AUTH_PROD_USERNAME }}" \
-            --instance-url "${{ secrets.LOGIN_URL }}" \
-            --set-default
-
-      - name: Collect Production Health Metrics
-        id: collect
-        shell: bash
-        env:
-          USERNAME: ${{ secrets.SFDX_AUTH_PROD_USERNAME }}
-          PACKAGE:  ${{ needs.Deployment_Build.outputs.deploy_package }}
-          TAG_NAME: ${{ needs.Deployment_Build.outputs.tag_name }}
-          ACTOR:    ${{ needs.Deployment_Build.outputs.actor }}
-        run: |
-          echo "📊 Collecting post-deploy health metrics for PRODUCTION..."
-          SCAN_TIME=$(TZ='Asia/Kolkata' date +'%d-%m-%Y %H:%M IST')
-
-          # Governor Limits
-          LIMITS=$(sf org list limits --target-org "$USERNAME" --json 2>/dev/null || echo '{"result":[]}')
-
-          # Org Info
-          ORG_INFO=$(sf org display --target-org "$USERNAME" --json 2>/dev/null || echo '{"result":{}}')
-
-          # Active Apex Classes
-          APEX_COUNT=$(sf data query \
-            --query "SELECT COUNT() FROM ApexClass WHERE Status='Active'" \
-            --target-org "$USERNAME" --json 2>/dev/null | jq '.result.totalSize // 0')
-
-          # Active Triggers
-          TRIGGER_COUNT=$(sf data query \
-            --query "SELECT COUNT() FROM ApexTrigger WHERE Status='Active'" \
-            --target-org "$USERNAME" --json 2>/dev/null | jq '.result.totalSize // 0')
-
-          # Failed Batch Jobs in last 1 hour (post-deploy window)
-          FAILED_BATCHES=$(sf data query \
-            --query "SELECT Id, ApexClass.Name, Status, NumberOfErrors, TotalJobItems FROM AsyncApexJob WHERE Status='Failed' AND CreatedDate = LAST_N_HOURS:1 LIMIT 10" \
-            --target-org "$USERNAME" --json 2>/dev/null || echo '{"result":{"records":[]}}')
-
-          # Scheduled Jobs
-          SCHEDULED_JOBS=$(sf data query \
-            --query "SELECT Id, CronJobDetail.Name, State, NextFireTime FROM CronTrigger WHERE State='WAITING' LIMIT 10" \
-            --target-org "$USERNAME" --json 2>/dev/null || echo '{"result":{"records":[]}}')
-
-          # Apex Test failures in last 1 hour
-          TEST_FAILURES=$(sf data query \
-            --query "SELECT Id, ApexClass.Name, MethodName, Message FROM ApexTestResult WHERE Outcome='Fail' AND CreatedDate = LAST_N_HOURS:1 LIMIT 10" \
-            --target-org "$USERNAME" --json 2>/dev/null || echo '{"result":{"records":[]}}')
-
-          HEALTH_JSON=$(jq -n \
-            --arg env        "PRODUCTION" \
-            --arg scan_time  "$SCAN_TIME" \
-            --arg package    "$PACKAGE" \
-            --arg tag        "$TAG_NAME" \
-            --arg actor      "$ACTOR" \
-            --arg apex       "$APEX_COUNT" \
-            --arg triggers   "$TRIGGER_COUNT" \
-            --argjson limits         "$(echo $LIMITS        | jq '.result // []')" \
-            --argjson org_info       "$(echo $ORG_INFO      | jq '.result // {}')" \
-            --argjson failed_batches "$(echo $FAILED_BATCHES | jq '.result.records // []')" \
-            --argjson scheduled_jobs "$(echo $SCHEDULED_JOBS | jq '.result.records // []')" \
-            --argjson test_failures  "$(echo $TEST_FAILURES  | jq '.result.records // []')" \
-            '{
-              environment:    $env,
-              scan_time:      $scan_time,
-              deployed_package: $package,
-              release_tag:    $tag,
-              deployed_by:    $actor,
-              metadata: {
-                apex_classes:   ($apex    | tonumber),
-                apex_triggers:  ($triggers | tonumber)
-              },
-              governor_limits:   $limits,
-              failed_batch_jobs: $failed_batches,
-              scheduled_jobs:    $scheduled_jobs,
-              apex_test_failures: $test_failures
-            }')
-
-          echo "$HEALTH_JSON" > prod_health.json
-
-          FAILED_BATCH_COUNT=$(echo "$HEALTH_JSON" | jq '.failed_batch_jobs | length')
-          TEST_FAIL_COUNT=$(echo "$HEALTH_JSON"    | jq '.apex_test_failures | length')
-          CRITICAL_LIMITS=$(echo "$HEALTH_JSON" | jq '[.governor_limits[] | select(.remaining != null and .max != null and .max > 0 and ((.remaining / .max) < 0.20))] | length')
-
-          echo "failed_batches=$FAILED_BATCH_COUNT" >> $GITHUB_OUTPUT
-          echo "test_failures=$TEST_FAIL_COUNT"     >> $GITHUB_OUTPUT
-          echo "critical_limits=$CRITICAL_LIMITS"   >> $GITHUB_OUTPUT
-          echo "scan_time=$SCAN_TIME"               >> $GITHUB_OUTPUT
-
-          echo ""
-          echo "=== POST-DEPLOY HEALTH SUMMARY ==="
-          echo "  Failed Batch Jobs (last 1h) : $FAILED_BATCH_COUNT"
-          echo "  Apex Test Failures (last 1h): $TEST_FAIL_COUNT"
-          echo "  Critical Governor Limits    : $CRITICAL_LIMITS"
-          echo "  Active Apex Classes         : $APEX_COUNT"
-          echo "  Active Triggers             : $TRIGGER_COUNT"
-
-      - name: Claude Post-Deploy Analysis
-        id: claude
-        shell: bash
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          PACKAGE:  ${{ needs.Deployment_Build.outputs.deploy_package }}
-          TAG_NAME: ${{ needs.Deployment_Build.outputs.tag_name }}
-          ACTOR:    ${{ needs.Deployment_Build.outputs.actor }}
-          REPO:     ${{ needs.Deployment_Build.outputs.repo }}
-          RUN_ID:   ${{ needs.Deployment_Build.outputs.run_id }}
-        run: |
-          HEALTH_DATA=$(cat prod_health.json)
-          SCAN_TIME=$(TZ='Asia/Kolkata' date +'%d-%m-%Y %H:%M IST')
-
-          PROMPT="You are a Salesforce production support expert. A deployment just completed to PRODUCTION. Analyze the post-deploy health data and determine if the org is stable.
-
-          Deployment Details:
-          - Package: ${PACKAGE}
-          - Release Tag: ${TAG_NAME}
-          - Deployed by: ${ACTOR}
-          - Scan Time: ${SCAN_TIME}
-
-          Health Data:
-          ${HEALTH_DATA}
-
-          Respond in this EXACT markdown format:
-
-          ## 🏥 Post-Deploy Health Check — PRODUCTION
-
-          ### Deployment Summary
-          | Field | Value |
-          |---|---|
-          | Package | ${PACKAGE} |
-          | Release Tag | ${TAG_NAME} |
-          | Deployed by | ${ACTOR} |
-          | Checked at | ${SCAN_TIME} |
-
-          ### 🚦 Health Verdict
-          **Status**: 🟢 STABLE / 🟡 MONITOR / 🔴 ROLLBACK RECOMMENDED
-          **Reason**: [one line]
-
-          ### ⚠️ Issues Detected
-          [List any failed batch jobs, test failures, or critical governor limits. If none, write: ✅ No issues detected.]
-
-          ### 📊 Governor Limits
-          | Limit | Used | Max | Status |
-          |---|---|---|---|
-          [Flag limits below 20% remaining as 🔴, below 50% as 🟡, else 🟢. Show top 10 most consumed.]
-
-          ### 💡 Recommendations
-          [Numbered list of immediate actions if any issues found. If healthy, write: ✅ No action required — org is stable.]"
-
-          RESPONSE=$(curl -s -X POST https://api.anthropic.com/v1/messages \
-            -H "x-api-key: ${ANTHROPIC_API_KEY}" \
-            -H "anthropic-version: 2023-06-01" \
-            -H "content-type: application/json" \
-            -d "$(jq -n \
-              --arg model "claude-sonnet-4-5" \
-              --arg prompt "$PROMPT" \
-              '{model: $model, max_tokens: 2048, messages: [{role: "user", content: $prompt}]}')") 
-
-          ANALYSIS=$(echo "$RESPONSE" | jq -r '.content[0].text // empty')
-
-          if [[ -z "$ANALYSIS" ]]; then
-            ERROR=$(echo "$RESPONSE" | jq -r '.error.message // "Unknown error"')
-            echo "⚠️ Claude API error: $ERROR — using raw summary fallback"
-            ANALYSIS="## 🏥 Post-Deploy Health Check — PRODUCTION\n\n⚠️ Claude analysis unavailable.\n\n- Failed Batches: ${{ steps.collect.outputs.failed_batches }}\n- Test Failures: ${{ steps.collect.outputs.test_failures }}\n- Critical Limits: ${{ steps.collect.outputs.critical_limits }}"
-          fi
-
-          echo "$ANALYSIS" > health_analysis.md
-          echo "✅ Claude analysis complete"
-
-          # Determine overall status for downstream steps
-          if echo "$ANALYSIS" | grep -q "ROLLBACK RECOMMENDED"; then
-            echo "status=critical" >> $GITHUB_OUTPUT
-          elif echo "$ANALYSIS" | grep -q "MONITOR"; then
-            echo "status=warning" >> $GITHUB_OUTPUT
-          else
-            echo "status=healthy" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Post Health Check as GitHub Step Summary
-        if: always()
-        shell: bash
-        run: |
-          cat health_analysis.md >> $GITHUB_STEP_SUMMARY
-
-      - name: Send Health Report Email
-        if: always()
-        uses: dawidd6/action-send-mail@v3
-        with:
-          server_address: ${{ secrets.SMTP_SERVER }}
-          server_port:    ${{ secrets.SMTP_PORT }}
-          username:       ${{ secrets.SMTP_USERNAME }}
-          password:       ${{ secrets.SMTP_PASSWORD }}
-          subject:        "🏥 [SF Health] Post-Deploy PRODUCTION — ${{ steps.claude.outputs.status == 'critical' && '🔴 CRITICAL' || steps.claude.outputs.status == 'warning' && '🟡 MONITOR' || '🟢 STABLE' }} | ${{ needs.Deployment_Build.outputs.tag_name }}"
-          to:             ${{ secrets.NOTIFY_EMAILS }}
-          from:           "Do not Reply <${{ secrets.GMAIL_USERNAME }}>"
-          html_body: |
-            <h2>🏥 Post-Deploy Health Check — PRODUCTION</h2>
-            <table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;font-family:Arial,sans-serif;">
-              <tr><th>Field</th><th>Value</th></tr>
-              <tr><td><strong>Package</strong></td><td>${{ needs.Deployment_Build.outputs.deploy_package }}</td></tr>
-              <tr><td><strong>Release Tag</strong></td><td>${{ needs.Deployment_Build.outputs.tag_name }}</td></tr>
-              <tr><td><strong>Deployed by</strong></td><td>${{ needs.Deployment_Build.outputs.actor }}</td></tr>
-              <tr><td><strong>Checked at</strong></td><td>${{ steps.collect.outputs.scan_time }}</td></tr>
-              <tr><td><strong>Failed Batch Jobs</strong></td><td>${{ steps.collect.outputs.failed_batches }}</td></tr>
-              <tr><td><strong>Apex Test Failures</strong></td><td>${{ steps.collect.outputs.test_failures }}</td></tr>
-              <tr><td><strong>Critical Limits</strong></td><td>${{ steps.collect.outputs.critical_limits }}</td></tr>
-              <tr><td><strong>Workflow Run</strong></td><td><a href="https://github.com/${{ needs.Deployment_Build.outputs.repo }}/actions/runs/${{ needs.Deployment_Build.outputs.run_id }}">View Run</a></td></tr>
-            </table>
-            <h3>Claude Analysis</h3>
-            <pre style="background:#f4f4f4;padding:12px;font-family:monospace;font-size:12px;white-space:pre-wrap;">${{ steps.claude.outputs.status }}</pre>
-            <br/>
-            <p style="font-size:11px;color:#888;">⚠️ Automated health report. Do not reply.</p>
-          attachments: prod_health.json
-
-      - name: Publish Health Check to Confluence
-        if: always()
-        shell: bash
-        env:
-          CONFLUENCE_BASE_URL:  ${{ secrets.CONFLUENCE_BASE_URL }}
-          CONFLUENCE_API_TOKEN: ${{ secrets.ATLASSIAN_API_TOKEN }}
-          CONFLUENCE_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
-          CONFLUENCE_PAGE_ID:   ${{ secrets.HEALTH_CHECK_CONFLUENCE_PAGE_ID }}
-          REPO:    ${{ needs.Deployment_Build.outputs.repo }}
-          RUN_ID:  ${{ needs.Deployment_Build.outputs.run_id }}
-          TAG_NAME: ${{ needs.Deployment_Build.outputs.tag_name }}
-        run: |
-          if [[ -z "$CONFLUENCE_BASE_URL" || -z "$CONFLUENCE_PAGE_ID" ]]; then
-            echo "⚠️ Confluence secrets not configured — skipping"
-            exit 0
-          fi
-
-          SCAN_TIME=$(TZ='Asia/Kolkata' date +'%d-%m-%Y %H:%M IST')
-          REPORT=$(cat health_analysis.md)
-          STATUS=${{ steps.claude.outputs.status }}
-
-          case "$STATUS" in
-            critical) BADGE="<span style='color:red;font-weight:bold;'>🔴 CRITICAL</span>" ;;
-            warning)  BADGE="<span style='color:orange;font-weight:bold;'>🟡 MONITOR</span>" ;;
-            *)        BADGE="<span style='color:green;font-weight:bold;'>🟢 STABLE</span>" ;;
-          esac
-
-          NEW_ENTRY="<h2>🏥 Post-Deploy Health — ${SCAN_TIME} | ${BADGE}</h2>"
-          NEW_ENTRY+="<p>Tag: <strong>${TAG_NAME}</strong> &nbsp;|&nbsp; Run: <a href='https://github.com/${REPO}/actions/runs/${RUN_ID}'>${RUN_ID}</a></p>"
-          NEW_ENTRY+="<ac:structured-macro ac:name='code'><ac:parameter ac:name='language'>text</ac:parameter>"
-          NEW_ENTRY+="<ac:plain-text-body><![CDATA[${REPORT}]]></ac:plain-text-body></ac:structured-macro>"
-          NEW_ENTRY+="<hr/>"
-
-          PAGE_RESP=$(curl -s \
-            -u "${CONFLUENCE_USER_EMAIL}:${CONFLUENCE_API_TOKEN}" \
-            "${CONFLUENCE_BASE_URL}/rest/api/content/${CONFLUENCE_PAGE_ID}?expand=body.storage,version")
-
-          CUR_VER=$(echo "$PAGE_RESP" | jq -r '.version.number')
-          CUR_BODY=$(echo "$PAGE_RESP" | jq -r '.body.storage.value')
-          PAGE_TITLE=$(echo "$PAGE_RESP" | jq -r '.title')
-
-          if [[ -z "$CUR_VER" || "$CUR_VER" == "null" ]]; then
-            echo "❌ Failed to fetch Confluence page"; exit 1
-          fi
-
-          NEW_VER=$((CUR_VER + 1))
-          UPDATE_RESP=$(curl -s -w "\n%{http_code}" -X PUT \
-            -u "${CONFLUENCE_USER_EMAIL}:${CONFLUENCE_API_TOKEN}" \
-            -H "Content-Type: application/json" \
-            -d "$(jq -n \
-              --argjson version "{\"number\": ${NEW_VER}}" \
-              --arg title "${PAGE_TITLE}" \
-              --arg value "${NEW_ENTRY}${CUR_BODY}" \
-              '{version: $version, title: $title, type: "page", body: {storage: {value: $value, representation: "storage"}}}')" \
-            "${CONFLUENCE_BASE_URL}/rest/api/content/${CONFLUENCE_PAGE_ID}")
-
-          HTTP=$(echo "$UPDATE_RESP" | tail -1)
-          [[ "$HTTP" == "200" ]] && echo "✅ Confluence updated" || { echo "❌ Confluence failed (HTTP $HTTP)"; exit 1; }
-
-      - name: Cleanup JWT Key
-        if: always()
-        run: rm -f server.key
 
