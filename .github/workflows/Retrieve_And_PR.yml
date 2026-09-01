@@ -81,7 +81,7 @@ jobs:
 
       # ── Step 2: Checkout target env branch ──────────────────────────────────
       - name: Checkout ${{ steps.resolve.outputs.TARGET_BRANCH }} branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.ref }}
           fetch-depth: 0
@@ -101,7 +101,7 @@ jobs:
 
       # ── Step 3: Tooling setup ────────────────────────────────────────────────
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
 
@@ -335,6 +335,17 @@ jobs:
           fi
 
       # ── Step 9: Create feature branch, commit, push ──────────────────────────
+      - name: Setup SSH Signing Key
+        if: steps.check-changes.outputs.has_changes == 'true'
+        shell: bash
+        env:
+          SSH_SIGNING_KEY: ${{ secrets.SSH_SIGNING_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_SIGNING_KEY" > ~/.ssh/signing_key
+          chmod 600 ~/.ssh/signing_key
+          echo "✅ SSH signing key ready"
+
       - name: Create feature branch and push
         if: steps.check-changes.outputs.has_changes == 'true'
         shell: bash
@@ -351,6 +362,9 @@ jobs:
         run: |
           git config user.name  "$GIT_USER_NAME"
           git config user.email "$GIT_USER_EMAIL"
+          git config gpg.format ssh
+          git config user.signingkey ~/.ssh/signing_key
+          git config commit.gpgsign true
           git remote set-url origin "https://x-access-token:${GH_PAT}@github.com/${REPO}.git"
 
           git checkout -b "$FEATURE_BRANCH"
@@ -359,10 +373,14 @@ jobs:
           TRIGGER="scheduled"
           [[ "$EVENT_NAME" == "workflow_dispatch" ]] && TRIGGER="manual by ${ACTOR}"
 
-          git commit -m "retrieve(${ENVIRONMENT}): org sync ${RETRIEVE_DATE} [${TRIGGER}]"
+          git commit -S -m "retrieve(${ENVIRONMENT}): org sync ${RETRIEVE_DATE} [${TRIGGER}]"
           git push origin "$FEATURE_BRANCH"
 
-          echo "✅ Pushed: $FEATURE_BRANCH"
+          echo "✅ SSH-signed commit pushed: $FEATURE_BRANCH"
+
+      - name: Cleanup SSH Signing Key
+        if: always()
+        run: rm -f ~/.ssh/signing_key
 
       # ── Step 10: Raise PR using gh CLI (fixes 403) ───────────────────────────
       - name: Raise Pull Request → ${{ steps.resolve.outputs.TARGET_BRANCH }}

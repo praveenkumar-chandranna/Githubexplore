@@ -1191,21 +1191,31 @@ jobs:
           SOURCE_BRANCHES: ${{ needs.Deployment_Build.outputs.source_branches }}
           ENVIRONMENT: ${{ needs.Deployment_Build.outputs.environment }}
         run: |
-          BRANCH_INPUT="${SOURCE_BRANCHES:-$PACKAGE}"
-          BRANCH_TICKETS=$(echo "$BRANCH_INPUT" | grep -oP '(?<![A-Z0-9])[A-Z][A-Z0-9]+[-_]\d+(?![A-Z0-9-])' | sort -u || true)
+          ALL_TICKETS=""
 
-          LAST_TAG=$(git tag --list "${ENVIRONMENT}/*" --sort=-creatordate | head -1 || true)
-          if [[ -n "$LAST_TAG" ]]; then
-            echo "  Scanning commits since tag: $LAST_TAG"
-            COMMIT_LOG=$(git log "${LAST_TAG}..HEAD" --pretty=format:"%s %b" 2>/dev/null || git log -50 --pretty=format:"%s %b")
+          if [[ "$ENVIRONMENT" == "PRODUCTION" ]]; then
+            # PROD: extract from package name + commits
+            BRANCH_INPUT="${SOURCE_BRANCHES:-$PACKAGE}"
+            BRANCH_TICKETS=$(echo "$BRANCH_INPUT" | grep -oP '(?<![A-Z0-9])[A-Z][A-Z0-9]+[-_]\d+(?![A-Z0-9-])' | sort -u || true)
+
+            LAST_TAG=$(git tag --list "PRODUCTION/*" --sort=-creatordate | head -1 || true)
+            if [[ -n "$LAST_TAG" ]]; then
+              echo "  Scanning commits since tag: $LAST_TAG"
+              COMMIT_LOG=$(git log "${LAST_TAG}..HEAD" --pretty=format:"%s %b" 2>/dev/null || git log -50 --pretty=format:"%s %b")
+            else
+              echo "  No prior tag found — scanning last 50 commits"
+              COMMIT_LOG=$(git log -50 --pretty=format:"%s %b")
+            fi
+            COMMIT_TICKETS=$(echo "$COMMIT_LOG" | grep -oP '(?<![A-Z0-9])[A-Z][A-Z0-9]+[-_]\d+(?![A-Z0-9-])' | sort -u || true)
+
+            ALL_TICKETS=$(printf '%s\n%s\n' "$BRANCH_TICKETS" "$COMMIT_TICKETS" \
+              | grep -oP '(?<![A-Z0-9])[A-Z][A-Z0-9]+[-_]\d+(?![A-Z0-9-])' | sort -u | tr '\n' ',' | sed 's/,$//' || true)
           else
-            echo "  No prior tag found — scanning last 50 commits"
-            COMMIT_LOG=$(git log -50 --pretty=format:"%s %b")
+            # Lower orgs (DEV/QA/UAT/HOTFIX): extract only from package name
+            # Package name format: feature/JIRANUMBER (single) or Release_ENV_date (multi)
+            BRANCH_INPUT="${SOURCE_BRANCHES:-$PACKAGE}"
+            ALL_TICKETS=$(echo "$BRANCH_INPUT" | grep -oP '(?<![A-Z0-9])[A-Z][A-Z0-9]+[-_]\d+(?![A-Z0-9-])' | sort -u | tr '\n' ',' | sed 's/,$//' || true)
           fi
-          COMMIT_TICKETS=$(echo "$COMMIT_LOG" | grep -oP '(?<![A-Z0-9])[A-Z][A-Z0-9]+[-_]\d+(?![A-Z0-9-])' | sort -u || true)
-
-          ALL_TICKETS=$(printf '%s\n%s\n' "$BRANCH_TICKETS" "$COMMIT_TICKETS" \
-            | grep -oP '(?<![A-Z0-9])[A-Z][A-Z0-9]+[-_]\d+(?![A-Z0-9-])' | sort -u | tr '\n' ',' | sed 's/,$//' || true)
 
           if [[ -z "$ALL_TICKETS" ]]; then
             echo "⚠️ No Jira tickets found — skipping transition"
