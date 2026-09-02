@@ -734,7 +734,7 @@ jobs:
 
           SEC_SCORE=$(awk "BEGIN {printf \"%.2f\", ${SEC_RAW} * 0.25}")
 
-          HEALTH_SCORE=$(awk "BEGIN {printf \"%.0f\", $SEC_SCORE + $COV_SCORE + $TEST_SCORE + $PMD_SCORE + $DEPLOY_SCORE + $STAB_SCORE + $GOV_SCORE}")
+          HEALTH_SCORE=$(awk "BEGIN {printf \"%d\", int($SEC_SCORE + $COV_SCORE + $TEST_SCORE + $PMD_SCORE + $DEPLOY_SCORE + $STAB_SCORE + $GOV_SCORE)}")
 
           if   [[ $HEALTH_SCORE -ge 95 ]]; then HEALTH_BAND="🟢 Excellent"
           elif [[ $HEALTH_SCORE -ge 85 ]]; then HEALTH_BAND="🟢 Healthy"
