@@ -636,9 +636,11 @@ jobs:
           COV_UNCOVERED=$(safe_int "$RAW_COV" '.result.records[0].NumLinesUncovered')
           COV_TOTAL=$((COV_COVERED + COV_UNCOVERED))
           if [[ $COV_TOTAL -gt 0 ]]; then
-            APEX_COVERAGE=$(awk "BEGIN {printf \"%.1f\", ($COV_COVERED / $COV_TOTAL) * 100}")
+            APEX_COVERAGE=$(awk "BEGIN {printf \"%.6f\", ($COV_COVERED / $COV_TOTAL) * 100}")
+            APEX_COVERAGE_DISPLAY=$(awk "BEGIN {printf \"%.1f\", ($COV_COVERED / $COV_TOTAL) * 100}")
           else
-            APEX_COVERAGE="0.0"
+            APEX_COVERAGE="0.000000"
+            APEX_COVERAGE_DISPLAY="0.0"
           fi
 
           # -- Apex Test Results (last 7 days) --------------------------------
@@ -713,7 +715,7 @@ jobs:
 
 
           # -- Health Score Calculation ---------------------------------------
-          COV_SCORE=$(awk "BEGIN {v=$APEX_COVERAGE; if(v>100)v=100; printf \"%.2f\", v * 0.20}")
+          COV_SCORE=$(awk "BEGIN {v=$APEX_COVERAGE; if(v>100)v=100; printf \"%.6f\", v * 0.20}")
 
           if [[ $TEST_TOTAL -gt 0 ]]; then
             TEST_SCORE=$(awk "BEGIN {printf \"%.2f\", ($TEST_PASS / $TEST_TOTAL) * 100 * 0.15}")
@@ -748,7 +750,7 @@ jobs:
             --arg  package           "$PACKAGE" \
             --arg  health_band       "$HEALTH_BAND" \
             --argjson health_score   "$HEALTH_SCORE" \
-            --arg  apex_coverage     "$APEX_COVERAGE" \
+            --arg  apex_coverage     "$APEX_COVERAGE_DISPLAY" \
             --argjson test_pass      "$TEST_PASS" \
             --argjson test_fail      "$TEST_FAIL" \
             --argjson test_total     "$TEST_TOTAL" \
