@@ -734,7 +734,7 @@ jobs:
 
           SEC_SCORE=$(awk "BEGIN {printf \"%.2f\", ${SEC_RAW} * 0.25}")
 
-          HEALTH_SCORE=$(awk "BEGIN {printf \"%.0f\", $SEC_SCORE + $COV_SCORE + $TEST_SCORE + $PMD_SCORE + $DEPLOY_SCORE + $STAB_SCORE + $GOV_SCORE}")
+          HEALTH_SCORE=$(awk "BEGIN {printf \"%d\", int($SEC_SCORE + $COV_SCORE + $TEST_SCORE + $PMD_SCORE + $DEPLOY_SCORE + $STAB_SCORE + $GOV_SCORE)}")
 
           if   [[ $HEALTH_SCORE -ge 95 ]]; then HEALTH_BAND="🟢 Excellent"
           elif [[ $HEALTH_SCORE -ge 85 ]]; then HEALTH_BAND="🟢 Healthy"
@@ -1016,6 +1016,157 @@ jobs:
           name: post-deploy-health-${{ github.run_id }}
           path: health_post_deploy.json
           retention-days: 30
+
+      - name: Publish Health Check to Confluence
+        shell: bash
+        env:
+          CONFLUENCE_BASE_URL:  ${{ secrets.CONFLUENCE_BASE_URL }}
+          CONFLUENCE_PAGE_ID:   ${{ secrets.POST_DEPLOY_HEALTH_CONFLUENCE_PAGE_ID }}
+          JIRA_USER_EMAIL:      ${{ secrets.JIRA_USER_EMAIL }}
+          ATLASSIAN_API_TOKEN:  ${{ secrets.ATLASSIAN_API_TOKEN }}
+          ENV:     ${{ needs.Deployment_Build.outputs.environment }}
+          PACKAGE: ${{ needs.Deployment_Build.outputs.deploy_package }}
+          ACTOR:   ${{ needs.Deployment_Build.outputs.actor }}
+          RUN_ID:  ${{ needs.Deployment_Build.outputs.run_id }}
+          REPO:    ${{ needs.Deployment_Build.outputs.repo }}
+        run: |
+          FILE="health_post_deploy.json"
+          if [[ ! -f "$FILE" ]]; then
+            echo "⚠️ No health data — skipping Confluence publish"
+            exit 0
+          fi
+          if [[ -z "$CONFLUENCE_BASE_URL" || -z "$CONFLUENCE_PAGE_ID" ]]; then
+            echo "⚠️ Confluence secrets not configured — skipping"
+            exit 0
+          fi
+
+          SCORE=$(jq -r    '.health_score              // "0"' "$FILE")
+          BAND=$(jq -r     '.health_band               // "N/A"' "$FILE")
+          SCAN_TIME=$(jq -r '.scan_time                // "N/A"' "$FILE")
+          COV=$(jq -r      '.scores.apex_coverage      // "0"' "$FILE")
+          T_PASS=$(jq -r   '.scores.test_pass          // 0' "$FILE")
+          T_TOTAL=$(jq -r  '.scores.test_total         // 0' "$FILE")
+          D_RATE=$(jq -r   '.scores.deploy_rate        // "0"' "$FILE")
+          D_OK=$(jq -r     '.scores.deploy_success     // 0' "$FILE")
+          D_TOT=$(jq -r    '.scores.deploy_total       // 0' "$FILE")
+          PMD_C=$(jq -r    '.scores.pmd_critical       // 0' "$FILE")
+          PMD_H=$(jq -r    '.scores.pmd_high           // 0' "$FILE")
+          PMD_M=$(jq -r    '.scores.pmd_medium         // 0' "$FILE")
+          APEX_EX=$(jq -r  '.scores.apex_exceptions    // 0' "$FILE")
+          BATCHES=$(jq -r  '.scores.failed_batch_count // 0' "$FILE")
+          CRIT_LIM=$(jq -r '.scores.critical_limits    // 0' "$FILE")
+          SEC_RAW=$(jq -r  '.scores.sec_raw            // "0"' "$FILE")
+          PRIV_C=$(jq -r   '.scores.priv_count         // "0"' "$FILE")
+          INACT_C=$(jq -r  '.scores.inactive_count     // "0"' "$FILE")
+          NOMFA_C=$(jq -r  '.scores.no_mfa_count       // "0"' "$FILE")
+          GUEST_C=$(jq -r  '.scores.guest_count        // "0"' "$FILE")
+          CONN_C=$(jq -r   '.scores.conn_app_count     // "0"' "$FILE")
+          OWD_C=$(jq -r    '.scores.owd_public_count   // "0"' "$FILE")
+          OLD_API_C=$(jq -r '.scores.old_api_count     // "0"' "$FILE")
+          DS_USED=$(jq -r  '.scores.data_storage_used  // "0"' "$FILE")
+          DS_MAX=$(jq -r   '.scores.data_storage_max   // "0"' "$FILE")
+          FS_USED=$(jq -r  '.scores.file_storage_used  // "0"' "$FILE")
+          FS_MAX=$(jq -r   '.scores.file_storage_max   // "0"' "$FILE")
+          APEX=$(jq -r     '.metadata.apex_classes     // 0' "$FILE")
+          TRIG=$(jq -r     '.metadata.apex_triggers    // 0' "$FILE")
+          FLOWS=$(jq -r    '.metadata.active_flows     // 0' "$FILE")
+          USERS=$(jq -r    '.metadata.active_users     // 0' "$FILE")
+          BATCH_COUNT=$(jq '.failed_batches | length'        "$FILE")
+          TEST_COUNT=$(jq  '.test_failures  | length'        "$FILE")
+          RUN_URL="https://github.com/${REPO}/actions/runs/${RUN_ID}"
+
+          P_SEC=$(awk  "BEGIN {printf \"%.2f\", (${SEC_RAW}+0)*0.25}")
+          P_COV=$(awk  "BEGIN {v=${COV}+0; if(v>100)v=100; printf \"%.2f\", v*0.20}")
+          P_TEST=$(awk "BEGIN {t=${T_TOTAL}+0; p=${T_PASS}+0; if(t>0) printf \"%.2f\", (p/t)*100*0.15; else printf \"15.00\"}")
+          P_PMD=$(awk  "BEGIN {v=100-(${PMD_C}+0)*5-(${PMD_H}+0)*2; if(v<0)v=0; printf \"%.2f\", v*0.15}")
+          P_DEP=$(awk  "BEGIN {printf \"%.2f\", (${D_RATE}+0)*0.10}")
+          P_STAB=$(awk "BEGIN {v=100-(${BATCHES}+0)*10-(${APEX_EX}+0)*5; if(v<0)v=0; printf \"%.2f\", v*0.05}")
+          P_GOV=$(awk  "BEGIN {v=100-(${CRIT_LIM}+0)*10; if(v<0)v=0; printf \"%.2f\", v*0.10}")
+
+          NEW_ENTRY="<h2>🏥 Post-Deploy Health — ${ENV} | ${SCAN_TIME}</h2>"
+          NEW_ENTRY+="<table><tr><th>Field</th><th>Value</th></tr>"
+          NEW_ENTRY+="<tr><td><strong>Environment</strong></td><td>${ENV}</td></tr>"
+          NEW_ENTRY+="<tr><td><strong>Package</strong></td><td>${PACKAGE}</td></tr>"
+          NEW_ENTRY+="<tr><td><strong>Deployed by</strong></td><td>${ACTOR}</td></tr>"
+          NEW_ENTRY+="<tr><td><strong>Scanned at</strong></td><td>${SCAN_TIME}</td></tr>"
+          NEW_ENTRY+="<tr><td><strong>Health Score</strong></td><td><strong>${SCORE}/100</strong> — ${BAND}</td></tr>"
+          NEW_ENTRY+="<tr><td><strong>Workflow Run</strong></td><td><a href='${RUN_URL}'>${RUN_ID}</a></td></tr>"
+          NEW_ENTRY+="</table>"
+          NEW_ENTRY+="<h3>📊 Score Breakdown</h3>"
+          NEW_ENTRY+="<table><tr><th>Category</th><th>Weight</th><th>Raw Value</th><th>Points</th></tr>"
+          NEW_ENTRY+="<tr><td>🔒 Security</td><td>25%</td><td>${SEC_RAW}/100 (Priv:${PRIV_C} Inactive:${INACT_C} NoMFA:${NOMFA_C} Guest:${GUEST_C} ConnApps:${CONN_C} OWD:${OWD_C})</td><td>${P_SEC}</td></tr>"
+          NEW_ENTRY+="<tr><td>🧪 Apex Coverage</td><td>20%</td><td>${COV}%</td><td>${P_COV}</td></tr>"
+          NEW_ENTRY+="<tr><td>✅ Test Results</td><td>15%</td><td>${T_PASS}/${T_TOTAL} passed</td><td>${P_TEST}</td></tr>"
+          NEW_ENTRY+="<tr><td>🔍 Code Quality (PMD)</td><td>15%</td><td>Critical:${PMD_C} High:${PMD_H} Med:${PMD_M} DeprecatedAPI:${OLD_API_C}</td><td>${P_PMD}</td></tr>"
+          NEW_ENTRY+="<tr><td>🚀 Deployment Success</td><td>10%</td><td>${D_RATE}% (${D_OK}/${D_TOT})</td><td>${P_DEP}</td></tr>"
+          NEW_ENTRY+="<tr><td>⚙️ Org Stability</td><td>5%</td><td>Batches:${BATCHES} Exceptions:${APEX_EX}</td><td>${P_STAB}</td></tr>"
+          NEW_ENTRY+="<tr><td>📊 Governor Limits</td><td>10%</td><td>Critical:${CRIT_LIM}</td><td>${P_GOV}</td></tr>"
+          NEW_ENTRY+="</table>"
+          NEW_ENTRY+="<h3>📦 Metadata &amp; Storage</h3>"
+          NEW_ENTRY+="<table><tr><th>Metric</th><th>Value</th></tr>"
+          NEW_ENTRY+="<tr><td>Active Apex Classes</td><td>${APEX}</td></tr>"
+          NEW_ENTRY+="<tr><td>Active Apex Triggers</td><td>${TRIG}</td></tr>"
+          NEW_ENTRY+="<tr><td>Active Flows</td><td>${FLOWS}</td></tr>"
+          NEW_ENTRY+="<tr><td>Active Users</td><td>${USERS}</td></tr>"
+          NEW_ENTRY+="<tr><td>Apex Exceptions (24h)</td><td>${APEX_EX}</td></tr>"
+          NEW_ENTRY+="<tr><td>Failed Batch Jobs (24h)</td><td>${BATCHES}</td></tr>"
+          NEW_ENTRY+="<tr><td>Critical Governor Limits</td><td>${CRIT_LIM}</td></tr>"
+          NEW_ENTRY+="<tr><td>Data Storage</td><td>${DS_USED}/${DS_MAX} MB</td></tr>"
+          NEW_ENTRY+="<tr><td>File Storage</td><td>${FS_USED}/${FS_MAX} MB</td></tr>"
+          NEW_ENTRY+="</table>"
+
+          if [[ $BATCH_COUNT -gt 0 ]]; then
+            NEW_ENTRY+="<h3>⚙️ Failed Batch Jobs (last 24h)</h3>"
+            NEW_ENTRY+="<table><tr><th>Apex Class</th><th>Errors</th><th>Total Items</th><th>Created</th></tr>"
+            NEW_ENTRY+=$(jq -r '.failed_batches[] | "<tr><td>\(.ApexClass.Name // "Unknown")</td><td>\(.NumberOfErrors)</td><td>\(.TotalJobItems)</td><td>\(.CreatedDate // "")</td></tr>"' "$FILE")
+            NEW_ENTRY+="</table>"
+          fi
+
+          if [[ $TEST_COUNT -gt 0 ]]; then
+            NEW_ENTRY+="<h3>🧪 Apex Test Failures (last 24h)</h3>"
+            NEW_ENTRY+="<table><tr><th>Class</th><th>Method</th><th>Message</th></tr>"
+            NEW_ENTRY+=$(jq -r '.test_failures[] | "<tr><td>\(.ApexClass.Name // "Unknown")</td><td>\(.MethodName)</td><td>\(.Message // "" | .[0:200])</td></tr>"' "$FILE")
+            NEW_ENTRY+="</table>"
+          fi
+          NEW_ENTRY+="<hr/>"
+
+          PAGE_RESPONSE=$(curl -s \
+            -u "${JIRA_USER_EMAIL}:${ATLASSIAN_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            "${CONFLUENCE_BASE_URL}/rest/api/content/${CONFLUENCE_PAGE_ID}?expand=body.storage,version")
+
+          CURRENT_VERSION=$(echo "$PAGE_RESPONSE" | jq -r '.version.number')
+          CURRENT_BODY=$(echo "$PAGE_RESPONSE" | jq -r '.body.storage.value')
+          PAGE_TITLE=$(echo "$PAGE_RESPONSE" | jq -r '.title')
+
+          if [[ -z "$CURRENT_VERSION" || "$CURRENT_VERSION" == "null" ]]; then
+            echo "❌ Failed to fetch Confluence page (HTTP response below)"
+            echo "$PAGE_RESPONSE"
+            exit 1
+          fi
+
+          NEW_VERSION=$((CURRENT_VERSION + 1))
+          echo "📝 Updating: $PAGE_TITLE (v$CURRENT_VERSION → v$NEW_VERSION)"
+
+          UPDATE_RESPONSE=$(curl -s -w "\n%{http_code}" \
+            -X PUT \
+            -u "${JIRA_USER_EMAIL}:${ATLASSIAN_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n \
+              --argjson version "{\"number\": ${NEW_VERSION}}" \
+              --arg title "${PAGE_TITLE}" \
+              --arg value "${NEW_ENTRY}${CURRENT_BODY}" \
+              '{version: $version, title: $title, type: "page", body: {storage: {value: $value, representation: "storage"}}}')" \
+            "${CONFLUENCE_BASE_URL}/rest/api/content/${CONFLUENCE_PAGE_ID}")
+
+          UPDATE_CODE=$(echo "$UPDATE_RESPONSE" | tail -1)
+          if [[ "$UPDATE_CODE" == "200" ]]; then
+            echo "✅ Confluence page updated: ${CONFLUENCE_BASE_URL}/pages/viewpage.action?pageId=${CONFLUENCE_PAGE_ID}"
+          else
+            echo "❌ Confluence update failed (HTTP $UPDATE_CODE)"
+            echo "$UPDATE_RESPONSE" | sed '$d'
+            exit 1
+          fi
 
       - name: Send Health Check Email
         id: build-email

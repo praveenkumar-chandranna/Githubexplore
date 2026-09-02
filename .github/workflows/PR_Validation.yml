@@ -71,7 +71,6 @@ jobs:
       has_pii:       ${{ steps.gitleaks.outputs.has_pii }}
       has_secret:    ${{ steps.gitleaks.outputs.has_secret }}
       has_profanity: ${{ steps.gitleaks.outputs.has_profanity }}
-      finding_summary: ${{ steps.gitleaks.outputs.finding_summary }}
       head_ref:      ${{ github.head_ref }}
       base_ref:      ${{ github.base_ref }}
       actor:         ${{ github.actor }}
@@ -80,6 +79,7 @@ jobs:
       repo:          ${{ github.repository }}
       num_violations:    ${{ steps.run-scanner.outputs.num-violations }}
       num_sev1:          ${{ steps.run-scanner.outputs.num-sev1-violations }}
+      pii_csv_name:      ${{ steps.gitleaks_csv.outputs.pii_csv_name }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v7
@@ -463,16 +463,51 @@ jobs:
           echo "has_pii=${HAS_PII}" >> $GITHUB_OUTPUT
           echo "has_secret=${HAS_SECRET}" >> $GITHUB_OUTPUT
           echo "has_profanity=${HAS_PROFANITY}" >> $GITHUB_OUTPUT
-          echo "finding_summary<<EOF" >> $GITHUB_OUTPUT
-          echo "$FINDING_SUMMARY" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Generate PII Findings CSV
+        id: gitleaks_csv
+        if: steps.gitleaks.outputs.has_findings == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_REF: ${{ github.head_ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          BRANCH_SAFE="${HEAD_REF//\//-}"
+          BASE_NAME="pii-findings_${BRANCH_SAFE}"
+
+          # Count existing artifacts named pii-findings_<branch>_* for this PR via GitHub API
+          EXISTING=$(curl -s \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${REPO}/actions/artifacts?per_page=100" \
+            | jq -r --arg base "${BASE_NAME}" '[.artifacts[].name | select(startswith($base))] | length')
+
+          VERSION=$((EXISTING + 1))
+          CSV_NAME="${BASE_NAME}_${VERSION}.csv"
+          echo "📄 CSV filename: $CSV_NAME"
+          echo "pii_csv_name=${CSV_NAME}" >> "$GITHUB_OUTPUT"
+
+          # Write CSV header + rows from gitleaks-report.json
+          echo "RuleID,File,StartLine,EndLine,Description,Secret" > "$CSV_NAME"
+          jq -r '.[] | [.RuleID, .File, (.StartLine|tostring), (.EndLine|tostring), .Description, .Secret] | @csv' \
+            gitleaks-report.json >> "$CSV_NAME" 2>/dev/null || true
+          echo "✅ CSV generated: $CSV_NAME"
+
+      - name: Upload PII Findings CSV
+        if: steps.gitleaks.outputs.has_findings == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.gitleaks_csv.outputs.pii_csv_name }}
+          path: ${{ steps.gitleaks_csv.outputs.pii_csv_name }}
+          retention-days: 30
 
       - name: Comment Findings on PR
         if: steps.gitleaks.outputs.has_findings == 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          FINDING_SUMMARY: ${{ steps.gitleaks.outputs.finding_summary }}
           HAS_PII: ${{ steps.gitleaks.outputs.has_pii }}
           HAS_SECRET: ${{ steps.gitleaks.outputs.has_secret }}
           HAS_PROFANITY: ${{ steps.gitleaks.outputs.has_profanity }}
@@ -482,38 +517,76 @@ jobs:
           REPO: ${{ github.repository }}
           RUN_ID: ${{ github.run_id }}
         run: |
-          SCAN_TIME=$(TZ='Asia/Kolkata' date +'%d-%m-%Y %H:%M IST')
-          PR_COMMENT="## 🚨 PII / Secret / Profanity Detected\n\n"
-          PR_COMMENT+="> **This PR is blocked.** Remove all flagged content before requesting review.\n\n"
-          PR_COMMENT+="| Field | Value |\n|---|---|\n"
-          PR_COMMENT+="| **Scanned at** | ${SCAN_TIME} |\n"
-          PR_COMMENT+="| **Branch** | ${HEAD_REF} |\n"
-          PR_COMMENT+="| **Author** | ${ACTOR} |\n"
-          PR_COMMENT+="| **PII findings** | ${HAS_PII} |\n"
-          PR_COMMENT+="| **Secret findings** | ${HAS_SECRET} |\n"
-          PR_COMMENT+="| **Profanity findings** | ${HAS_PROFANITY} |\n\n"
-          PR_COMMENT+="### 🔍 Findings\n\`\`\`\n${FINDING_SUMMARY}\n\`\`\`\n\n"
-          PR_COMMENT+="### ✅ How to fix\n"
-          PR_COMMENT+="- Remove hardcoded PII (Aadhaar, PAN, mobile, email) from source code\n"
-          PR_COMMENT+="- Move secrets to GitHub Secrets or Salesforce Named Credentials\n"
-          PR_COMMENT+="- Remove any profanity from code, comments, and variable names\n"
-          PR_COMMENT+="- Push the fix and the scan will re-run automatically"
+          FINDING_SUMMARY=""
+          TOTAL_FINDINGS=0
+          if [[ -f gitleaks-report.json ]]; then
+            jq -r '.[] | "  \(.RuleID) | \(.File):\(.StartLine) | \(.Description)"' gitleaks-report.json 2>/dev/null > findings_all.txt || true
+            TOTAL_FINDINGS=$(wc -l < findings_all.txt)
+            FINDING_LINES=$(head -50 findings_all.txt)
+          else
+            touch findings_all.txt
+            FINDING_LINES=""
+          fi
+          TRUNCATED_NOTE=""
+          if [[ "$TOTAL_FINDINGS" -gt 50 ]]; then
+            TRUNCATED_NOTE="... and $((TOTAL_FINDINGS - 50)) more. See full report in workflow artifacts."
+          fi
 
-          curl -s -X POST \
+          SCAN_TIME=$(TZ='Asia/Kolkata' date +'%d-%m-%Y %H:%M IST')
+
+          printf '%s\n' \
+            "## 🚨 PII / Secret / Profanity Detected" \
+            "" \
+            "> **This PR is blocked.** Remove all flagged content before requesting review." \
+            "" \
+            "| Field | Value |" \
+            "|---|---|" \
+            "| **Scanned at** | ${SCAN_TIME} |" \
+            "| **Branch** | ${HEAD_REF} |" \
+            "| **Author** | ${ACTOR} |" \
+            "| **PII findings** | ${HAS_PII} |" \
+            "| **Secret findings** | ${HAS_SECRET} |" \
+            "| **Profanity findings** | ${HAS_PROFANITY} |" \
+            "| **Total findings** | ${TOTAL_FINDINGS} |" \
+            "" \
+            "### 🔍 Findings (first 50 shown)" \
+            > pr_comment_body.txt
+          echo '```' >> pr_comment_body.txt
+          echo "${FINDING_LINES}" >> pr_comment_body.txt
+          [[ -n "$TRUNCATED_NOTE" ]] && echo "$TRUNCATED_NOTE" >> pr_comment_body.txt
+          echo '```' >> pr_comment_body.txt
+          printf '%s\n' \
+            "" \
+            "### ✅ How to fix" \
+            "- Remove hardcoded PII (Aadhaar, PAN, mobile, email) from source code" \
+            "- Move secrets to GitHub Secrets or Salesforce Named Credentials" \
+            "- Remove any profanity from code, comments, and variable names" \
+            "- Push the fix and the scan will re-run automatically" \
+            "" \
+            "> 📎 Full report: [View workflow run artifacts](https://github.com/${REPO}/actions/runs/${RUN_ID}#artifacts)" \
+            >> pr_comment_body.txt
+
+          jq -n --rawfile body pr_comment_body.txt '{body: $body}' > pr_comment.json
+          COMMENT_HTTP=$(curl -s -o curl_comment_resp.json -w "%{http_code}" -X POST \
             -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
+            -H "Content-Type: application/json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
             "https://api.github.com/repos/${REPO}/issues/${PR_NUMBER}/comments" \
-            -d "$(jq -n --arg body "$(printf '%b' "$PR_COMMENT")" '{body: $body}')"
-
-          echo "✅ PR comment posted with findings"
+            --data-binary @pr_comment.json)
+          if [[ "$COMMENT_HTTP" == "201" ]]; then
+            echo "✅ PR comment posted with findings"
+          else
+            echo "❌ PR comment failed (HTTP $COMMENT_HTTP)"
+            cat curl_comment_resp.json
+            exit 1
+          fi
 
       - name: Alert DevOps Admin via GitHub Issue
         if: steps.gitleaks.outputs.has_findings == 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          FINDING_SUMMARY: ${{ steps.gitleaks.outputs.finding_summary }}
           HAS_PII: ${{ steps.gitleaks.outputs.has_pii }}
           HAS_SECRET: ${{ steps.gitleaks.outputs.has_secret }}
           HAS_PROFANITY: ${{ steps.gitleaks.outputs.has_profanity }}
@@ -524,31 +597,70 @@ jobs:
           REPO: ${{ github.repository }}
           RUN_ID: ${{ github.run_id }}
         run: |
-          SCAN_TIME=$(TZ='Asia/Kolkata' date +'%d-%m-%Y %H:%M IST')
-          ISSUE_BODY="## 🚨 PII / Secret / Profanity Detected in PR\n\n"
-          ISSUE_BODY+="| Field | Value |\n|---|---|\n"
-          ISSUE_BODY+="| **Detected at** | ${SCAN_TIME} |\n"
-          ISSUE_BODY+="| **PR** | #${PR_NUMBER} |\n"
-          ISSUE_BODY+="| **Branch** | ${HEAD_REF} → ${BASE_REF} |\n"
-          ISSUE_BODY+="| **Author** | ${ACTOR} |\n"
-          ISSUE_BODY+="| **Workflow Run** | [${RUN_ID}](https://github.com/${REPO}/actions/runs/${RUN_ID}) |\n"
-          ISSUE_BODY+="| **PII findings** | ${HAS_PII} |\n"
-          ISSUE_BODY+="| **Secret findings** | ${HAS_SECRET} |\n"
-          ISSUE_BODY+="| **Profanity findings** | ${HAS_PROFANITY} |\n\n"
-          ISSUE_BODY+="### Findings\n\`\`\`\n${FINDING_SUMMARY}\n\`\`\`\n\n"
-          ISSUE_BODY+="> **Action required:** Review PR and ensure author removes all flagged content."
+          FINDING_SUMMARY=""
+          TOTAL_FINDINGS=0
+          if [[ -f gitleaks-report.json ]]; then
+            jq -r '.[] | "  \(.RuleID) | \(.File):\(.StartLine) | \(.Description)"' gitleaks-report.json 2>/dev/null > findings_all2.txt || true
+            TOTAL_FINDINGS=$(wc -l < findings_all2.txt)
+            FINDING_LINES=$(head -50 findings_all2.txt)
+          else
+            touch findings_all2.txt
+            FINDING_LINES=""
+          fi
+          TRUNCATED_NOTE=""
+          if [[ "$TOTAL_FINDINGS" -gt 50 ]]; then
+            TRUNCATED_NOTE="... and $((TOTAL_FINDINGS - 50)) more. See full report in workflow artifacts: gitleaks-pii-report"
+          fi
 
-          curl -s -X POST \
+          SCAN_TIME=$(TZ='Asia/Kolkata' date +'%d-%m-%Y %H:%M IST')
+
+          printf '%s\n' \
+            "## 🚨 PII / Secret / Profanity Detected in PR" \
+            "" \
+            "| Field | Value |" \
+            "|---|---|" \
+            "| **Detected at** | ${SCAN_TIME} |" \
+            "| **PR** | #${PR_NUMBER} |" \
+            "| **Branch** | ${HEAD_REF} → ${BASE_REF} |" \
+            "| **Author** | ${ACTOR} |" \
+            "| **Workflow Run** | [${RUN_ID}](https://github.com/${REPO}/actions/runs/${RUN_ID}) |" \
+            "| **PII findings** | ${HAS_PII} |" \
+            "| **Secret findings** | ${HAS_SECRET} |" \
+            "| **Profanity findings** | ${HAS_PROFANITY} |" \
+            "| **Total findings** | ${TOTAL_FINDINGS} |" \
+            "" \
+            "### Findings (first 50 shown)" \
+            > issue_body.txt
+          echo '```' >> issue_body.txt
+          echo "${FINDING_LINES}" >> issue_body.txt
+          [[ -n "$TRUNCATED_NOTE" ]] && echo "$TRUNCATED_NOTE" >> issue_body.txt
+          echo '```' >> issue_body.txt
+          printf '%s\n' \
+            "" \
+            "> **Action required:** Review PR and ensure author removes all flagged content." \
+            "" \
+            "> 📎 Full report: [View workflow run artifacts](https://github.com/${REPO}/actions/runs/${RUN_ID}#artifacts)" \
+            >> issue_body.txt
+
+          jq -n \
+            --arg title "🚨 [PII/Secret Alert] PR #${PR_NUMBER} by ${ACTOR}" \
+            --rawfile body issue_body.txt \
+            --argjson labels '["security", "pii-alert", "devops-admin"]' \
+            '{title: $title, body: $body, labels: $labels}' > issue_payload.json
+          ISSUE_HTTP=$(curl -s -o curl_issue_resp.json -w "%{http_code}" -X POST \
             -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
+            -H "Content-Type: application/json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
-            https://api.github.com/repos/${REPO}/issues \
-            -d "$(jq -n \
-              --arg title "🚨 [PII/Secret Alert] PR #${PR_NUMBER} by ${ACTOR}" \
-              --arg body "$(printf '%b' "$ISSUE_BODY")" \
-              '{title: $title, body: $body, labels: ["security", "pii-alert", "devops-admin"]}')"
-
-          echo "✅ DevOps Admin alert issue created"
+            "https://api.github.com/repos/${REPO}/issues" \
+            --data-binary @issue_payload.json)
+          if [[ "$ISSUE_HTTP" == "201" ]]; then
+            echo "✅ DevOps Admin alert issue created"
+          else
+            echo "❌ Issue creation failed (HTTP $ISSUE_HTTP)"
+            cat curl_issue_resp.json
+            exit 1
+          fi
 
       - name: Rotate Salesforce Secrets if Secret Detected
         if: steps.gitleaks.outputs.has_secret != '0'
@@ -622,7 +734,7 @@ jobs:
   Publish_Code_Analyzer_Report:
     runs-on: ubuntu-latest
     needs: Pre_Validation_Build
-    if: needs.Pre_Validation_Build.result == 'success'
+    if: needs.Pre_Validation_Build.result == 'success' && needs.Pre_Validation_Build.outputs.num_violations != '0'
     steps:
       - name: Download Code Analyzer CSV
         uses: actions/download-artifact@v4
@@ -641,7 +753,7 @@ jobs:
           fi
 
       - name: Publish to Confluence
-        if: steps.check_csv.outputs.exists == 'true'
+        if: steps.check_csv.outputs.exists == 'true' && needs.Pre_Validation_Build.outputs.num_violations != '0'
         shell: bash
         env:
           CONFLUENCE_BASE_URL: ${{ secrets.CONFLUENCE_BASE_URL }}
@@ -752,7 +864,7 @@ jobs:
           fi
 
       - name: Send Code Analyzer Email (with CSV)
-        if: steps.check_csv.outputs.exists == 'true'
+        if: steps.check_csv.outputs.exists == 'true' && needs.Pre_Validation_Build.outputs.num_violations != '0'
         uses: dawidd6/action-send-mail@v4
         with:
           server_address: ${{ secrets.SMTP_SERVER }}
@@ -786,6 +898,12 @@ jobs:
     needs: Pre_Validation_Build
     if: always() && needs.Pre_Validation_Build.outputs.has_findings == 'true'
     steps:
+      - name: Download PII Findings CSV
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.Pre_Validation_Build.outputs.pii_csv_name }}
+        continue-on-error: true
+
       - name: Send Gitleaks Alert Email
         uses: dawidd6/action-send-mail@v4
         with:
@@ -796,6 +914,7 @@ jobs:
           subject: "🚨 [PII/Secret Alert] PR #${{ needs.Pre_Validation_Build.outputs.pr_number }} by ${{ needs.Pre_Validation_Build.outputs.actor }} — ${{ needs.Pre_Validation_Build.outputs.head_ref }}"
           to:             ${{ secrets.NOTIFY_EMAILS }}
           from:           "Do not Reply <${{ secrets.GMAIL_USERNAME }}>"
+          attachments:    ${{ needs.Pre_Validation_Build.outputs.pii_csv_name }}
           html_body: |
             <h2>🚨 PII / Secret / Profanity Detected in PR</h2>
             <p><strong>Immediate action required.</strong> The following PR has been blocked due to policy violations.</p>
@@ -810,8 +929,6 @@ jobs:
               <tr><td><strong>Workflow Run</strong></td><td><a href="https://github.com/${{ needs.Pre_Validation_Build.outputs.repo }}/actions/runs/${{ needs.Pre_Validation_Build.outputs.run_id }}">View Run</a></td></tr>
               <tr><td><strong>PR Link</strong></td><td><a href="https://github.com/${{ needs.Pre_Validation_Build.outputs.repo }}/pull/${{ needs.Pre_Validation_Build.outputs.pr_number }}">View PR</a></td></tr>
             </table>
-            <h3>🔍 Findings Detail</h3>
-            <pre style="background:#f4f4f4;padding:10px;font-family:monospace;font-size:12px;">${{ needs.Pre_Validation_Build.outputs.finding_summary }}</pre>
             <h3>✅ How to fix</h3>
             <ul>
               <li>Remove hardcoded PII (Aadhaar, PAN, mobile, email) from source code</li>
