@@ -478,11 +478,12 @@ jobs:
           BASE_NAME="pii-findings_${BRANCH_SAFE}"
 
           # Count existing artifacts named pii-findings_<branch>_* for this PR via GitHub API
-          EXISTING=$(curl -s \
+          ARTIFACTS_JSON=$(curl -s \
             -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${REPO}/actions/artifacts?per_page=100" \
-            | jq -r --arg base "${BASE_NAME}" '[.artifacts[].name | select(startswith($base))] | length')
+            "https://api.github.com/repos/${REPO}/actions/artifacts?per_page=100")
+          EXISTING=$(echo "$ARTIFACTS_JSON" \
+            | jq -r --arg base "${BASE_NAME}" '(.artifacts // []) | [.[].name | select(startswith($base))] | length' 2>/dev/null || echo 0)
 
           VERSION=$((EXISTING + 1))
           CSV_NAME="${BASE_NAME}_${VERSION}.csv"
