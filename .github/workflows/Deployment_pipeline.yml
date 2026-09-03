@@ -619,13 +619,59 @@ jobs:
           RAW_OWD=$(sf data query --query "SELECT QualifiedApiName, InternalSharingModel FROM EntityDefinition WHERE InternalSharingModel IN ('ReadWrite','ControlledByLeadOrContact') AND IsCustomizable=true" --target-org "$USERNAME" --use-tooling-api --json 2>/dev/null)
           OWD_PUBLIC_COUNT=$(echo "$RAW_OWD" | jq -r '.result.totalSize // 0' 2>/dev/null || echo '0')
 
+          # -- Salesforce Native Security Health Check Score (REST API) ------
+          SF_API_VERSION="62.0"
+          INSTANCE_URL=$(sf org display --target-org "$USERNAME" --json 2>/dev/null | jq -r '.result.instanceUrl // empty')
+          ACCESS_TOKEN=$(sf org display --target-org "$USERNAME" --json 2>/dev/null | jq -r '.result.accessToken // empty')
+          SF_SEC_SCORE=0
+          SF_SEC_RISKS=0
+          SF_SEC_COMPLIANT=0
+          if [[ -n "$INSTANCE_URL" && -n "$ACCESS_TOKEN" ]]; then
+            RAW_SF_SEC=$(curl -s \
+              -H "Authorization: Bearer $ACCESS_TOKEN" \
+              -H "Content-Type: application/json" \
+              "${INSTANCE_URL}/services/data/v${SF_API_VERSION}/security/health-check" 2>/dev/null)
+            SF_SEC_SCORE=$(echo "$RAW_SF_SEC" | jq -r '.score // 0' 2>/dev/null || echo '0')
+            SF_SEC_RISKS=$(echo "$RAW_SF_SEC" | jq -r '[.groups[]?.settings[]? | select(.riskType != null and .riskType != "MEETS_STANDARD")] | length' 2>/dev/null || echo '0')
+            SF_SEC_COMPLIANT=$(echo "$RAW_SF_SEC" | jq -r '[.groups[]?.settings[]? | select(.riskType == "MEETS_STANDARD")] | length' 2>/dev/null || echo '0')
+          fi
+          # Fallback: if SF API unavailable, derive from manual checks
+          if [[ "$SF_SEC_SCORE" == "0" || "$SF_SEC_SCORE" == "null" ]]; then
+            SF_SEC_SCORE=$(awk "BEGIN {v=100-(${PRIV_COUNT}*10)-(${INACTIVE_COUNT}*2)-(${NO_MFA_COUNT}*1)-(${GUEST_COUNT}*5)-(${CONN_APP_COUNT}*3)-(${OWD_PUBLIC_COUNT}*2); if(v<0)v=0; printf \"%d\", int(v)}")
+          fi
+
+          # -- Password Policy Check (Salesforce standard: min 8 chars, expiry, lockout) --
+          RAW_PWD=$(sf data query --query "SELECT MinPasswordLength, PasswordComplexity, PasswordExpiration, MaxLoginAttempts FROM PasswordPolicy LIMIT 1" --target-org "$USERNAME" --json 2>/dev/null)
+          PWD_MIN_LEN=$(echo "$RAW_PWD" | jq -r '.result.records[0].MinPasswordLength // 0' 2>/dev/null || echo '0')
+          PWD_COMPLEXITY=$(echo "$RAW_PWD" | jq -r '.result.records[0].PasswordComplexity // 0' 2>/dev/null || echo '0')
+          PWD_EXPIRY=$(echo "$RAW_PWD" | jq -r '.result.records[0].PasswordExpiration // 0' 2>/dev/null || echo '0')
+          PWD_LOCKOUT=$(echo "$RAW_PWD" | jq -r '.result.records[0].MaxLoginAttempts // 0' 2>/dev/null || echo '0')
+          # SF standard: min length >= 8, complexity >= 3, expiry <= 90 days (0=never=bad), lockout <= 10
+          PWD_ISSUES=0
+          [[ "$PWD_MIN_LEN" -lt 8 ]] && PWD_ISSUES=$((PWD_ISSUES + 1))
+          [[ "$PWD_COMPLEXITY" -lt 3 ]] && PWD_ISSUES=$((PWD_ISSUES + 1))
+          [[ "$PWD_EXPIRY" -eq 0 || "$PWD_EXPIRY" -gt 90 ]] && PWD_ISSUES=$((PWD_ISSUES + 1))
+          [[ "$PWD_LOCKOUT" -eq 0 || "$PWD_LOCKOUT" -gt 10 ]] && PWD_ISSUES=$((PWD_ISSUES + 1))
+
+          # -- Session Settings Check (clickjack, HTTPS, timeout) ------------
+          RAW_SESSION=$(sf data query --query "SELECT SessionTimeout, ForceRelogin, RequireHttps, EnableClickjackNonsetupSFDC, EnableClickjackNonsetupUser FROM SecuritySettings LIMIT 1" --target-org "$USERNAME" --use-tooling-api --json 2>/dev/null)
+          SESSION_HTTPS=$(echo "$RAW_SESSION" | jq -r '.result.records[0].RequireHttps // false' 2>/dev/null || echo 'false')
+          SESSION_CLICKJACK=$(echo "$RAW_SESSION" | jq -r '.result.records[0].EnableClickjackNonsetupUser // false' 2>/dev/null || echo 'false')
+          SESSION_TIMEOUT=$(echo "$RAW_SESSION" | jq -r '.result.records[0].SessionTimeout // "02:00"' 2>/dev/null || echo '02:00')
+          SESSION_ISSUES=0
+          [[ "$SESSION_HTTPS" != "true" ]] && SESSION_ISSUES=$((SESSION_ISSUES + 1))
+          [[ "$SESSION_CLICKJACK" != "true" ]] && SESSION_ISSUES=$((SESSION_ISSUES + 1))
+          # Timeout > 4 hours is a risk (SF standard recommends <= 2h for sensitive orgs)
+          SESSION_HOURS=$(echo "$SESSION_TIMEOUT" | cut -d: -f1 | sed 's/^0//' || echo '2')
+          [[ "${SESSION_HOURS:-2}" -gt 4 ]] && SESSION_ISSUES=$((SESSION_ISSUES + 1))
+
           # -- Storage Usage (from governor limits) --------------------------
           DATA_STORAGE_USED=$(echo "$LIMITS_JSON" | jq -r '[.[] | select(.name == "DataStorageMB")] | if length > 0 then (.[0] | (.max - .remaining)) else 0 end' 2>/dev/null || echo '0')
           DATA_STORAGE_MAX=$(echo "$LIMITS_JSON" | jq -r '[.[] | select(.name == "DataStorageMB")] | if length > 0 then .[0].max else 0 end' 2>/dev/null || echo '0')
           FILE_STORAGE_USED=$(echo "$LIMITS_JSON" | jq -r '[.[] | select(.name == "FileStorageMB")] | if length > 0 then (.[0] | (.max - .remaining)) else 0 end' 2>/dev/null || echo '0')
           FILE_STORAGE_MAX=$(echo "$LIMITS_JSON" | jq -r '[.[] | select(.name == "FileStorageMB")] | if length > 0 then .[0].max else 0 end' 2>/dev/null || echo '0')
 
-          SEC_RAW=$(awk "BEGIN {v=100-(${PRIV_COUNT}*10)-(${INACTIVE_COUNT}*2)-(${NO_MFA_COUNT}*1)-(${GUEST_COUNT}*5)-(${CONN_APP_COUNT}*3)-(${OWD_PUBLIC_COUNT}*2); if(v<0)v=0; printf \"%d\", int(v)}")
+          SEC_RAW="$SF_SEC_SCORE"
 
 
           # -- Apex Coverage --------------------------------------------------
@@ -719,12 +765,13 @@ jobs:
           CRITICAL_LIMITS=$(echo "$LIMITS_JSON" | jq '[.[] | select(.max > 0 and ((.remaining / .max) < 0.20))] | length' 2>/dev/null || echo 0)
 
           HEALTH_SCORE=$(awk "BEGIN {
-            sec  = 100-(${PRIV_COUNT}*10)-(${INACTIVE_COUNT}*2)-(${NO_MFA_COUNT}*1)-(${GUEST_COUNT}*5)-(${CONN_APP_COUNT}*3)-(${OWD_PUBLIC_COUNT}*2); if(sec<0)sec=0;
+            sec  = ${SF_SEC_SCORE}+0; if(sec<0)sec=0; if(sec>100)sec=100;
+            sec  = sec-(${PWD_ISSUES}*5)-(${SESSION_ISSUES}*5); if(sec<0)sec=0;
             cov  = ${COV_COVERED}+0; unc = ${COV_UNCOVERED}+0; tot = cov+unc;
             apex_cov = (tot>0) ? (cov/tot)*100 : 0; if(apex_cov>100)apex_cov=100;
             test_tot = ${TEST_PASS}+${TEST_FAIL};
             test_pct = (test_tot>0) ? (${TEST_PASS}/test_tot)*100 : 100;
-            pmd_raw  = 100-(${PMD_CRITICAL}*5)-(${PMD_HIGH}*2); if(pmd_raw<0)pmd_raw=0;
+            pmd_raw  = 100-(${PMD_CRITICAL}*5)-(${PMD_HIGH}*2)-(${OLD_API_COUNT}*1); if(pmd_raw<0)pmd_raw=0;
             stab_raw = 100-(${FAILED_BATCH_COUNT}*10)-(${APEX_EXCEPTIONS}*5); if(stab_raw<0)stab_raw=0;
             gov_raw  = 100-(${CRITICAL_LIMITS}*10); if(gov_raw<0)gov_raw=0;
             score = (sec*0.25) + (apex_cov*0.20) + (test_pct*0.15) + (pmd_raw*0.15) + (${DEPLOY_RATE}*0.10) + (stab_raw*0.05) + (gov_raw*0.10);
@@ -766,6 +813,18 @@ jobs:
             --argjson conn_app_count     "$CONN_APP_COUNT" \
             --argjson old_api_count      "$OLD_API_COUNT" \
             --argjson owd_public_count   "$OWD_PUBLIC_COUNT" \
+            --argjson sf_sec_score       "$SF_SEC_SCORE" \
+            --argjson sf_sec_risks       "$SF_SEC_RISKS" \
+            --argjson sf_sec_compliant   "$SF_SEC_COMPLIANT" \
+            --argjson pwd_issues         "$PWD_ISSUES" \
+            --argjson pwd_min_len        "$PWD_MIN_LEN" \
+            --argjson pwd_complexity     "$PWD_COMPLEXITY" \
+            --argjson pwd_expiry         "$PWD_EXPIRY" \
+            --argjson pwd_lockout        "$PWD_LOCKOUT" \
+            --argjson session_issues     "$SESSION_ISSUES" \
+            --arg    session_https       "$SESSION_HTTPS" \
+            --arg    session_clickjack   "$SESSION_CLICKJACK" \
+            --arg    session_timeout     "$SESSION_TIMEOUT" \
             --arg    data_storage_used   "$DATA_STORAGE_USED" \
             --arg    data_storage_max    "$DATA_STORAGE_MAX" \
             --arg    file_storage_used   "$FILE_STORAGE_USED" \
@@ -802,6 +861,18 @@ jobs:
                 failed_batch_count: $failed_batch_count,
                 critical_limits:    $critical_limits,
                 sec_raw:            $sec_raw,
+                sf_sec_score:       $sf_sec_score,
+                sf_sec_risks:       $sf_sec_risks,
+                sf_sec_compliant:   $sf_sec_compliant,
+                pwd_issues:         $pwd_issues,
+                pwd_min_len:        $pwd_min_len,
+                pwd_complexity:     $pwd_complexity,
+                pwd_expiry:         $pwd_expiry,
+                pwd_lockout:        $pwd_lockout,
+                session_issues:     $session_issues,
+                session_https:      $session_https,
+                session_clickjack:  $session_clickjack,
+                session_timeout:    $session_timeout,
                 priv_count:         $priv_count,
                 inactive_count:     $inactive_count,
                 no_mfa_count:       $no_mfa_count,
@@ -889,6 +960,12 @@ jobs:
           TEST_COUNT=$(jq  '.test_failures  | length'        "$FILE")
 
           SEC_RAW=$(jq -r '.scores.sec_raw       // "0"' "$FILE")
+          SF_SEC_SCORE=$(jq -r '.scores.sf_sec_score   // "0"' "$FILE")
+          SF_SEC_RISKS=$(jq -r '.scores.sf_sec_risks   // "0"' "$FILE")
+          PWD_ISSUES=$(jq -r   '.scores.pwd_issues     // "0"' "$FILE")
+          SESSION_ISSUES=$(jq -r '.scores.session_issues // "0"' "$FILE")
+          SESSION_HTTPS=$(jq -r  '.scores.session_https  // "false"' "$FILE")
+          SESSION_CLICKJACK=$(jq -r '.scores.session_clickjack // "false"' "$FILE")
           PRIV_C=$(jq -r  '.scores.priv_count     // "0"' "$FILE")
           INACT_C=$(jq -r '.scores.inactive_count // "0"' "$FILE")
           NOMFA_C=$(jq -r '.scores.no_mfa_count   // "0"' "$FILE")
@@ -898,13 +975,13 @@ jobs:
           # Pre-compute all awk values
           P_COV=$(awk   "BEGIN {v=${COV}+0; if(v>100)v=100; printf \"%.1f\", v*0.20}")
           P_TEST=$(awk  "BEGIN {t=${T_TOTAL}+0; p=${T_PASS}+0; if(t>0) printf \"%.1f\", (p/t)*100*0.15; else printf \"15.0\"}")
-          P_PMD=$(awk   "BEGIN {v=100-(${PMD_C}+0)*5-(${PMD_H}+0)*2; if(v<0)v=0; printf \"%.1f\", v*0.15}")
+          P_PMD=$(awk   "BEGIN {v=100-(${PMD_C}+0)*5-(${PMD_H}+0)*2-(${OLD_API_C}+0)*1; if(v<0)v=0; printf \"%.1f\", v*0.15}")
           P_DEP=$(awk   "BEGIN {printf \"%.1f\", (${D_RATE}+0)*0.10}")
           P_STAB=$(awk  "BEGIN {v=100-(${BATCHES}+0)*10-(${APEX_EX}+0)*5; if(v<0)v=0; printf \"%.1f\", v*0.05}")
           P_GOV=$(awk   "BEGIN {v=100-(${CRIT_LIM}+0)*10; if(v<0)v=0; printf \"%.1f\", v*0.10}")
           P_COV2=$(awk  "BEGIN {v=${COV}+0; if(v>100)v=100; printf \"%.2f\", v*0.20}")
           P_TEST2=$(awk "BEGIN {t=${T_TOTAL}+0; p=${T_PASS}+0; if(t>0) printf \"%.2f\", (p/t)*100*0.15; else printf \"15.00\"}")
-          P_PMD2=$(awk  "BEGIN {v=100-(${PMD_C}+0)*5-(${PMD_H}+0)*2; if(v<0)v=0; printf \"%.2f\", v*0.15}")
+          P_PMD2=$(awk  "BEGIN {v=100-(${PMD_C}+0)*5-(${PMD_H}+0)*2-(${OLD_API_C}+0)*1; if(v<0)v=0; printf \"%.2f\", v*0.15}")
           P_DEP2=$(awk  "BEGIN {printf \"%.2f\", (${D_RATE}+0)*0.10}")
           P_STAB2=$(awk "BEGIN {v=100-(${BATCHES}+0)*10-(${APEX_EX}+0)*5; if(v<0)v=0; printf \"%.2f\", v*0.05}")
           P_GOV2=$(awk  "BEGIN {v=100-(${CRIT_LIM}+0)*10; if(v<0)v=0; printf \"%.2f\", v*0.10}")
@@ -924,10 +1001,10 @@ jobs:
             echo "### 📊 Score Breakdown"
             echo "| Category | Weight | Raw Value | Points |"
             echo "|---|---|---|---|"
-            echo "| 🔒 Security Health Check | 25% | ${SEC_RAW}/100 (Priv:${PRIV_C} Inactive:${INACT_C} NoMFA:${NOMFA_C} Guest:${GUEST_C} ConnApps:${CONN_C} OWD:${OWD_C}) | ${P_SEC2} |"
+            echo "| 🔒 Security Health Check | 25% | SF Score:${SF_SEC_SCORE}/100 Risks:${SF_SEC_RISKS} PwdIssues:${PWD_ISSUES} SessionIssues:${SESSION_ISSUES} (HTTPS:${SESSION_HTTPS} Clickjack:${SESSION_CLICKJACK}) Priv:${PRIV_C} Inactive:${INACT_C} NoMFA:${NOMFA_C} Guest:${GUEST_C} ConnApps:${CONN_C} OWD:${OWD_C}) | ${P_SEC2} |"
             echo "| 🧪 Apex Coverage | 20% | ${COV}% | ${P_COV2} |"
             echo "| ✅ Test Results | 15% | ${T_PASS}/${T_TOTAL} passed | ${P_TEST2} |"
-            echo "| 🔍 Code Quality (PMD) | 15% | Critical:$PMD_C High:$PMD_H Med:$PMD_M DeprecatedAPI:${OLD_API_C} | ${P_PMD2} |"
+            echo "| 🔍 Code Quality (PMD) | 15% | Critical:$PMD_C High:$PMD_H Med:$PMD_M DeprecatedAPI:${OLD_API_C}(penalised) | ${P_PMD2} |"
             echo "| 🚀 Deployment Success | 10% | ${D_RATE}% (${D_OK}/${D_TOT}) | ${P_DEP2} |"
             echo "| ⚙️ Org Stability | 5% | Batches:$BATCHES Exceptions:$APEX_EX | ${P_STAB2} |"
             echo "| 📊 Governor Limits | 10% | Critical:$CRIT_LIM | ${P_GOV2} |"
@@ -1051,6 +1128,12 @@ jobs:
           BATCHES=$(jq -r  '.scores.failed_batch_count // 0' "$FILE")
           CRIT_LIM=$(jq -r '.scores.critical_limits    // 0' "$FILE")
           SEC_RAW=$(jq -r  '.scores.sec_raw            // "0"' "$FILE")
+          SF_SEC_SCORE=$(jq -r '.scores.sf_sec_score   // "0"' "$FILE")
+          SF_SEC_RISKS=$(jq -r '.scores.sf_sec_risks   // "0"' "$FILE")
+          PWD_ISSUES=$(jq -r   '.scores.pwd_issues     // "0"' "$FILE")
+          SESSION_ISSUES=$(jq -r '.scores.session_issues // "0"' "$FILE")
+          SESSION_HTTPS=$(jq -r  '.scores.session_https  // "false"' "$FILE")
+          SESSION_CLICKJACK=$(jq -r '.scores.session_clickjack // "false"' "$FILE")
           PRIV_C=$(jq -r   '.scores.priv_count         // "0"' "$FILE")
           INACT_C=$(jq -r  '.scores.inactive_count     // "0"' "$FILE")
           NOMFA_C=$(jq -r  '.scores.no_mfa_count       // "0"' "$FILE")
@@ -1073,7 +1156,7 @@ jobs:
           P_SEC=$(awk  "BEGIN {printf \"%.2f\", (${SEC_RAW}+0)*0.25}")
           P_COV=$(awk  "BEGIN {v=${COV}+0; if(v>100)v=100; printf \"%.2f\", v*0.20}")
           P_TEST=$(awk "BEGIN {t=${T_TOTAL}+0; p=${T_PASS}+0; if(t>0) printf \"%.2f\", (p/t)*100*0.15; else printf \"15.00\"}")
-          P_PMD=$(awk  "BEGIN {v=100-(${PMD_C}+0)*5-(${PMD_H}+0)*2; if(v<0)v=0; printf \"%.2f\", v*0.15}")
+          P_PMD=$(awk  "BEGIN {v=100-(${PMD_C}+0)*5-(${PMD_H}+0)*2-(${OLD_API_C}+0)*1; if(v<0)v=0; printf \"%.2f\", v*0.15}")
           P_DEP=$(awk  "BEGIN {printf \"%.2f\", (${D_RATE}+0)*0.10}")
           P_STAB=$(awk "BEGIN {v=100-(${BATCHES}+0)*10-(${APEX_EX}+0)*5; if(v<0)v=0; printf \"%.2f\", v*0.05}")
           P_GOV=$(awk  "BEGIN {v=100-(${CRIT_LIM}+0)*10; if(v<0)v=0; printf \"%.2f\", v*0.10}")
@@ -1089,10 +1172,10 @@ jobs:
           NEW_ENTRY+="</table>"
           NEW_ENTRY+="<h3>📊 Score Breakdown</h3>"
           NEW_ENTRY+="<table><tr><th>Category</th><th>Weight</th><th>Raw Value</th><th>Points</th></tr>"
-          NEW_ENTRY+="<tr><td>🔒 Security</td><td>25%</td><td>${SEC_RAW}/100 (Priv:${PRIV_C} Inactive:${INACT_C} NoMFA:${NOMFA_C} Guest:${GUEST_C} ConnApps:${CONN_C} OWD:${OWD_C})</td><td>${P_SEC}</td></tr>"
+          NEW_ENTRY+="<tr><td>🔒 Security</td><td>25%</td><td>SF Score:${SF_SEC_SCORE}/100 Risks:${SF_SEC_RISKS} PwdIssues:${PWD_ISSUES} SessionIssues:${SESSION_ISSUES} (HTTPS:${SESSION_HTTPS} Clickjack:${SESSION_CLICKJACK}) Priv:${PRIV_C} Inactive:${INACT_C} NoMFA:${NOMFA_C} Guest:${GUEST_C} ConnApps:${CONN_C} OWD:${OWD_C}</td><td>${P_SEC}</td></tr>"
           NEW_ENTRY+="<tr><td>🧪 Apex Coverage</td><td>20%</td><td>${COV}%</td><td>${P_COV}</td></tr>"
           NEW_ENTRY+="<tr><td>✅ Test Results</td><td>15%</td><td>${T_PASS}/${T_TOTAL} passed</td><td>${P_TEST}</td></tr>"
-          NEW_ENTRY+="<tr><td>🔍 Code Quality (PMD)</td><td>15%</td><td>Critical:${PMD_C} High:${PMD_H} Med:${PMD_M} DeprecatedAPI:${OLD_API_C}</td><td>${P_PMD}</td></tr>"
+          NEW_ENTRY+="<tr><td>🔍 Code Quality (PMD)</td><td>15%</td><td>Critical:${PMD_C} High:${PMD_H} Med:${PMD_M} DeprecatedAPI:${OLD_API_C}(penalised)</td><td>${P_PMD}</td></tr>"
           NEW_ENTRY+="<tr><td>🚀 Deployment Success</td><td>10%</td><td>${D_RATE}% (${D_OK}/${D_TOT})</td><td>${P_DEP}</td></tr>"
           NEW_ENTRY+="<tr><td>⚙️ Org Stability</td><td>5%</td><td>Batches:${BATCHES} Exceptions:${APEX_EX}</td><td>${P_STAB}</td></tr>"
           NEW_ENTRY+="<tr><td>📊 Governor Limits</td><td>10%</td><td>Critical:${CRIT_LIM}</td><td>${P_GOV}</td></tr>"
@@ -1192,6 +1275,12 @@ jobs:
           BATCHES=$(jq -r  '.scores.failed_batch_count // 0'    "$FILE")
           CRIT_LIM=$(jq -r '.scores.critical_limits    // 0'    "$FILE")
           SEC_RAW=$(jq -r  '.scores.sec_raw            // "0"'  "$FILE")
+          SF_SEC_SCORE=$(jq -r '.scores.sf_sec_score   // "0"'  "$FILE")
+          SF_SEC_RISKS=$(jq -r '.scores.sf_sec_risks   // "0"'  "$FILE")
+          PWD_ISSUES=$(jq -r   '.scores.pwd_issues     // "0"'  "$FILE")
+          SESSION_ISSUES=$(jq -r '.scores.session_issues // "0"' "$FILE")
+          SESSION_HTTPS=$(jq -r  '.scores.session_https  // "false"' "$FILE")
+          SESSION_CLICKJACK=$(jq -r '.scores.session_clickjack // "false"' "$FILE")
           PRIV_C=$(jq -r   '.scores.priv_count         // "0"'  "$FILE")
           INACT_C=$(jq -r  '.scores.inactive_count     // "0"'  "$FILE")
           NOMFA_C=$(jq -r  '.scores.no_mfa_count       // "0"'  "$FILE")
@@ -1213,7 +1302,7 @@ jobs:
           P_SEC=$(awk   "BEGIN {printf \"%.2f\", (${SEC_RAW}+0)*0.25}")
           P_COV=$(awk   "BEGIN {v=${COV}+0; if(v>100)v=100; printf \"%.2f\", v*0.20}")
           P_TEST=$(awk  "BEGIN {t=${T_TOTAL}+0; p=${T_PASS}+0; if(t>0) printf \"%.2f\", (p/t)*100*0.15; else printf \"15.00\"}")
-          P_PMD=$(awk   "BEGIN {v=100-(${PMD_C}+0)*5-(${PMD_H}+0)*2; if(v<0)v=0; printf \"%.2f\", v*0.15}")
+          P_PMD=$(awk   "BEGIN {v=100-(${PMD_C}+0)*5-(${PMD_H}+0)*2-(${OLD_API_C}+0)*1; if(v<0)v=0; printf \"%.2f\", v*0.15}")
           P_DEP=$(awk   "BEGIN {printf \"%.2f\", (${D_RATE}+0)*0.10}")
           P_STAB=$(awk  "BEGIN {v=100-(${BATCHES}+0)*10-(${APEX_EX}+0)*5; if(v<0)v=0; printf \"%.2f\", v*0.05}")
           P_GOV=$(awk   "BEGIN {v=100-(${CRIT_LIM}+0)*10; if(v<0)v=0; printf \"%.2f\", v*0.10}")
@@ -1266,10 +1355,10 @@ jobs:
           EMAIL_BODY+="<h3>📊 Score Breakdown</h3>"
           EMAIL_BODY+="<table border='1' cellpadding='8' cellspacing='0' style='border-collapse:collapse;width:100%'>"
           EMAIL_BODY+="<tr style='background:#f5f5f5'><th>Category</th><th>Weight</th><th>Raw Value</th><th>Points</th></tr>"
-          EMAIL_BODY+="<tr><td>🔒 Security</td><td>25%</td><td>${SEC_RAW}/100 (Priv:${PRIV_C} Inactive:${INACT_C} NoMFA:${NOMFA_C} Guest:${GUEST_C} ConnApps:${CONN_C} OWD:${OWD_C})</td><td>${P_SEC}</td></tr>"
+          EMAIL_BODY+="<tr><td>🔒 Security</td><td>25%</td><td>SF Score:${SF_SEC_SCORE}/100 Risks:${SF_SEC_RISKS} PwdIssues:${PWD_ISSUES} SessionIssues:${SESSION_ISSUES} (HTTPS:${SESSION_HTTPS} Clickjack:${SESSION_CLICKJACK}) Priv:${PRIV_C} Inactive:${INACT_C} NoMFA:${NOMFA_C} Guest:${GUEST_C} ConnApps:${CONN_C} OWD:${OWD_C}</td><td>${P_SEC}</td></tr>"
           EMAIL_BODY+="<tr><td>🧪 Apex Coverage</td><td>20%</td><td>${COV}%</td><td>${P_COV}</td></tr>"
           EMAIL_BODY+="<tr><td>✅ Test Results</td><td>15%</td><td>${T_PASS}/${T_TOTAL} passed</td><td>${P_TEST}</td></tr>"
-          EMAIL_BODY+="<tr><td>🔍 Code Quality (PMD)</td><td>15%</td><td>Critical:${PMD_C} High:${PMD_H} Med:${PMD_M} DeprecatedAPI:${OLD_API_C}</td><td>${P_PMD}</td></tr>"
+          EMAIL_BODY+="<tr><td>🔍 Code Quality (PMD)</td><td>15%</td><td>Critical:${PMD_C} High:${PMD_H} Med:${PMD_M} DeprecatedAPI:${OLD_API_C}(penalised)</td><td>${P_PMD}</td></tr>"
           EMAIL_BODY+="<tr><td>🚀 Deployment Success</td><td>10%</td><td>${D_RATE}%</td><td>${P_DEP}</td></tr>"
           EMAIL_BODY+="<tr><td>⚙️ Org Stability</td><td>5%</td><td>Batches:${BATCHES} Exceptions:${APEX_EX}</td><td>${P_STAB}</td></tr>"
           EMAIL_BODY+="<tr><td>📊 Governor Limits</td><td>10%</td><td>Critical:${CRIT_LIM}</td><td>${P_GOV}</td></tr>"
