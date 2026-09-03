@@ -665,8 +665,351 @@ jobs:
             echo "⚙️ Calculated fallback SecurityHealthCheck Score: $SF_SEC_SCORE"
           fi
 
-          # [YOUR EXISTING REST OF THE POST_DEPLOY_HEALTH_CHECK STEPS BELOW...]
-          # Continue with gathering password policy, session settings, coverage, tests, etc., and final JSON output as in your original workflow.
+          # -- Password Policy (Tooling API) ----------------------------------
+          RAW_PWD=$(sf data query --use-tooling-api \
+            --query "SELECT MinPasswordLength,PasswordComplexity,PasswordExpiration,MaxLoginAttempts FROM PasswordPolicy LIMIT 1" \
+            --target-org "$USERNAME" --json 2>/dev/null || echo '{}')
+          PWD_MIN_LEN=$(echo "$RAW_PWD"    | jq -r '.result.records[0].MinPasswordLength  // "N/A"' 2>/dev/null || echo 'N/A')
+          PWD_COMPLEX=$(echo "$RAW_PWD"    | jq -r '.result.records[0].PasswordComplexity  // "N/A"' 2>/dev/null || echo 'N/A')
+          PWD_EXPIRY=$(echo "$RAW_PWD"     | jq -r '.result.records[0].PasswordExpiration   // "N/A"' 2>/dev/null || echo 'N/A')
+          PWD_MAX_ATTEMPTS=$(echo "$RAW_PWD" | jq -r '.result.records[0].MaxLoginAttempts  // "N/A"' 2>/dev/null || echo 'N/A')
+
+          # -- Session Settings (Tooling API) ---------------------------------
+          RAW_SESS=$(sf data query --use-tooling-api \
+            --query "SELECT SessionTimeout,ForceRelogin,RequireHttps,EnableClickjackNonsetupSFDC,EnableClickjackNonsetupUser FROM SecuritySettings LIMIT 1" \
+            --target-org "$USERNAME" --json 2>/dev/null || echo '{}')
+          SESS_TIMEOUT=$(echo "$RAW_SESS"       | jq -r '.result.records[0].SessionTimeout                  // "N/A"' 2>/dev/null || echo 'N/A')
+          SESS_FORCE_RELOGIN=$(echo "$RAW_SESS" | jq -r '.result.records[0].ForceRelogin                    // "N/A"' 2>/dev/null || echo 'N/A')
+          SESS_HTTPS=$(echo "$RAW_SESS"         | jq -r '.result.records[0].RequireHttps                    // "N/A"' 2>/dev/null || echo 'N/A')
+          SESS_CJ_SETUP=$(echo "$RAW_SESS"      | jq -r '.result.records[0].EnableClickjackNonsetupSFDC     // "N/A"' 2>/dev/null || echo 'N/A')
+          SESS_CJ_USER=$(echo "$RAW_SESS"       | jq -r '.result.records[0].EnableClickjackNonsetupUser     // "N/A"' 2>/dev/null || echo 'N/A')
+
+          # -- Apex Test Coverage (last run) ----------------------------------
+          RAW_COV=$(sf data query \
+            --query "SELECT PercentCovered FROM ApexOrgWideCoverage LIMIT 1" \
+            --target-org "$USERNAME" --json 2>/dev/null || echo '{}')
+          COVERAGE_PCT=$(echo "$RAW_COV" | jq -r '.result.records[0].PercentCovered // 0' 2>/dev/null || echo '0')
+
+          # -- Recent Test Runs -----------------------------------------------
+          RAW_TESTS=$(sf data query \
+            --query "SELECT Id,Status,TestTime,MethodsCompleted,MethodsFailed FROM ApexTestRunResult ORDER BY CreatedDate DESC LIMIT 5" \
+            --target-org "$USERNAME" --json 2>/dev/null || echo '{}')
+          TESTS_JSON=$(echo "$RAW_TESTS" | jq -c '[.result.records[]? | {status:.Status,duration_ms:.TestTime,passed:.MethodsCompleted,failed:.MethodsFailed}]' 2>/dev/null || echo '[]')
+
+          # -- Recent Deployments ---------------------------------------------
+          RAW_DEPLOY=$(sf data query --use-tooling-api \
+            --query "SELECT Id,Status,StartDate,CompletedDate,NumberComponentsDeployed,NumberComponentErrors FROM DeployRequest ORDER BY StartDate DESC LIMIT 5" \
+            --target-org "$USERNAME" --json 2>/dev/null || echo '{}')
+          DEPLOY_JSON=$(echo "$RAW_DEPLOY" | jq -c '[.result.records[]? | {status:.Status,components:.NumberComponentsDeployed,errors:.NumberComponentErrors}]' 2>/dev/null || echo '[]')
+
+          # -- Active Batch Jobs ----------------------------------------------
+          RAW_BATCH=$(sf data query \
+            --query "SELECT COUNT() FROM AsyncApexJob WHERE JobType='BatchApex' AND Status IN ('Processing','Queued','Preparing')" \
+            --target-org "$USERNAME" --json 2>/dev/null || echo '{}')
+          BATCH_COUNT=$(safe_int "$RAW_BATCH" '.result.totalSize')
+
+          # -- Health Band ----------------------------------------------------
+          if   [[ $SF_SEC_SCORE -ge 90 ]]; then HEALTH_BAND="Excellent"
+          elif [[ $SF_SEC_SCORE -ge 75 ]]; then HEALTH_BAND="Good"
+          elif [[ $SF_SEC_SCORE -ge 50 ]]; then HEALTH_BAND="Fair"
+          else                                   HEALTH_BAND="Poor"
+          fi
+
+          # -- Build JSON artifact --------------------------------------------
+          SCAN_TS=$(TZ='Asia/Kolkata' date +'%Y-%m-%dT%H:%M:%S+05:30')
+          jq -n \
+            --arg  env          "$ENV" \
+            --arg  package      "$PACKAGE" \
+            --arg  scan_time    "$SCAN_TS" \
+            --arg  score        "$SF_SEC_SCORE" \
+            --arg  band         "$HEALTH_BAND" \
+            --arg  priv         "$PRIV_COUNT" \
+            --arg  inactive     "$INACTIVE_COUNT" \
+            --arg  no_mfa       "$NO_MFA_COUNT" \
+            --arg  guest        "$GUEST_COUNT" \
+            --arg  conn_apps    "$CONN_APP_COUNT" \
+            --arg  owd_public   "$OWD_PUBLIC_COUNT" \
+            --arg  old_api      "$OLD_API_COUNT" \
+            --arg  pwd_min      "$PWD_MIN_LEN" \
+            --arg  pwd_complex  "$PWD_COMPLEX" \
+            --arg  pwd_expiry   "$PWD_EXPIRY" \
+            --arg  pwd_attempts "$PWD_MAX_ATTEMPTS" \
+            --arg  sess_timeout "$SESS_TIMEOUT" \
+            --arg  sess_relogin "$SESS_FORCE_RELOGIN" \
+            --arg  sess_https   "$SESS_HTTPS" \
+            --arg  sess_cj_sf   "$SESS_CJ_SETUP" \
+            --arg  sess_cj_usr  "$SESS_CJ_USER" \
+            --argjson apex      "$APEX_COUNT" \
+            --argjson triggers  "$TRIGGER_COUNT" \
+            --argjson flows     "$FLOW_COUNT" \
+            --argjson users     "$USER_COUNT" \
+            --argjson coverage  "$COVERAGE_PCT" \
+            --argjson batch     "$BATCH_COUNT" \
+            --argjson tests     "$TESTS_JSON" \
+            --argjson deploys   "$DEPLOY_JSON" \
+            --argjson limits    "$LIMITS_JSON" \
+            '{
+              security: {
+                score:           ($score|tonumber),
+                band:            $band,
+                privileged_profiles: ($priv|tonumber),
+                inactive_users:  ($inactive|tonumber),
+                users_no_mfa:    ($no_mfa|tonumber),
+                guest_users:     ($guest|tonumber),
+                conn_apps_unrestricted: ($conn_apps|tonumber),
+                owd_public_objects: ($owd_public|tonumber),
+                deprecated_api_classes: ($old_api|tonumber),
+                password_policy: {
+                  min_length:    ($pwd_min|tonumber? // $pwd_min),
+                  complexity:    ($pwd_complex|tonumber? // $pwd_complex),
+                  expiration:    ($pwd_expiry|tonumber? // $pwd_expiry),
+                  max_attempts:  ($pwd_attempts|tonumber? // $pwd_attempts)
+                },
+                session_settings: {
+                  timeout:       $sess_timeout,
+                  force_relogin: $sess_relogin,
+                  require_https: $sess_https,
+                  clickjack_sf:  $sess_cj_sf,
+                  clickjack_user: $sess_cj_usr
+                }
+              },
+              metrics: {
+                apex_classes:    $apex,
+                apex_triggers:   $triggers,
+                active_flows:    $flows,
+                active_users:    $users,
+                apex_coverage_pct: $coverage,
+                active_batch_jobs: $batch,
+                recent_test_runs:  $tests,
+                recent_deployments: $deploys,
+                governor_limits:   $limits
+              },
+              metadata: {
+                environment: $env,
+                package:     $package,
+                scanned_at:  $scan_time
+              }
+            }' > health_post_deploy.json
+
+          echo "✅ Health JSON written:"
+          cat health_post_deploy.json
+
+          echo "health_score=$SF_SEC_SCORE"   >> $GITHUB_OUTPUT
+          echo "health_band=$HEALTH_BAND"     >> $GITHUB_OUTPUT
+          echo "coverage_pct=$COVERAGE_PCT"   >> $GITHUB_OUTPUT
+          echo "apex_count=$APEX_COUNT"       >> $GITHUB_OUTPUT
+          echo "trigger_count=$TRIGGER_COUNT" >> $GITHUB_OUTPUT
+          echo "flow_count=$FLOW_COUNT"       >> $GITHUB_OUTPUT
+          echo "user_count=$USER_COUNT"       >> $GITHUB_OUTPUT
+          echo "batch_count=$BATCH_COUNT"     >> $GITHUB_OUTPUT
+
+      - name: Write Post-Deploy Health Summary
+        if: always()
+        shell: bash
+        env:
+          ENV:          ${{ needs.Deployment_Build.outputs.environment }}
+          PACKAGE:      ${{ needs.Deployment_Build.outputs.deploy_package }}
+          SCORE:        ${{ steps.collect.outputs.health_score }}
+          BAND:         ${{ steps.collect.outputs.health_band }}
+          COVERAGE:     ${{ steps.collect.outputs.coverage_pct }}
+          APEX:         ${{ steps.collect.outputs.apex_count }}
+          TRIGGERS:     ${{ steps.collect.outputs.trigger_count }}
+          FLOWS:        ${{ steps.collect.outputs.flow_count }}
+          USERS:        ${{ steps.collect.outputs.user_count }}
+          BATCH:        ${{ steps.collect.outputs.batch_count }}
+          RUN_ID:       ${{ github.run_id }}
+          REPO:         ${{ github.repository }}
+        run: |
+          SCAN_TIME=$(TZ='Asia/Kolkata' date +'%d-%m-%Y %H:%M IST')
+          RUN_URL="https://github.com/${REPO}/actions/runs/${RUN_ID}"
+
+          case "$BAND" in
+            Excellent) BAND_ICON="🟢" ;;
+            Good)      BAND_ICON="🟡" ;;
+            Fair)      BAND_ICON="🟠" ;;
+            *)         BAND_ICON="🔴" ;;
+          esac
+
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## 🏥 Post-Deploy Health Check — ${ENV}
+
+          | Field              | Value                          |
+          |--------------------|--------------------------------|
+          | **Environment**    | ${ENV}                         |
+          | **Package**        | ${PACKAGE}                     |
+          | **Scanned At**     | ${SCAN_TIME}                   |
+          | **Security Score** | ${BAND_ICON} **${SCORE}/100** (${BAND}) |
+          | **Apex Coverage**  | ${COVERAGE}%                   |
+          | **Apex Classes**   | ${APEX}                        |
+          | **Apex Triggers**  | ${TRIGGERS}                    |
+          | **Active Flows**   | ${FLOWS}                       |
+          | **Active Users**   | ${USERS}                       |
+          | **Batch Jobs**     | ${BATCH}                       |
+          | **Workflow Run**   | [${RUN_ID}](${RUN_URL})        |
+
+          > Score bands: 🟢 Excellent ≥90 | 🟡 Good ≥75 | 🟠 Fair ≥50 | 🔴 Poor <50
+          EOF
+
+      - name: Upload Health Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: health-check-${{ needs.Deployment_Build.outputs.environment }}-${{ github.run_id }}
+          path: health_post_deploy.json
+          retention-days: 30
+
+      - name: Publish Health Check to Confluence
+        if: always()
+        shell: bash
+        env:
+          SCORE:               ${{ steps.collect.outputs.health_score }}
+          BAND:                ${{ steps.collect.outputs.health_band }}
+          COVERAGE:            ${{ steps.collect.outputs.coverage_pct }}
+          APEX:                ${{ steps.collect.outputs.apex_count }}
+          TRIGGERS:            ${{ steps.collect.outputs.trigger_count }}
+          FLOWS:               ${{ steps.collect.outputs.flow_count }}
+          USERS:               ${{ steps.collect.outputs.user_count }}
+          BATCH:               ${{ steps.collect.outputs.batch_count }}
+          ENV:                 ${{ needs.Deployment_Build.outputs.environment }}
+          PACKAGE:             ${{ needs.Deployment_Build.outputs.deploy_package }}
+          RUN_ID:              ${{ github.run_id }}
+          REPO:                ${{ github.repository }}
+          JIRA_USER_EMAIL:     ${{ secrets.JIRA_USER_EMAIL }}
+          ATLASSIAN_API_TOKEN: ${{ secrets.ATLASSIAN_API_TOKEN }}
+          CONFLUENCE_BASE_URL: ${{ secrets.CONFLUENCE_BASE_URL }}
+          HEALTH_PAGE_ID:      ${{ secrets.CONFLUENCE_HEALTH_PAGE_ID }}
+        run: |
+          if [[ -z "$CONFLUENCE_BASE_URL" || -z "$HEALTH_PAGE_ID" ]]; then
+            echo "⚠️ CONFLUENCE_BASE_URL or CONFLUENCE_HEALTH_PAGE_ID not set — skipping"
+            exit 0
+          fi
+
+          SCAN_TIME=$(TZ='Asia/Kolkata' date +'%d-%m-%Y %H:%M IST')
+          RUN_URL="https://github.com/${REPO}/actions/runs/${RUN_ID}"
+
+          case "$BAND" in
+            Excellent) BAND_COLOR="#00875A" ;;
+            Good)      BAND_COLOR="#FF991F" ;;
+            Fair)      BAND_COLOR="#FF7452" ;;
+            *)         BAND_COLOR="#DE350B" ;;
+          esac
+
+          HEALTH_HTML="<h2>🏥 Health Check — ${ENV} | ${SCAN_TIME}</h2>"
+          HEALTH_HTML+="<table><tr><th>Metric</th><th>Value</th></tr>"
+          HEALTH_HTML+="<tr><td><strong>Security Score</strong></td><td><span style='color:${BAND_COLOR}'><strong>${SCORE}/100 (${BAND})</strong></span></td></tr>"
+          HEALTH_HTML+="<tr><td>Apex Coverage</td><td>${COVERAGE}%</td></tr>"
+          HEALTH_HTML+="<tr><td>Apex Classes</td><td>${APEX}</td></tr>"
+          HEALTH_HTML+="<tr><td>Apex Triggers</td><td>${TRIGGERS}</td></tr>"
+          HEALTH_HTML+="<tr><td>Active Flows</td><td>${FLOWS}</td></tr>"
+          HEALTH_HTML+="<tr><td>Active Users</td><td>${USERS}</td></tr>"
+          HEALTH_HTML+="<tr><td>Active Batch Jobs</td><td>${BATCH}</td></tr>"
+          HEALTH_HTML+="<tr><td>Package</td><td>${PACKAGE}</td></tr>"
+          HEALTH_HTML+="<tr><td>Workflow Run</td><td><a href='${RUN_URL}'>${RUN_ID}</a></td></tr>"
+          HEALTH_HTML+="</table><hr/>"
+
+          PAGE_RESP=$(curl -s \
+            -u "${JIRA_USER_EMAIL}:${ATLASSIAN_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            "${CONFLUENCE_BASE_URL}/rest/api/content/${HEALTH_PAGE_ID}?expand=body.storage,version")
+
+          CUR_VER=$(echo "$PAGE_RESP" | jq -r '.version.number')
+          CUR_BODY=$(echo "$PAGE_RESP" | jq -r '.body.storage.value')
+          PAGE_TITLE=$(echo "$PAGE_RESP" | jq -r '.title')
+
+          if [[ -z "$CUR_VER" || "$CUR_VER" == "null" ]]; then
+            echo "❌ Could not fetch Confluence health page (ID: $HEALTH_PAGE_ID)"
+            echo "$PAGE_RESP"
+            exit 1
+          fi
+
+          NEW_VER=$((CUR_VER + 1))
+          NEW_BODY="${HEALTH_HTML}${CUR_BODY}"
+
+          UPD_RESP=$(curl -s -w "\n%{http_code}" -X PUT \
+            -u "${JIRA_USER_EMAIL}:${ATLASSIAN_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n \
+              --argjson version "{\"number\": ${NEW_VER}}" \
+              --arg title "${PAGE_TITLE}" \
+              --arg value "${NEW_BODY}" \
+              '{version: $version, title: $title, type: "page", body: {storage: {value: $value, representation: "storage"}}}')" \
+            "${CONFLUENCE_BASE_URL}/rest/api/content/${HEALTH_PAGE_ID}")
+
+          UPD_CODE=$(echo "$UPD_RESP" | tail -1)
+          if [[ "$UPD_CODE" == "200" ]]; then
+            echo "✅ Confluence health page updated (v${NEW_VER})"
+          else
+            echo "❌ Confluence update failed (HTTP $UPD_CODE)"
+            echo "$UPD_RESP" | sed '$d'
+            exit 1
+          fi
+
+      - name: Send Health Check Email
+        if: always()
+        shell: bash
+        env:
+          SCORE:        ${{ steps.collect.outputs.health_score }}
+          BAND:         ${{ steps.collect.outputs.health_band }}
+          COVERAGE:     ${{ steps.collect.outputs.coverage_pct }}
+          APEX:         ${{ steps.collect.outputs.apex_count }}
+          TRIGGERS:     ${{ steps.collect.outputs.trigger_count }}
+          FLOWS:        ${{ steps.collect.outputs.flow_count }}
+          USERS:        ${{ steps.collect.outputs.user_count }}
+          BATCH:        ${{ steps.collect.outputs.batch_count }}
+          ENV:          ${{ needs.Deployment_Build.outputs.environment }}
+          PACKAGE:      ${{ needs.Deployment_Build.outputs.deploy_package }}
+          RUN_ID:       ${{ github.run_id }}
+          REPO:         ${{ github.repository }}
+          ACTOR:        ${{ needs.Deployment_Build.outputs.actor }}
+        run: |
+          SCAN_TIME=$(TZ='Asia/Kolkata' date +'%d-%m-%Y %H:%M IST')
+          RUN_URL="https://github.com/${REPO}/actions/runs/${RUN_ID}"
+
+          case "$BAND" in
+            Excellent) BAND_COLOR="#00875A"; BAND_ICON="🟢" ;;
+            Good)      BAND_COLOR="#FF991F"; BAND_ICON="🟡" ;;
+            Fair)      BAND_COLOR="#FF7452"; BAND_ICON="🟠" ;;
+            *)         BAND_COLOR="#DE350B"; BAND_ICON="🔴" ;;
+          esac
+
+          cat > email_body.html << HTMLEOF
+          <!DOCTYPE html><html><body style="font-family:Arial,sans-serif;max-width:700px;margin:auto">
+          <h2 style="color:#0070D2">🏥 Post-Deploy Health Check — ${ENV}</h2>
+          <p><strong>Scanned:</strong> ${SCAN_TIME} &nbsp;|&nbsp; <strong>Package:</strong> ${PACKAGE} &nbsp;|&nbsp; <strong>Deployed by:</strong> ${ACTOR}</p>
+          <table border="1" cellpadding="8" cellspacing="0" style="border-collapse:collapse;width:100%">
+            <tr style="background:#f4f6f9"><th>Metric</th><th>Value</th></tr>
+            <tr><td><strong>Security Score</strong></td><td style="color:${BAND_COLOR}"><strong>${BAND_ICON} ${SCORE}/100 (${BAND})</strong></td></tr>
+            <tr><td>Apex Coverage</td><td>${COVERAGE}%</td></tr>
+            <tr><td>Apex Classes</td><td>${APEX}</td></tr>
+            <tr><td>Apex Triggers</td><td>${TRIGGERS}</td></tr>
+            <tr><td>Active Flows</td><td>${FLOWS}</td></tr>
+            <tr><td>Active Users</td><td>${USERS}</td></tr>
+            <tr><td>Active Batch Jobs</td><td>${BATCH}</td></tr>
+          </table>
+          <p style="margin-top:16px">📎 Full JSON artifact attached to <a href="${RUN_URL}">GitHub Actions Run ${RUN_ID}</a></p>
+          <p style="color:#888;font-size:12px">Score bands: 🟢 Excellent ≥90 | 🟡 Good ≥75 | 🟠 Fair ≥50 | 🔴 Poor &lt;50</p>
+          </body></html>
+          HTMLEOF
+          echo "✅ Email body written to email_body.html"
+
+      - name: Dispatch Health Check Email
+        if: always()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_SERVER }}
+          server_port:    ${{ secrets.SMTP_PORT }}
+          username:       ${{ secrets.SMTP_USERNAME }}
+          password:       ${{ secrets.SMTP_PASSWORD }}
+          subject:        "🏥 Health Check | ${{ needs.Deployment_Build.outputs.environment }} | Score: ${{ steps.collect.outputs.health_score }}/100 (${{ steps.collect.outputs.health_band }})"
+          to:             ${{ secrets.HEALTH_CHECK_EMAIL_TO }}
+          from:           ${{ secrets.SMTP_USERNAME }}
+          html_body:      file://email_body.html
+          attachments:    health_post_deploy.json
+
+      - name: Cleanup JWT Key
+        if: always()
+        run: rm -f server.key
+
   Jira_Transition:
     runs-on: ubuntu-latest
     needs: [Deployment_Build, Post_Deployment_Health_Check]
