@@ -575,7 +575,7 @@ jobs:
 
           # -- Governor Limits ------------------------------------------------
           RAW_LIMITS=$(sf org list limits --target-org "$USERNAME" --json 2>/dev/null)
-          LIMITS_JSON=$(echo "$RAW_LIMITS" | jq -c '[.result[]? | {name: (.name // .Name // ""), remaining: (.remaining // .Remaining // 0), max: (.max // .Max // 0)}]' 2>/dev/null || echo '[]')
+          LIMITS_JSON=$(echo "$RAW_LIMITS" | jq -c '[.result[]? | {name: (.name // .Name // ""), remaining: ((.remaining // .Remaining // 0) | tonumber), max: ((.max // .Max // 0) | tonumber)}] | map(select(.name != ""))' 2>/dev/null || echo '[]')
 
           # -- Active Apex Classes --------------------------------------------
           RAW_APEX=$(sf data query --query "SELECT COUNT() FROM ApexClass WHERE Status='Active'" --target-org "$USERNAME" --json 2>/dev/null)
@@ -632,37 +632,43 @@ jobs:
               -H "Content-Type: application/json" \
               "${INSTANCE_URL}/services/data/v${SF_API_VERSION}/security/health-check" 2>/dev/null)
             SF_SEC_SCORE=$(echo "$RAW_SF_SEC" | jq -r '.score // 0' 2>/dev/null || echo '0')
-            SF_SEC_RISKS=$(echo "$RAW_SF_SEC" | jq -r '[.groups[]?.settings[]? | select(.riskType != null and .riskType != "MEETS_STANDARD")] | length' 2>/dev/null || echo '0')
-            SF_SEC_COMPLIANT=$(echo "$RAW_SF_SEC" | jq -r '[.groups[]?.settings[]? | select(.riskType == "MEETS_STANDARD")] | length' 2>/dev/null || echo '0')
+            SF_SEC_RISKS=$(echo "$RAW_SF_SEC" | jq -r '[.settings[]? | select(.riskType != null and .riskType != "MEETS_STANDARD")] | length' 2>/dev/null || echo '0')
+            SF_SEC_COMPLIANT=$(echo "$RAW_SF_SEC" | jq -r '[.settings[]? | select(.riskType == "MEETS_STANDARD")] | length' 2>/dev/null || echo '0')
           fi
           # Fallback: if SF API unavailable, derive from manual checks
           if [[ "$SF_SEC_SCORE" == "0" || "$SF_SEC_SCORE" == "null" ]]; then
             SF_SEC_SCORE=$(awk "BEGIN {v=100-(${PRIV_COUNT}*10)-(${INACTIVE_COUNT}*2)-(${NO_MFA_COUNT}*1)-(${GUEST_COUNT}*5)-(${CONN_APP_COUNT}*3)-(${OWD_PUBLIC_COUNT}*2); if(v<0)v=0; printf \"%d\", int(v)}")
           fi
 
-          # -- Password Policy Check (Salesforce standard: min 8 chars, expiry, lockout) --
-          RAW_PWD=$(sf data query --query "SELECT MinPasswordLength, PasswordComplexity, PasswordExpiration, MaxLoginAttempts FROM PasswordPolicy LIMIT 1" --target-org "$USERNAME" --json 2>/dev/null)
-          PWD_MIN_LEN=$(echo "$RAW_PWD" | jq -r '.result.records[0].MinPasswordLength // 0' 2>/dev/null || echo '0')
-          PWD_COMPLEXITY=$(echo "$RAW_PWD" | jq -r '.result.records[0].PasswordComplexity // 0' 2>/dev/null || echo '0')
-          PWD_EXPIRY=$(echo "$RAW_PWD" | jq -r '.result.records[0].PasswordExpiration // 0' 2>/dev/null || echo '0')
-          PWD_LOCKOUT=$(echo "$RAW_PWD" | jq -r '.result.records[0].MaxLoginAttempts // 0' 2>/dev/null || echo '0')
-          # SF standard: min length >= 8, complexity >= 3, expiry <= 90 days (0=never=bad), lockout <= 10
+          # -- Password Policy Check (via REST API — PasswordPolicy SOQL not supported in all orgs) --
+          # SF stores password policy in org-wide settings; use SecuritySettings Tooling API
+          RAW_PWD=$(curl -s \
+            -H "Authorization: Bearer $ACCESS_TOKEN" \
+            -H "Content-Type: application/json" \
+            "${INSTANCE_URL}/services/data/v${SF_API_VERSION}/tooling/query?q=SELECT+MinPasswordLength,PasswordComplexity,PasswordExpiration,MaxLoginAttempts+FROM+PasswordPolicy+LIMIT+1" 2>/dev/null)
+          PWD_MIN_LEN=$(echo "$RAW_PWD" | jq -r '.records[0].MinPasswordLength // 0' 2>/dev/null || echo '0')
+          PWD_COMPLEXITY=$(echo "$RAW_PWD" | jq -r '.records[0].PasswordComplexity // 0' 2>/dev/null || echo '0')
+          PWD_EXPIRY=$(echo "$RAW_PWD" | jq -r '.records[0].PasswordExpiration // 0' 2>/dev/null || echo '0')
+          PWD_LOCKOUT=$(echo "$RAW_PWD" | jq -r '.records[0].MaxLoginAttempts // 0' 2>/dev/null || echo '0')
+          # SF standard: min length >= 8, complexity >= 3 (alpha+numeric+special), expiry <= 90d, lockout <= 10
           PWD_ISSUES=0
-          [[ "$PWD_MIN_LEN" -lt 8 ]] && PWD_ISSUES=$((PWD_ISSUES + 1))
-          [[ "$PWD_COMPLEXITY" -lt 3 ]] && PWD_ISSUES=$((PWD_ISSUES + 1))
-          [[ "$PWD_EXPIRY" -eq 0 || "$PWD_EXPIRY" -gt 90 ]] && PWD_ISSUES=$((PWD_ISSUES + 1))
-          [[ "$PWD_LOCKOUT" -eq 0 || "$PWD_LOCKOUT" -gt 10 ]] && PWD_ISSUES=$((PWD_ISSUES + 1))
+          [[ "${PWD_MIN_LEN:-0}" -lt 8 ]] && PWD_ISSUES=$((PWD_ISSUES + 1))
+          [[ "${PWD_COMPLEXITY:-0}" -lt 3 ]] && PWD_ISSUES=$((PWD_ISSUES + 1))
+          [[ "${PWD_EXPIRY:-0}" -eq 0 || "${PWD_EXPIRY:-0}" -gt 90 ]] && PWD_ISSUES=$((PWD_ISSUES + 1))
+          [[ "${PWD_LOCKOUT:-0}" -eq 0 || "${PWD_LOCKOUT:-0}" -gt 10 ]] && PWD_ISSUES=$((PWD_ISSUES + 1))
 
-          # -- Session Settings Check (clickjack, HTTPS, timeout) ------------
-          RAW_SESSION=$(sf data query --query "SELECT SessionTimeout, ForceRelogin, RequireHttps, EnableClickjackNonsetupSFDC, EnableClickjackNonsetupUser FROM SecuritySettings LIMIT 1" --target-org "$USERNAME" --use-tooling-api --json 2>/dev/null)
-          SESSION_HTTPS=$(echo "$RAW_SESSION" | jq -r '.result.records[0].RequireHttps // false' 2>/dev/null || echo 'false')
-          SESSION_CLICKJACK=$(echo "$RAW_SESSION" | jq -r '.result.records[0].EnableClickjackNonsetupUser // false' 2>/dev/null || echo 'false')
-          SESSION_TIMEOUT=$(echo "$RAW_SESSION" | jq -r '.result.records[0].SessionTimeout // "02:00"' 2>/dev/null || echo '02:00')
+          # -- Session Settings Check (via Tooling API REST directly) --------
+          RAW_SESSION=$(curl -s \
+            -H "Authorization: Bearer $ACCESS_TOKEN" \
+            -H "Content-Type: application/json" \
+            "${INSTANCE_URL}/services/data/v${SF_API_VERSION}/tooling/query?q=SELECT+SessionTimeout,ForceRelogin,RequireHttps,EnableClickjackNonsetupSFDC,EnableClickjackNonsetupUser+FROM+SecuritySettings+LIMIT+1" 2>/dev/null)
+          SESSION_HTTPS=$(echo "$RAW_SESSION" | jq -r '.records[0].RequireHttps // false' 2>/dev/null || echo 'false')
+          SESSION_CLICKJACK=$(echo "$RAW_SESSION" | jq -r '.records[0].EnableClickjackNonsetupUser // false' 2>/dev/null || echo 'false')
+          SESSION_TIMEOUT=$(echo "$RAW_SESSION" | jq -r '.records[0].SessionTimeout // "02:00"' 2>/dev/null || echo '02:00')
           SESSION_ISSUES=0
           [[ "$SESSION_HTTPS" != "true" ]] && SESSION_ISSUES=$((SESSION_ISSUES + 1))
           [[ "$SESSION_CLICKJACK" != "true" ]] && SESSION_ISSUES=$((SESSION_ISSUES + 1))
-          # Timeout > 4 hours is a risk (SF standard recommends <= 2h for sensitive orgs)
-          SESSION_HOURS=$(echo "$SESSION_TIMEOUT" | cut -d: -f1 | sed 's/^0//' || echo '2')
+          SESSION_HOURS=$(echo "$SESSION_TIMEOUT" | cut -d: -f1 | sed 's/^0*//' | grep -E '^[0-9]+$' || echo '2')
           [[ "${SESSION_HOURS:-2}" -gt 4 ]] && SESSION_ISSUES=$((SESSION_ISSUES + 1))
 
           # -- Storage Usage (from governor limits) --------------------------
