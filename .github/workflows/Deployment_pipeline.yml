@@ -629,21 +629,19 @@ jobs:
           SF_SEC_SCORE=0
           SF_SEC_RISKS=0
           SF_SEC_COMPLIANT=0
-          if [[ -n "$INSTANCE_URL" && -n "$ACCESS_TOKEN" ]]; then
-            RAW_SF_SEC=$(curl -s \
-              -H "Authorization: Bearer $ACCESS_TOKEN" \
-              -H "Content-Type: application/json" \
-              "${INSTANCE_URL}/services/data/v${SF_API_VERSION}/tooling/query?q=SELECT+Score,NumCompliantSettings,NumNonCompliantSettings+FROM+SecurityHealthCheck+WHERE+CustomBaselineId=null+LIMIT+1" 2>/dev/null)
-            echo "🔍 SF Health Check Tooling API response: $RAW_SF_SEC"
-            SF_SEC_SCORE_RAW=$(echo "$RAW_SF_SEC" | jq -r '.records[0].Score // empty' 2>/dev/null || true)
-            echo "🔍 SF Health Check score raw: $SF_SEC_SCORE_RAW"
-            if [[ -n "$SF_SEC_SCORE_RAW" && "$SF_SEC_SCORE_RAW" != "null" ]]; then
-              SF_SEC_SCORE=$(awk "BEGIN {printf \"%d\", int(${SF_SEC_SCORE_RAW}+0)}")
-              SF_SEC_RISKS=$(echo "$RAW_SF_SEC" | jq -r '.records[0].NumNonCompliantSettings // 0' 2>/dev/null || echo '0')
-              SF_SEC_COMPLIANT=$(echo "$RAW_SF_SEC" | jq -r '.records[0].NumCompliantSettings // 0' 2>/dev/null || echo '0')
-            fi
-            echo "🔍 SF score: $SF_SEC_SCORE | compliant: $SF_SEC_COMPLIANT | non-compliant: $SF_SEC_RISKS"
+          RAW_SF_SEC=$(sf data query \
+            --use-tooling-api \
+            --query "SELECT Score,NumCompliantSettings,NumNonCompliantSettings FROM SecurityHealthCheck WHERE CustomBaselineId = null LIMIT 1" \
+            --target-org "$USERNAME" --json 2>/dev/null)
+          echo "🔍 SF Health Check Tooling API response: $RAW_SF_SEC"
+          SF_SEC_SCORE_RAW=$(echo "$RAW_SF_SEC" | jq -r '.result.records[0].Score // empty' 2>/dev/null || true)
+          echo "🔍 SF Health Check score raw: $SF_SEC_SCORE_RAW"
+          if [[ -n "$SF_SEC_SCORE_RAW" && "$SF_SEC_SCORE_RAW" != "null" ]]; then
+            SF_SEC_SCORE=$(awk "BEGIN {printf \"%d\", int(${SF_SEC_SCORE_RAW}+0)}")
+            SF_SEC_RISKS=$(echo "$RAW_SF_SEC" | jq -r '.result.records[0].NumNonCompliantSettings // 0' 2>/dev/null || echo '0')
+            SF_SEC_COMPLIANT=$(echo "$RAW_SF_SEC" | jq -r '.result.records[0].NumCompliantSettings // 0' 2>/dev/null || echo '0')
           fi
+          echo "🔍 SF score: $SF_SEC_SCORE | compliant: $SF_SEC_COMPLIANT | non-compliant: $SF_SEC_RISKS"
           # Fallback: if Tooling API unavailable or cache empty, derive from manual checks
           if [[ "$SF_SEC_SCORE" == "0" || "$SF_SEC_SCORE" == "null" || -z "$SF_SEC_SCORE" ]]; then
             SF_SEC_SCORE=$(awk "BEGIN {v=100-(${PRIV_COUNT}*10)-(${INACTIVE_COUNT}*2)-(${NO_MFA_COUNT}*1)-(${GUEST_COUNT}*5)-(${CONN_APP_COUNT}*3)-(${OWD_PUBLIC_COUNT}*2); if(v<0)v=0; printf \"%d\", int(v)}")
