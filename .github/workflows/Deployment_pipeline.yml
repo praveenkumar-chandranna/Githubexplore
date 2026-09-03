@@ -632,8 +632,11 @@ jobs:
               -H "Content-Type: application/json" \
               "${INSTANCE_URL}/services/data/v${SF_API_VERSION}/security/health-check" 2>/dev/null)
             SF_SEC_SCORE=$(echo "$RAW_SF_SEC" | jq -r '.score // 0' 2>/dev/null || echo '0')
+            echo "🔍 SF Health Check API raw score: $SF_SEC_SCORE"
+            echo "🔍 SF Health Check API response keys: $(echo "$RAW_SF_SEC" | jq -r 'keys // []' 2>/dev/null)"
             SF_SEC_RISKS=$(echo "$RAW_SF_SEC" | jq -r '[.settings[]? | select(.riskType != null and .riskType != "MEETS_STANDARD")] | length' 2>/dev/null || echo '0')
             SF_SEC_COMPLIANT=$(echo "$RAW_SF_SEC" | jq -r '[.settings[]? | select(.riskType == "MEETS_STANDARD")] | length' 2>/dev/null || echo '0')
+            echo "🔍 SF non-compliant: $SF_SEC_RISKS | compliant: $SF_SEC_COMPLIANT"
           fi
           # Fallback: if SF API unavailable, derive from manual checks
           if [[ "$SF_SEC_SCORE" == "0" || "$SF_SEC_SCORE" == "null" ]]; then
