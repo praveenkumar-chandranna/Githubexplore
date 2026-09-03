@@ -748,11 +748,10 @@ jobs:
 
           HEALTH_SCORE=$(awk "BEGIN {printf \"%.0f\", $SEC_SCORE + $COV_SCORE + $TEST_SCORE + $PMD_SCORE + $DEPLOY_SCORE + $STAB_SCORE + $GOV_SCORE}")
 
-          if   [[ $HEALTH_SCORE -ge 95 ]]; then HEALTH_BAND="🟢 Excellent"
-          elif [[ $HEALTH_SCORE -ge 85 ]]; then HEALTH_BAND="🟢 Healthy"
-          elif [[ $HEALTH_SCORE -ge 75 ]]; then HEALTH_BAND="🟡 Warning"
-          elif [[ $HEALTH_SCORE -ge 60 ]]; then HEALTH_BAND="🟠 Risk"
-          else                                   HEALTH_BAND="🔴 Critical"
+          if   [[ $HEALTH_SCORE -ge 90 ]]; then HEALTH_BAND="🟢 Excellent"
+          elif [[ $HEALTH_SCORE -ge 75 ]]; then HEALTH_BAND="🟢 Good"
+          elif [[ $HEALTH_SCORE -ge 50 ]]; then HEALTH_BAND="🟡 Fair"
+          else                                   HEALTH_BAND="🔴 Poor"
           fi
 
           # -- Build health JSON ----------------------------------------------
@@ -969,11 +968,10 @@ jobs:
             echo "### 📋 Health Status Bands"
             echo "| Band | Score Range | Status |"
             echo "|---|---|---|"
-            echo "| 🟢 Excellent | 95–100 | $([ "$SCORE" -ge 95 ] && echo "**← YOU ARE HERE**" || echo "") |"
-            echo "| 🟢 Healthy   | 85–94  | $([ "$SCORE" -ge 85 ] && [ "$SCORE" -lt 95 ] && echo "**← YOU ARE HERE**" || echo "") |"
-            echo "| 🟡 Warning   | 75–84  | $([ "$SCORE" -ge 75 ] && [ "$SCORE" -lt 85 ] && echo "**← YOU ARE HERE**" || echo "") |"
-            echo "| 🟠 Risk      | 60–74  | $([ "$SCORE" -ge 60 ] && [ "$SCORE" -lt 75 ] && echo "**← YOU ARE HERE**" || echo "") |"
-            echo "| 🔴 Critical  | < 60   | $([ "$SCORE" -lt 60 ] && echo "**← YOU ARE HERE**" || echo "") |"
+            echo "| 🟢 Excellent | 90–100 | $([ "$SCORE" -ge 90 ] && echo "**← YOU ARE HERE**" || echo "") |"
+            echo "| 🟢 Good      | 75–89  | $([ "$SCORE" -ge 75 ] && [ "$SCORE" -lt 90 ] && echo "**← YOU ARE HERE**" || echo "") |"
+            echo "| 🟡 Fair      | 50–74  | $([ "$SCORE" -ge 50 ] && [ "$SCORE" -lt 75 ] && echo "**← YOU ARE HERE**" || echo "") |"
+            echo "| 🔴 Poor      | < 50   | $([ "$SCORE" -lt 50 ] && echo "**← YOU ARE HERE**" || echo "") |"
             echo ""
             echo "### 📦 Metadata Counts"
             echo "| Metric | Value |"
@@ -1084,10 +1082,9 @@ jobs:
           P_STAB=$(awk  "BEGIN {v=100-(${BATCHES}+0)*10-(${APEX_EX}+0)*5; if(v<0)v=0; printf \"%.2f\", v*0.05}")
           P_GOV=$(awk   "BEGIN {v=100-(${CRIT_LIM}+0)*10; if(v<0)v=0; printf \"%.2f\", v*0.10}")
 
-          if   [[ $SCORE -ge 95 ]]; then BAND_COLOR="#28a745"
-          elif [[ $SCORE -ge 85 ]]; then BAND_COLOR="#5cb85c"
-          elif [[ $SCORE -ge 75 ]]; then BAND_COLOR="#f0ad4e"
-          elif [[ $SCORE -ge 60 ]]; then BAND_COLOR="#e67e22"
+          if   [[ $SCORE -ge 90 ]]; then BAND_COLOR="#28a745"
+          elif [[ $SCORE -ge 75 ]]; then BAND_COLOR="#5cb85c"
+          elif [[ $SCORE -ge 50 ]]; then BAND_COLOR="#f0ad4e"
           else                           BAND_COLOR="#dc3545"
           fi
 
