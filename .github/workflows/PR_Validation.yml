@@ -392,7 +392,7 @@ jobs:
 
       - name: Upload Code Analyzer CSV
         if: always() && hashFiles('code-analyzer-results.csv') != ''
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: code-analyzer-csv
           path: code-analyzer-results.csv
@@ -498,7 +498,7 @@ jobs:
 
       - name: Upload PII Findings CSV
         if: steps.gitleaks.outputs.has_findings == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.gitleaks_csv.outputs.pii_csv_name }}
           path: ${{ steps.gitleaks_csv.outputs.pii_csv_name }}
@@ -716,7 +716,7 @@ jobs:
 
       - name: Upload Gitleaks Report
         if: always() && hashFiles('gitleaks-report.json') != ''
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: gitleaks-pii-report
           path: gitleaks-report.json

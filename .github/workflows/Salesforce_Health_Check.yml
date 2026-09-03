@@ -1,4 +1,4 @@
-﻿name: Salesforce Org Health Check
+name: Salesforce Org Health Check
 
 on:
   workflow_dispatch:
@@ -678,7 +678,7 @@ jobs:
 
       - name: Upload Health Artifact
         if: steps.gate.outputs.run == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: health-${{ matrix.environment }}-${{ github.run_id }}
           path: health_${{ matrix.environment }}.json
