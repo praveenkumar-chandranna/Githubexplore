@@ -766,7 +766,6 @@ jobs:
 
           HEALTH_SCORE=$(awk "BEGIN {
             sec  = ${SF_SEC_SCORE}+0; if(sec<0)sec=0; if(sec>100)sec=100;
-            sec  = sec-(${PWD_ISSUES}*5)-(${SESSION_ISSUES}*5); if(sec<0)sec=0;
             cov  = ${COV_COVERED}+0; unc = ${COV_UNCOVERED}+0; tot = cov+unc;
             apex_cov = (tot>0) ? (cov/tot)*100 : 0; if(apex_cov>100)apex_cov=100;
             test_tot = ${TEST_PASS}+${TEST_FAIL};
