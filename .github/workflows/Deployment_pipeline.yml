@@ -619,7 +619,10 @@ jobs:
           RAW_OWD=$(sf data query --query "SELECT QualifiedApiName, InternalSharingModel FROM EntityDefinition WHERE InternalSharingModel IN ('ReadWrite','ControlledByLeadOrContact') AND IsCustomizable=true" --target-org "$USERNAME" --use-tooling-api --json 2>/dev/null)
           OWD_PUBLIC_COUNT=$(echo "$RAW_OWD" | jq -r '.result.totalSize // 0' 2>/dev/null || echo '0')
 
-          # -- Salesforce Native Security Health Check Score (REST API) ------
+          # -- Salesforce Native Security Health Check Score (Tooling API) ------
+          # Uses SecurityHealthCheck Tooling object — always queries Salesforce Baseline Standard
+          # (CustomBaselineId = null) to ensure consistent apples-to-apples scoring across orgs.
+          # Note: score is cached by SF; visiting Setup > Health Check in UI refreshes the cache.
           SF_API_VERSION="62.0"
           INSTANCE_URL=$(sf org display --target-org "$USERNAME" --json 2>/dev/null | jq -r '.result.instanceUrl // empty')
           ACCESS_TOKEN=$(sf org display --target-org "$USERNAME" --json 2>/dev/null | jq -r '.result.accessToken // empty')
@@ -630,23 +633,22 @@ jobs:
             RAW_SF_SEC=$(curl -s \
               -H "Authorization: Bearer $ACCESS_TOKEN" \
               -H "Content-Type: application/json" \
-              "${INSTANCE_URL}/services/data/v${SF_API_VERSION}/security/health-check" 2>/dev/null)
-            # Normalise: API may return an object OR a single-element array
-            SF_SEC_JSON=$(echo "$RAW_SF_SEC" | jq -r 'if type == "array" then .[0] else . end' 2>/dev/null || echo '{}')
-            SF_SEC_SCORE_RAW=$(echo "$SF_SEC_JSON" | jq -r '.score // empty' 2>/dev/null || true)
-            echo "🔍 SF Health Check API raw score: $SF_SEC_SCORE_RAW"
-            echo "🔍 SF Health Check API response keys: $(echo "$SF_SEC_JSON" | jq -r 'keys // []' 2>/dev/null)"
+              "${INSTANCE_URL}/services/data/v${SF_API_VERSION}/tooling/query?q=SELECT+Score,NumCompliantSettings,NumNonCompliantSettings+FROM+SecurityHealthCheck+WHERE+CustomBaselineId=null+LIMIT+1" 2>/dev/null)
+            echo "🔍 SF Health Check Tooling API response: $RAW_SF_SEC"
+            SF_SEC_SCORE_RAW=$(echo "$RAW_SF_SEC" | jq -r '.records[0].Score // empty' 2>/dev/null || true)
+            echo "🔍 SF Health Check score raw: $SF_SEC_SCORE_RAW"
             if [[ -n "$SF_SEC_SCORE_RAW" && "$SF_SEC_SCORE_RAW" != "null" ]]; then
               SF_SEC_SCORE=$(awk "BEGIN {printf \"%d\", int(${SF_SEC_SCORE_RAW}+0)}")
+              SF_SEC_RISKS=$(echo "$RAW_SF_SEC" | jq -r '.records[0].NumNonCompliantSettings // 0' 2>/dev/null || echo '0')
+              SF_SEC_COMPLIANT=$(echo "$RAW_SF_SEC" | jq -r '.records[0].NumCompliantSettings // 0' 2>/dev/null || echo '0')
             fi
-            SF_SEC_RISKS=$(echo "$SF_SEC_JSON" | jq -r '[.settings[]? | select(.riskType != null and .riskType != "MEETS_STANDARD")] | length' 2>/dev/null || echo '0')
-            SF_SEC_COMPLIANT=$(echo "$SF_SEC_JSON" | jq -r '[.settings[]? | select(.riskType == "MEETS_STANDARD")] | length' 2>/dev/null || echo '0')
-            echo "🔍 SF non-compliant: $SF_SEC_RISKS | compliant: $SF_SEC_COMPLIANT"
+            echo "🔍 SF score: $SF_SEC_SCORE | compliant: $SF_SEC_COMPLIANT | non-compliant: $SF_SEC_RISKS"
           fi
-          # Fallback: if SF API unavailable, derive from manual checks
+          # Fallback: if Tooling API unavailable or cache empty, derive from manual checks
           if [[ "$SF_SEC_SCORE" == "0" || "$SF_SEC_SCORE" == "null" || -z "$SF_SEC_SCORE" ]]; then
             SF_SEC_SCORE=$(awk "BEGIN {v=100-(${PRIV_COUNT}*10)-(${INACTIVE_COUNT}*2)-(${NO_MFA_COUNT}*1)-(${GUEST_COUNT}*5)-(${CONN_APP_COUNT}*3)-(${OWD_PUBLIC_COUNT}*2); if(v<0)v=0; printf \"%d\", int(v)}")
-            echo "⚠️ SF Health Check API unavailable — using fallback formula: $SF_SEC_SCORE"
+            echo "⚠️ SF Health Check cache empty or API unavailable — using fallback formula: $SF_SEC_SCORE"
+            echo "⚠️ To fix: open Setup > Security > Health Check in the org UI to refresh the cache"
           fi
 
           # -- Password Policy Check (via REST API — PasswordPolicy SOQL not supported in all orgs) --
