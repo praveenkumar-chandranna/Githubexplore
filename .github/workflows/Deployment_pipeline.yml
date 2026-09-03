@@ -631,16 +631,22 @@ jobs:
               -H "Authorization: Bearer $ACCESS_TOKEN" \
               -H "Content-Type: application/json" \
               "${INSTANCE_URL}/services/data/v${SF_API_VERSION}/security/health-check" 2>/dev/null)
-            SF_SEC_SCORE=$(echo "$RAW_SF_SEC" | jq -r '.score // 0' 2>/dev/null || echo '0')
-            echo "🔍 SF Health Check API raw score: $SF_SEC_SCORE"
-            echo "🔍 SF Health Check API response keys: $(echo "$RAW_SF_SEC" | jq -r 'keys // []' 2>/dev/null)"
-            SF_SEC_RISKS=$(echo "$RAW_SF_SEC" | jq -r '[.settings[]? | select(.riskType != null and .riskType != "MEETS_STANDARD")] | length' 2>/dev/null || echo '0')
-            SF_SEC_COMPLIANT=$(echo "$RAW_SF_SEC" | jq -r '[.settings[]? | select(.riskType == "MEETS_STANDARD")] | length' 2>/dev/null || echo '0')
+            # Normalise: API may return an object OR a single-element array
+            SF_SEC_JSON=$(echo "$RAW_SF_SEC" | jq -r 'if type == "array" then .[0] else . end' 2>/dev/null || echo '{}')
+            SF_SEC_SCORE_RAW=$(echo "$SF_SEC_JSON" | jq -r '.score // empty' 2>/dev/null || true)
+            echo "🔍 SF Health Check API raw score: $SF_SEC_SCORE_RAW"
+            echo "🔍 SF Health Check API response keys: $(echo "$SF_SEC_JSON" | jq -r 'keys // []' 2>/dev/null)"
+            if [[ -n "$SF_SEC_SCORE_RAW" && "$SF_SEC_SCORE_RAW" != "null" ]]; then
+              SF_SEC_SCORE=$(awk "BEGIN {printf \"%d\", int(${SF_SEC_SCORE_RAW}+0)}")
+            fi
+            SF_SEC_RISKS=$(echo "$SF_SEC_JSON" | jq -r '[.settings[]? | select(.riskType != null and .riskType != "MEETS_STANDARD")] | length' 2>/dev/null || echo '0')
+            SF_SEC_COMPLIANT=$(echo "$SF_SEC_JSON" | jq -r '[.settings[]? | select(.riskType == "MEETS_STANDARD")] | length' 2>/dev/null || echo '0')
             echo "🔍 SF non-compliant: $SF_SEC_RISKS | compliant: $SF_SEC_COMPLIANT"
           fi
           # Fallback: if SF API unavailable, derive from manual checks
-          if [[ "$SF_SEC_SCORE" == "0" || "$SF_SEC_SCORE" == "null" ]]; then
+          if [[ "$SF_SEC_SCORE" == "0" || "$SF_SEC_SCORE" == "null" || -z "$SF_SEC_SCORE" ]]; then
             SF_SEC_SCORE=$(awk "BEGIN {v=100-(${PRIV_COUNT}*10)-(${INACTIVE_COUNT}*2)-(${NO_MFA_COUNT}*1)-(${GUEST_COUNT}*5)-(${CONN_APP_COUNT}*3)-(${OWD_PUBLIC_COUNT}*2); if(v<0)v=0; printf \"%d\", int(v)}")
+            echo "⚠️ SF Health Check API unavailable — using fallback formula: $SF_SEC_SCORE"
           fi
 
           # -- Password Policy Check (via REST API — PasswordPolicy SOQL not supported in all orgs) --
@@ -774,7 +780,7 @@ jobs:
           FAILED_BATCH_COUNT=$(echo "$BATCHES_JSON" | jq 'length')
           CRITICAL_LIMITS=$(echo "$LIMITS_JSON" | jq '[.[] | select(.max > 0 and ((.remaining / .max) < 0.20))] | length' 2>/dev/null || echo 0)
 
-          HEALTH_SCORE=$(awk "BEGIN {printf \"%d\", int(${SF_SEC_SCORE}+0)}")
+          HEALTH_SCORE=${SF_SEC_SCORE:-0}
           # Store component scores for display only (not used in final score)
           COMP_COV=$(awk "BEGIN {cov=${COV_COVERED}+0; unc=${COV_UNCOVERED}+0; tot=cov+unc; printf \"%.1f\", (tot>0)?(cov/tot)*100:0}")
           COMP_TEST=$(awk "BEGIN {t=${TEST_PASS}+${TEST_FAIL}; printf \"%.1f\", (t>0)?(${TEST_PASS}/t)*100:100}")
