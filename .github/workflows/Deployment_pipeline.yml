@@ -625,7 +625,7 @@ jobs:
           FILE_STORAGE_USED=$(echo "$LIMITS_JSON" | jq -r '[.[] | select(.name == "FileStorageMB")] | if length > 0 then (.[0] | (.max - .remaining)) else 0 end' 2>/dev/null || echo '0')
           FILE_STORAGE_MAX=$(echo "$LIMITS_JSON" | jq -r '[.[] | select(.name == "FileStorageMB")] | if length > 0 then .[0].max else 0 end' 2>/dev/null || echo '0')
 
-          SEC_RAW=$(awk "BEGIN {v=100-(${PRIV_COUNT}*10)-(${INACTIVE_COUNT}*2)-(${NO_MFA_COUNT}*1)-(${GUEST_COUNT}*5)-(${CONN_APP_COUNT}*3)-(${OWD_PUBLIC_COUNT}*2); if(v<0)v=0; printf \"%.0f\", v}")
+          SEC_RAW=$(awk "BEGIN {v=100-(${PRIV_COUNT}*10)-(${INACTIVE_COUNT}*2)-(${NO_MFA_COUNT}*1)-(${GUEST_COUNT}*5)-(${CONN_APP_COUNT}*3)-(${OWD_PUBLIC_COUNT}*2); if(v<0)v=0; printf \"%d\", int(v)}")
 
 
           # -- Apex Coverage --------------------------------------------------
@@ -715,26 +715,21 @@ jobs:
 
 
           # -- Health Score Calculation ---------------------------------------
-          COV_SCORE=$(awk "BEGIN {v=$APEX_COVERAGE; if(v>100)v=100; printf \"%.6f\", v * 0.20}")
-
-          if [[ $TEST_TOTAL -gt 0 ]]; then
-            TEST_SCORE=$(awk "BEGIN {printf \"%.2f\", ($TEST_PASS / $TEST_TOTAL) * 100 * 0.15}")
-          else
-            TEST_SCORE="15.00"
-          fi
-
-          PMD_SCORE=$(awk "BEGIN {v=100 - ($PMD_CRITICAL * 5) - ($PMD_HIGH * 2); if(v<0)v=0; printf \"%.2f\", v * 0.15}")
-          DEPLOY_SCORE=$(awk "BEGIN {printf \"%.2f\", $DEPLOY_RATE * 0.10}")
-
           FAILED_BATCH_COUNT=$(echo "$BATCHES_JSON" | jq 'length')
-          STAB_SCORE=$(awk "BEGIN {v=100 - ($FAILED_BATCH_COUNT * 10) - ($APEX_EXCEPTIONS * 5); if(v<0)v=0; printf \"%.2f\", v * 0.05}")
-
           CRITICAL_LIMITS=$(echo "$LIMITS_JSON" | jq '[.[] | select(.max > 0 and ((.remaining / .max) < 0.20))] | length' 2>/dev/null || echo 0)
-          GOV_SCORE=$(awk "BEGIN {v=100 - ($CRITICAL_LIMITS * 10); if(v<0)v=0; printf \"%.2f\", v * 0.10}")
 
-          SEC_SCORE=$(awk "BEGIN {printf \"%.2f\", ${SEC_RAW} * 0.25}")
-
-          HEALTH_SCORE=$(awk "BEGIN {printf \"%d\", int($SEC_SCORE + $COV_SCORE + $TEST_SCORE + $PMD_SCORE + $DEPLOY_SCORE + $STAB_SCORE + $GOV_SCORE)}")
+          HEALTH_SCORE=$(awk "BEGIN {
+            sec  = 100-(${PRIV_COUNT}*10)-(${INACTIVE_COUNT}*2)-(${NO_MFA_COUNT}*1)-(${GUEST_COUNT}*5)-(${CONN_APP_COUNT}*3)-(${OWD_PUBLIC_COUNT}*2); if(sec<0)sec=0;
+            cov  = ${COV_COVERED}+0; unc = ${COV_UNCOVERED}+0; tot = cov+unc;
+            apex_cov = (tot>0) ? (cov/tot)*100 : 0; if(apex_cov>100)apex_cov=100;
+            test_tot = ${TEST_PASS}+${TEST_FAIL};
+            test_pct = (test_tot>0) ? (${TEST_PASS}/test_tot)*100 : 100;
+            pmd_raw  = 100-(${PMD_CRITICAL}*5)-(${PMD_HIGH}*2); if(pmd_raw<0)pmd_raw=0;
+            stab_raw = 100-(${FAILED_BATCH_COUNT}*10)-(${APEX_EXCEPTIONS}*5); if(stab_raw<0)stab_raw=0;
+            gov_raw  = 100-(${CRITICAL_LIMITS}*10); if(gov_raw<0)gov_raw=0;
+            score = (sec*0.25) + (apex_cov*0.20) + (test_pct*0.15) + (pmd_raw*0.15) + (${DEPLOY_RATE}*0.10) + (stab_raw*0.05) + (gov_raw*0.10);
+            printf \"%d\", int(score)
+          }")
 
           if   [[ $HEALTH_SCORE -ge 95 ]]; then HEALTH_BAND="🟢 Excellent"
           elif [[ $HEALTH_SCORE -ge 85 ]]; then HEALTH_BAND="🟢 Healthy"
