@@ -761,27 +761,22 @@ jobs:
 
 
           # -- Health Score Calculation ---------------------------------------
+          # Use Salesforce's own Security Health Check score directly (matches Setup → Security → Health Check)
           FAILED_BATCH_COUNT=$(echo "$BATCHES_JSON" | jq 'length')
           CRITICAL_LIMITS=$(echo "$LIMITS_JSON" | jq '[.[] | select(.max > 0 and ((.remaining / .max) < 0.20))] | length' 2>/dev/null || echo 0)
 
-          HEALTH_SCORE=$(awk "BEGIN {
-            sec  = ${SF_SEC_SCORE}+0; if(sec<0)sec=0; if(sec>100)sec=100;
-            cov  = ${COV_COVERED}+0; unc = ${COV_UNCOVERED}+0; tot = cov+unc;
-            apex_cov = (tot>0) ? (cov/tot)*100 : 0; if(apex_cov>100)apex_cov=100;
-            test_tot = ${TEST_PASS}+${TEST_FAIL};
-            test_pct = (test_tot>0) ? (${TEST_PASS}/test_tot)*100 : 100;
-            pmd_raw  = 100-(${PMD_CRITICAL}*5)-(${PMD_HIGH}*2)-(${OLD_API_COUNT}*1); if(pmd_raw<0)pmd_raw=0;
-            stab_raw = 100-(${FAILED_BATCH_COUNT}*10)-(${APEX_EXCEPTIONS}*5); if(stab_raw<0)stab_raw=0;
-            gov_raw  = 100-(${CRITICAL_LIMITS}*10); if(gov_raw<0)gov_raw=0;
-            score = (sec*0.25) + (apex_cov*0.20) + (test_pct*0.15) + (pmd_raw*0.15) + (${DEPLOY_RATE}*0.10) + (stab_raw*0.05) + (gov_raw*0.10);
-            printf \"%d\", int(score)
-          }")
+          HEALTH_SCORE=$(awk "BEGIN {printf \"%d\", int(${SF_SEC_SCORE}+0)}")
+          # Store component scores for display only (not used in final score)
+          COMP_COV=$(awk "BEGIN {cov=${COV_COVERED}+0; unc=${COV_UNCOVERED}+0; tot=cov+unc; printf \"%.1f\", (tot>0)?(cov/tot)*100:0}")
+          COMP_TEST=$(awk "BEGIN {t=${TEST_PASS}+${TEST_FAIL}; printf \"%.1f\", (t>0)?(${TEST_PASS}/t)*100:100}")
+          COMP_PMD=$(awk "BEGIN {v=100-(${PMD_CRITICAL}*5)-(${PMD_HIGH}*2)-(${OLD_API_COUNT}*1); if(v<0)v=0; printf \"%.1f\", v}")
+          COMP_STAB=$(awk "BEGIN {v=100-(${FAILED_BATCH_COUNT}*10)-(${APEX_EXCEPTIONS}*5); if(v<0)v=0; printf \"%.1f\", v}")
+          COMP_GOV=$(awk "BEGIN {v=100-(${CRITICAL_LIMITS}*10); if(v<0)v=0; printf \"%.1f\", v}")
 
-          if   [[ $HEALTH_SCORE -ge 95 ]]; then HEALTH_BAND="🟢 Excellent"
-          elif [[ $HEALTH_SCORE -ge 85 ]]; then HEALTH_BAND="🟢 Healthy"
-          elif [[ $HEALTH_SCORE -ge 75 ]]; then HEALTH_BAND="🟡 Warning"
-          elif [[ $HEALTH_SCORE -ge 60 ]]; then HEALTH_BAND="🟠 Risk"
-          else                                   HEALTH_BAND="🔴 Critical"
+          if   [[ $HEALTH_SCORE -ge 90 ]]; then HEALTH_BAND="🟢 Excellent"
+          elif [[ $HEALTH_SCORE -ge 75 ]]; then HEALTH_BAND="🟢 Good"
+          elif [[ $HEALTH_SCORE -ge 50 ]]; then HEALTH_BAND="🟡 Fair"
+          else                                   HEALTH_BAND="🔴 Poor"
           fi
 
           # -- Build health JSON ----------------------------------------------
@@ -993,20 +988,36 @@ jobs:
             echo "## 🏥 Post-Deployment Health Check — ${ENV}"
             echo "_Scanned at: ${SCAN_TIME} | Package: \`${PACKAGE}\` | Deployed by: ${ACTOR}_"
             echo ""
-            echo "### 🏆 Overall Health Score: \`$SCORE / 100\` — $BAND"
+            echo "### 🏆 Salesforce Security Health Check Score: \`$SCORE / 100\` — $BAND"
+            echo "> Score sourced directly from Salesforce Setup → Security → Health Check (matches org value exactly)"
             echo ""
-            echo "![Health Score Breakdown](${BAR_URL})"
+            echo "### 🔒 Security Health Check Detail"
+            echo "| Factor | Value |"
+            echo "|---|---|"
+            echo "| SF Health Check Score | **${SF_SEC_SCORE}/100** |"
+            echo "| Non-compliant Settings | ${SF_SEC_RISKS} |"
+            echo "| Compliant Settings | ${SF_SEC_COMPLIANT} |"
+            echo "| Password Issues | ${PWD_ISSUES} (MinLen:${PWD_MIN_LEN} Complexity:${PWD_COMPLEXITY} Expiry:${PWD_EXPIRY}d Lockout:${PWD_LOCKOUT}) |"
+            echo "| Session Issues | ${SESSION_ISSUES} (HTTPS:${SESSION_HTTPS} Clickjack:${SESSION_CLICKJACK} Timeout:${SESSION_TIMEOUT}) |"
+            echo "| Profiles w/ Modify All | ${PRIV_C} |"
+            echo "| Inactive Users w/ Login | ${INACT_C} |"
+            echo "| Users without MFA | ${NOMFA_C} |"
+            echo "| Guest Users | ${GUEST_C} |"
+            echo "| Connected Apps (no IP) | ${CONN_C} |"
+            echo "| OWD Public Read/Write | ${OWD_C} |"
             echo ""
-            echo "### 📊 Score Breakdown"
-            echo "| Category | Weight | Raw Value | Points |"
-            echo "|---|---|---|---|"
-            echo "| 🔒 Security Health Check | 25% | SF Score:${SF_SEC_SCORE}/100 Risks:${SF_SEC_RISKS} PwdIssues:${PWD_ISSUES} SessionIssues:${SESSION_ISSUES} (HTTPS:${SESSION_HTTPS} Clickjack:${SESSION_CLICKJACK}) Priv:${PRIV_C} Inactive:${INACT_C} NoMFA:${NOMFA_C} Guest:${GUEST_C} ConnApps:${CONN_C} OWD:${OWD_C}) | ${P_SEC2} |"
-            echo "| 🧪 Apex Coverage | 20% | ${COV}% | ${P_COV2} |"
-            echo "| ✅ Test Results | 15% | ${T_PASS}/${T_TOTAL} passed | ${P_TEST2} |"
-            echo "| 🔍 Code Quality (PMD) | 15% | Critical:$PMD_C High:$PMD_H Med:$PMD_M DeprecatedAPI:${OLD_API_C}(penalised) | ${P_PMD2} |"
-            echo "| 🚀 Deployment Success | 10% | ${D_RATE}% (${D_OK}/${D_TOT}) | ${P_DEP2} |"
-            echo "| ⚙️ Org Stability | 5% | Batches:$BATCHES Exceptions:$APEX_EX | ${P_STAB2} |"
-            echo "| 📊 Governor Limits | 10% | Critical:$CRIT_LIM | ${P_GOV2} |"
+            echo "### 📊 Additional Org Metrics (Informational)"
+            echo "| Metric | Value |"
+            echo "|---|---|"
+            echo "| Apex Coverage | ${COV}% |"
+            echo "| Test Pass Rate | ${T_PASS}/${T_TOTAL} |"
+            echo "| Deployment Success Rate | ${D_RATE}% (${D_OK}/${D_TOT}) |"
+            echo "| PMD Critical/High/Med | ${PMD_C}/${PMD_H}/${PMD_M} |"
+            echo "| Deprecated API Classes | ${OLD_API_C} |"
+            echo "| Failed Batch Jobs (24h) | ${BATCHES} |"
+            echo "| Apex Exceptions (24h) | ${APEX_EX} |"
+            echo "| Critical Governor Limits | ${CRIT_LIM} |"
+            echo ""
             echo ""
             echo "### 💾 Storage Usage"
             echo "| Type | Used (MB) | Max (MB) | Used% |"
@@ -1025,14 +1036,13 @@ jobs:
             fi
             echo ""
             echo ""
-            echo "### 📋 Health Status Bands"
+            echo "### 📋 Health Status Bands (Salesforce Standard)"
             echo "| Band | Score Range | Status |"
             echo "|---|---|---|"
-            echo "| 🟢 Excellent | 95–100 | $([ "$SCORE" -ge 95 ] && echo "**← YOU ARE HERE**" || echo "") |"
-            echo "| 🟢 Healthy   | 85–94  | $([ "$SCORE" -ge 85 ] && [ "$SCORE" -lt 95 ] && echo "**← YOU ARE HERE**" || echo "") |"
-            echo "| 🟡 Warning   | 75–84  | $([ "$SCORE" -ge 75 ] && [ "$SCORE" -lt 85 ] && echo "**← YOU ARE HERE**" || echo "") |"
-            echo "| 🟠 Risk      | 60–74  | $([ "$SCORE" -ge 60 ] && [ "$SCORE" -lt 75 ] && echo "**← YOU ARE HERE**" || echo "") |"
-            echo "| 🔴 Critical  | < 60   | $([ "$SCORE" -lt 60 ] && echo "**← YOU ARE HERE**" || echo "") |"
+            echo "| 🟢 Excellent | 90–100 | $([ "$SCORE" -ge 90 ] && echo "**← YOU ARE HERE**" || echo "") |"
+            echo "| 🟢 Good     | 75–89  | $([ "$SCORE" -ge 75 ] && [ "$SCORE" -lt 90 ] && echo "**← YOU ARE HERE**" || echo "") |"
+            echo "| 🟡 Fair     | 50–74  | $([ "$SCORE" -ge 50 ] && [ "$SCORE" -lt 75 ] && echo "**← YOU ARE HERE**" || echo "") |"
+            echo "| 🔴 Poor     | < 50   | $([ "$SCORE" -lt 50 ] && echo "**← YOU ARE HERE**" || echo "") |"
             echo ""
             echo "### 📦 Metadata Counts"
             echo "| Metric | Value |"
@@ -1166,18 +1176,33 @@ jobs:
           NEW_ENTRY+="<tr><td><strong>Package</strong></td><td>${PACKAGE}</td></tr>"
           NEW_ENTRY+="<tr><td><strong>Deployed by</strong></td><td>${ACTOR}</td></tr>"
           NEW_ENTRY+="<tr><td><strong>Scanned at</strong></td><td>${SCAN_TIME}</td></tr>"
-          NEW_ENTRY+="<tr><td><strong>Health Score</strong></td><td><strong>${SCORE}/100</strong> — ${BAND}</td></tr>"
+          NEW_ENTRY+="<tr><td><strong>SF Health Check Score</strong></td><td><strong>${SCORE}/100</strong> — ${BAND}</td></tr>"
           NEW_ENTRY+="<tr><td><strong>Workflow Run</strong></td><td><a href='${RUN_URL}'>${RUN_ID}</a></td></tr>"
           NEW_ENTRY+="</table>"
-          NEW_ENTRY+="<h3>📊 Score Breakdown</h3>"
-          NEW_ENTRY+="<table><tr><th>Category</th><th>Weight</th><th>Raw Value</th><th>Points</th></tr>"
-          NEW_ENTRY+="<tr><td>🔒 Security</td><td>25%</td><td>SF Score:${SF_SEC_SCORE}/100 Risks:${SF_SEC_RISKS} PwdIssues:${PWD_ISSUES} SessionIssues:${SESSION_ISSUES} (HTTPS:${SESSION_HTTPS} Clickjack:${SESSION_CLICKJACK}) Priv:${PRIV_C} Inactive:${INACT_C} NoMFA:${NOMFA_C} Guest:${GUEST_C} ConnApps:${CONN_C} OWD:${OWD_C}</td><td>${P_SEC}</td></tr>"
-          NEW_ENTRY+="<tr><td>🧪 Apex Coverage</td><td>20%</td><td>${COV}%</td><td>${P_COV}</td></tr>"
-          NEW_ENTRY+="<tr><td>✅ Test Results</td><td>15%</td><td>${T_PASS}/${T_TOTAL} passed</td><td>${P_TEST}</td></tr>"
-          NEW_ENTRY+="<tr><td>🔍 Code Quality (PMD)</td><td>15%</td><td>Critical:${PMD_C} High:${PMD_H} Med:${PMD_M} DeprecatedAPI:${OLD_API_C}(penalised)</td><td>${P_PMD}</td></tr>"
-          NEW_ENTRY+="<tr><td>🚀 Deployment Success</td><td>10%</td><td>${D_RATE}% (${D_OK}/${D_TOT})</td><td>${P_DEP}</td></tr>"
-          NEW_ENTRY+="<tr><td>⚙️ Org Stability</td><td>5%</td><td>Batches:${BATCHES} Exceptions:${APEX_EX}</td><td>${P_STAB}</td></tr>"
-          NEW_ENTRY+="<tr><td>📊 Governor Limits</td><td>10%</td><td>Critical:${CRIT_LIM}</td><td>${P_GOV}</td></tr>"
+          NEW_ENTRY+="<h3>🔒 Security Health Check Detail</h3>"
+          NEW_ENTRY+="<table><tr><th>Factor</th><th>Value</th></tr>"
+          NEW_ENTRY+="<tr><td>SF Health Check Score</td><td><strong>${SF_SEC_SCORE}/100</strong></td></tr>"
+          NEW_ENTRY+="<tr><td>Non-compliant Settings</td><td>${SF_SEC_RISKS}</td></tr>"
+          NEW_ENTRY+="<tr><td>Compliant Settings</td><td>${SF_SEC_COMPLIANT}</td></tr>"
+          NEW_ENTRY+="<tr><td>Password Issues</td><td>${PWD_ISSUES} (MinLen:${PWD_MIN_LEN} Complexity:${PWD_COMPLEXITY} Expiry:${PWD_EXPIRY}d Lockout:${PWD_LOCKOUT})</td></tr>"
+          NEW_ENTRY+="<tr><td>Session Issues</td><td>${SESSION_ISSUES} (HTTPS:${SESSION_HTTPS} Clickjack:${SESSION_CLICKJACK} Timeout:${SESSION_TIMEOUT})</td></tr>"
+          NEW_ENTRY+="<tr><td>Profiles w/ Modify All</td><td>${PRIV_C}</td></tr>"
+          NEW_ENTRY+="<tr><td>Inactive Users w/ Login</td><td>${INACT_C}</td></tr>"
+          NEW_ENTRY+="<tr><td>Users without MFA</td><td>${NOMFA_C}</td></tr>"
+          NEW_ENTRY+="<tr><td>Guest Users</td><td>${GUEST_C}</td></tr>"
+          NEW_ENTRY+="<tr><td>Connected Apps (no IP)</td><td>${CONN_C}</td></tr>"
+          NEW_ENTRY+="<tr><td>OWD Public Read/Write</td><td>${OWD_C}</td></tr>"
+          NEW_ENTRY+="</table>"
+          NEW_ENTRY+="<h3>📊 Additional Org Metrics (Informational)</h3>"
+          NEW_ENTRY+="<table><tr><th>Metric</th><th>Value</th></tr>"
+          NEW_ENTRY+="<tr><td>Apex Coverage</td><td>${COV}%</td></tr>"
+          NEW_ENTRY+="<tr><td>Test Pass Rate</td><td>${T_PASS}/${T_TOTAL}</td></tr>"
+          NEW_ENTRY+="<tr><td>Deployment Success Rate</td><td>${D_RATE}% (${D_OK}/${D_TOT})</td></tr>"
+          NEW_ENTRY+="<tr><td>PMD Critical/High/Med</td><td>${PMD_C}/${PMD_H}/${PMD_M}</td></tr>"
+          NEW_ENTRY+="<tr><td>Deprecated API Classes</td><td>${OLD_API_C}</td></tr>"
+          NEW_ENTRY+="<tr><td>Failed Batch Jobs (24h)</td><td>${BATCHES}</td></tr>"
+          NEW_ENTRY+="<tr><td>Apex Exceptions (24h)</td><td>${APEX_EX}</td></tr>"
+          NEW_ENTRY+="<tr><td>Critical Governor Limits</td><td>${CRIT_LIM}</td></tr>"
           NEW_ENTRY+="</table>"
           NEW_ENTRY+="<h3>📦 Metadata &amp; Storage</h3>"
           NEW_ENTRY+="<table><tr><th>Metric</th><th>Value</th></tr>"
@@ -1298,24 +1323,15 @@ jobs:
           BATCH_COUNT=$(jq '.failed_batches | length'           "$FILE")
           TEST_COUNT=$(jq  '.test_failures  | length'           "$FILE")
 
-          P_SEC=$(awk   "BEGIN {printf \"%.2f\", (${SEC_RAW}+0)*0.25}")
-          P_COV=$(awk   "BEGIN {v=${COV}+0; if(v>100)v=100; printf \"%.2f\", v*0.20}")
-          P_TEST=$(awk  "BEGIN {t=${T_TOTAL}+0; p=${T_PASS}+0; if(t>0) printf \"%.2f\", (p/t)*100*0.15; else printf \"15.00\"}")
-          P_PMD=$(awk   "BEGIN {v=100-(${PMD_C}+0)*5-(${PMD_H}+0)*2-(${OLD_API_C}+0)*1; if(v<0)v=0; printf \"%.2f\", v*0.15}")
-          P_DEP=$(awk   "BEGIN {printf \"%.2f\", (${D_RATE}+0)*0.10}")
-          P_STAB=$(awk  "BEGIN {v=100-(${BATCHES}+0)*10-(${APEX_EX}+0)*5; if(v<0)v=0; printf \"%.2f\", v*0.05}")
-          P_GOV=$(awk   "BEGIN {v=100-(${CRIT_LIM}+0)*10; if(v<0)v=0; printf \"%.2f\", v*0.10}")
-
-          if   [[ $SCORE -ge 95 ]]; then BAND_COLOR="#28a745"
-          elif [[ $SCORE -ge 85 ]]; then BAND_COLOR="#5cb85c"
-          elif [[ $SCORE -ge 75 ]]; then BAND_COLOR="#f0ad4e"
-          elif [[ $SCORE -ge 60 ]]; then BAND_COLOR="#e67e22"
+          if   [[ $SCORE -ge 90 ]]; then BAND_COLOR="#28a745"
+          elif [[ $SCORE -ge 75 ]]; then BAND_COLOR="#5cb85c"
+          elif [[ $SCORE -ge 50 ]]; then BAND_COLOR="#f0ad4e"
           else                           BAND_COLOR="#dc3545"
           fi
 
-          BAR_CFG=$(printf '{"type":"bar","data":{"labels":["Security (25%%)","Apex Coverage (20%%)","Test Results (15%%)","Code Quality (15%%)","Deployment (10%%)","Org Stability (5%%)","Gov Limits (10%%)"],"datasets":[{"label":"Score","data":[%s,%s,%s,%s,%s,%s,%s],"backgroundColor":["#9966ff","#4bc0c0","#36a2eb","#ff9f40","#ffcd56","#ff6384","#c9cbcf"]}]},"options":{"indexAxis":"y","plugins":{"title":{"display":true,"text":"Post-Deploy Health - %s (%s/100)"},"legend":{"display":false}},"scales":{"x":{"min":0,"max":25}}}}' \
-            "$P_SEC" "$P_COV" "$P_TEST" "$P_PMD" "$P_DEP" "$P_STAB" "$P_GOV" "$ENV" "$SCORE")
-          BAR_URL="https://quickchart.io/chart?w=500&h=250&c=$(printf '%s' "$BAR_CFG" | jq -sRr @uri 2>/dev/null)"
+          GAUGE_CFG=$(printf '{"type":"doughnut","data":{"datasets":[{"data":[%s,%s],"backgroundColor":["%s","#e9ecef"],"borderWidth":0}]},"options":{"circumference":180,"rotation":-90,"cutout":"75%%","plugins":{"title":{"display":true,"text":"SF Health Check Score"},"legend":{"display":false}}}}' \
+            "$SCORE" "$((100 - SCORE))" "${BAND_COLOR}")
+          GAUGE_URL="https://quickchart.io/chart?w=300&h=180&c=$(printf '%s' "$GAUGE_CFG" | jq -sRr @uri 2>/dev/null)"
 
           FAILED_BATCHES_HTML=""
           if [[ $BATCH_COUNT -gt 0 ]]; then
@@ -1341,36 +1357,45 @@ jobs:
 
           RUN_URL="https://github.com/${REPO}/actions/runs/${RUN_ID}"
 
-          EMAIL_BODY=""
-          EMAIL_BODY+="<html><body style='font-family:Arial,sans-serif;max-width:800px;margin:auto'>"
+          EMAIL_BODY="<html><body style='font-family:Arial,sans-serif;max-width:800px;margin:auto'>"
           EMAIL_BODY+="<div style='background:${BAND_COLOR};color:#fff;padding:20px;border-radius:8px 8px 0 0'>"
           EMAIL_BODY+="<h1 style='margin:0'>🏥 Post-Deployment Health Check</h1>"
           EMAIL_BODY+="<p style='margin:4px 0 0'>Environment: <strong>${ENV}</strong> | Package: <strong>${PACKAGE}</strong></p>"
           EMAIL_BODY+="<p style='margin:4px 0 0'>Scanned: ${SCAN_TIME} | Deployed by: ${ACTOR}</p>"
           EMAIL_BODY+="</div>"
           EMAIL_BODY+="<div style='border:1px solid #ddd;padding:20px'>"
-          EMAIL_BODY+="<h2 style='color:${BAND_COLOR}'>Overall Score: ${SCORE}/100 — ${BAND}</h2>"
-          EMAIL_BODY+="<img src='${BAR_URL}' alt='Health Score Chart' style='max-width:100%'/>"
-          EMAIL_BODY+="<h3>📊 Score Breakdown</h3>"
-          EMAIL_BODY+="<table border='1' cellpadding='8' cellspacing='0' style='border-collapse:collapse;width:100%'>"
-          EMAIL_BODY+="<tr style='background:#f5f5f5'><th>Category</th><th>Weight</th><th>Raw Value</th><th>Points</th></tr>"
-          EMAIL_BODY+="<tr><td>🔒 Security</td><td>25%</td><td>SF Score:${SF_SEC_SCORE}/100 Risks:${SF_SEC_RISKS} PwdIssues:${PWD_ISSUES} SessionIssues:${SESSION_ISSUES} (HTTPS:${SESSION_HTTPS} Clickjack:${SESSION_CLICKJACK}) Priv:${PRIV_C} Inactive:${INACT_C} NoMFA:${NOMFA_C} Guest:${GUEST_C} ConnApps:${CONN_C} OWD:${OWD_C}</td><td>${P_SEC}</td></tr>"
-          EMAIL_BODY+="<tr><td>🧪 Apex Coverage</td><td>20%</td><td>${COV}%</td><td>${P_COV}</td></tr>"
-          EMAIL_BODY+="<tr><td>✅ Test Results</td><td>15%</td><td>${T_PASS}/${T_TOTAL} passed</td><td>${P_TEST}</td></tr>"
-          EMAIL_BODY+="<tr><td>🔍 Code Quality (PMD)</td><td>15%</td><td>Critical:${PMD_C} High:${PMD_H} Med:${PMD_M} DeprecatedAPI:${OLD_API_C}(penalised)</td><td>${P_PMD}</td></tr>"
-          EMAIL_BODY+="<tr><td>🚀 Deployment Success</td><td>10%</td><td>${D_RATE}%</td><td>${P_DEP}</td></tr>"
-          EMAIL_BODY+="<tr><td>⚙️ Org Stability</td><td>5%</td><td>Batches:${BATCHES} Exceptions:${APEX_EX}</td><td>${P_STAB}</td></tr>"
-          EMAIL_BODY+="<tr><td>📊 Governor Limits</td><td>10%</td><td>Critical:${CRIT_LIM}</td><td>${P_GOV}</td></tr>"
+          EMAIL_BODY+="<div style='text-align:center'><img src='${GAUGE_URL}' alt='Health Score' style='max-width:300px'/>"
+          EMAIL_BODY+="<h2 style='color:${BAND_COLOR};margin:0'>${SCORE}/100 — ${BAND}</h2>"
+          EMAIL_BODY+="<p style='color:#666;font-size:12px'>Salesforce Security Health Check Score (Setup → Security → Health Check)</p></div>"
+          EMAIL_BODY+="<h3>🔒 Security Health Check Detail</h3>"
+          EMAIL_BODY+="<table border='1' cellpadding='6' cellspacing='0' style='border-collapse:collapse;width:100%'>"
+          EMAIL_BODY+="<tr style='background:#f5f5f5'><th>Factor</th><th>Value</th></tr>"
+          EMAIL_BODY+="<tr><td>SF Health Check Score</td><td><strong>${SF_SEC_SCORE}/100</strong></td></tr>"
+          EMAIL_BODY+="<tr><td>Non-compliant Settings</td><td>${SF_SEC_RISKS}</td></tr>"
+          EMAIL_BODY+="<tr><td>Compliant Settings</td><td>${SF_SEC_COMPLIANT}</td></tr>"
+          EMAIL_BODY+="<tr><td>Password Issues</td><td>${PWD_ISSUES} (MinLen:${PWD_MIN_LEN} Complexity:${PWD_COMPLEXITY} Expiry:${PWD_EXPIRY}d Lockout:${PWD_LOCKOUT})</td></tr>"
+          EMAIL_BODY+="<tr><td>Session Issues</td><td>${SESSION_ISSUES} (HTTPS:${SESSION_HTTPS} Clickjack:${SESSION_CLICKJACK} Timeout:${SESSION_TIMEOUT})</td></tr>"
+          EMAIL_BODY+="<tr><td>Profiles w/ Modify All</td><td>${PRIV_C}</td></tr>"
+          EMAIL_BODY+="<tr><td>Inactive Users w/ Login</td><td>${INACT_C}</td></tr>"
+          EMAIL_BODY+="<tr><td>Users without MFA</td><td>${NOMFA_C}</td></tr>"
+          EMAIL_BODY+="<tr><td>Guest Users</td><td>${GUEST_C}</td></tr>"
+          EMAIL_BODY+="<tr><td>Connected Apps (no IP)</td><td>${CONN_C}</td></tr>"
+          EMAIL_BODY+="<tr><td>OWD Public Read/Write</td><td>${OWD_C}</td></tr>"
           EMAIL_BODY+="</table>"
-          EMAIL_BODY+="<h3>📦 Metadata Counts</h3>"
-          EMAIL_BODY+="<table border='1' cellpadding='6' cellspacing='0' style='border-collapse:collapse'>"
-          EMAIL_BODY+="<tr><td>Active Apex Classes</td><td><strong>${APEX}</strong></td></tr>"
-          EMAIL_BODY+="<tr><td>Active Apex Triggers</td><td><strong>${TRIG}</strong></td></tr>"
-          EMAIL_BODY+="<tr><td>Active Flows</td><td><strong>${FLOWS}</strong></td></tr>"
-          EMAIL_BODY+="<tr><td>Active Users</td><td><strong>${USERS}</strong></td></tr>"
-          EMAIL_BODY+="<tr><td>Apex Exceptions (24h)</td><td><strong>${APEX_EX}</strong></td></tr>"
-          EMAIL_BODY+="<tr><td>Failed Batch Jobs (24h)</td><td><strong>${BATCHES}</strong></td></tr>"
-          EMAIL_BODY+="<tr><td>Critical Governor Limits</td><td><strong>${CRIT_LIM}</strong></td></tr>"
+          EMAIL_BODY+="<h3>📊 Additional Org Metrics (Informational)</h3>"
+          EMAIL_BODY+="<table border='1' cellpadding='6' cellspacing='0' style='border-collapse:collapse;width:100%'>"
+          EMAIL_BODY+="<tr style='background:#f5f5f5'><th>Metric</th><th>Value</th></tr>"
+          EMAIL_BODY+="<tr><td>Apex Coverage</td><td>${COV}%</td></tr>"
+          EMAIL_BODY+="<tr><td>Test Pass Rate</td><td>${T_PASS}/${T_TOTAL}</td></tr>"
+          EMAIL_BODY+="<tr><td>Deployment Success Rate</td><td>${D_RATE}%</td></tr>"
+          EMAIL_BODY+="<tr><td>PMD Critical/High/Med</td><td>${PMD_C}/${PMD_H}/${PMD_M}</td></tr>"
+          EMAIL_BODY+="<tr><td>Deprecated API Classes</td><td>${OLD_API_C}</td></tr>"
+          EMAIL_BODY+="<tr><td>Failed Batch Jobs (24h)</td><td>${BATCHES}</td></tr>"
+          EMAIL_BODY+="<tr><td>Apex Exceptions (24h)</td><td>${APEX_EX}</td></tr>"
+          EMAIL_BODY+="<tr><td>Critical Governor Limits</td><td>${CRIT_LIM}</td></tr>"
+          EMAIL_BODY+="<tr><td>Active Apex Classes</td><td>${APEX}</td></tr>"
+          EMAIL_BODY+="<tr><td>Active Flows</td><td>${FLOWS}</td></tr>"
+          EMAIL_BODY+="<tr><td>Active Users</td><td>${USERS}</td></tr>"
           EMAIL_BODY+="</table>"
           EMAIL_BODY+="<h3>💾 Storage Usage</h3>"
           EMAIL_BODY+="<table border='1' cellpadding='6' cellspacing='0' style='border-collapse:collapse'>"
