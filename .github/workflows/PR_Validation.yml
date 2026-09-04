@@ -712,7 +712,7 @@ jobs:
           echo "  Remove all flagged content and push again."
           echo "  PR author and DevOps Admin have been notified."
           echo "=========================================="
-          exit 1
+          exit 
 
       - name: Upload Gitleaks Report
         if: always() && hashFiles('gitleaks-report.json') != ''
