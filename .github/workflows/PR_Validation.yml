@@ -743,14 +743,18 @@ jobs:
           name: code-analyzer-csv
         continue-on-error: true
 
-      - name: Check CSV exists
+      - name: Check CSV exists and Zip
         id: check_csv
         shell: bash
         run: |
           if [[ -f code-analyzer-results.csv ]]; then
-            echo "exists=true" >> $GITHUB_OUTPUT
+            zip -9 code-analyzer-results.zip code-analyzer-results.csv
+            ORIG=$(wc -c < code-analyzer-results.csv)
+            ZIPPED=$(wc -c < code-analyzer-results.zip)
+            echo "📦 CSV: ${ORIG} bytes → ZIP: ${ZIPPED} bytes ($(awk "BEGIN {printf \"%d\", (1-${ZIPPED}/${ORIG})*100}")% reduction)"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
           else
-            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Publish to Confluence
@@ -784,17 +788,17 @@ jobs:
             | jq -r --arg base "${BASE_NAME}" '[.results[].title | select(startswith($base))] | length')
 
           if [[ "$VERSIONED_COUNT" -gt 0 ]]; then
-            ATTACH_NAME="${BASE_NAME}-$((VERSIONED_COUNT + 1)).csv"
+            ATTACH_NAME="${BASE_NAME}-$((VERSIONED_COUNT + 1)).zip"
           else
-            ATTACH_NAME="${BASE_NAME}.csv"
+            ATTACH_NAME="${BASE_NAME}.zip"
           fi
           echo "📎 Attachment name: $ATTACH_NAME"
-          # Upload CSV as attachment (overwrite if exists)
+
           ATTACH_RESP=$(curl -s -w "\n%{http_code}" \
             -u "${CONFLUENCE_USER_EMAIL}:${CONFLUENCE_API_TOKEN}" \
             -X POST \
             -H "X-Atlassian-Token: no-check" \
-            -F "file=@code-analyzer-results.csv;type=text/csv;filename=${ATTACH_NAME}" \
+            -F "file=@code-analyzer-results.zip;type=application/zip;filename=${ATTACH_NAME}" \
             -F "comment=Code Analyzer scan for PR #${PR_NUMBER} | ${HEAD_REF} | ${SCAN_TIME}" \
             -F "minorEdit=true" \
             "${CONFLUENCE_BASE_URL}/rest/api/content/${CONFLUENCE_PAGE_ID}/child/attachment")
@@ -805,7 +809,7 @@ jobs:
           if [[ "$ATTACH_CODE" == "200" || "$ATTACH_CODE" == "201" ]]; then
             ATTACH_ID=$(echo "$ATTACH_BODY" | jq -r '.results[0].id // empty')
             ATTACH_URL="${CONFLUENCE_BASE_URL}/download/attachments/${CONFLUENCE_PAGE_ID}/${ATTACH_NAME}"
-            echo "✅ CSV attached (id: ${ATTACH_ID})"
+            echo "✅ ZIP attached (id: ${ATTACH_ID})"
           else
             echo "❌ Attachment upload failed (HTTP $ATTACH_CODE)"
             echo "$ATTACH_BODY"
@@ -875,7 +879,7 @@ jobs:
           subject:        "📊 [Code Analyzer] PR #${{ needs.Pre_Validation_Build.outputs.pr_number }} — ${{ needs.Pre_Validation_Build.outputs.head_ref }} | Violations: ${{ needs.Pre_Validation_Build.outputs.num_violations }}"
           to:             ${{ secrets.NOTIFY_EMAILS }}
           from:           "Do not Reply <${{ secrets.GMAIL_USERNAME }}>"
-          attachments:    code-analyzer-results.csv
+          attachments:    code-analyzer-results.zip
           html_body: |
             <h2>📊 Salesforce Code Analyzer Report</h2>
             <p>The CSV report is attached to this email.</p>
