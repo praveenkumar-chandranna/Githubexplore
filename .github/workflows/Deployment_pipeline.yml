@@ -639,7 +639,22 @@ jobs:
           FILE_STORAGE_USED=$(echo "$LIMITS_JSON" | jq -r '[.[] | select(.name == "FileStorageMB")] | if length > 0 then (.[0] | (.max - .remaining)) else 0 end' 2>/dev/null || echo '0')
           FILE_STORAGE_MAX=$(echo "$LIMITS_JSON" | jq -r '[.[] | select(.name == "FileStorageMB")] | if length > 0 then .[0].max else 0 end' 2>/dev/null || echo '0')
 
-          SEC_RAW=$(awk "BEGIN {v=100-(${PRIV_COUNT}*10)-(${INACTIVE_COUNT}*2)-(${NO_MFA_COUNT}*1)-(${GUEST_COUNT}*5)-(${CONN_APP_COUNT}*3)-(${OWD_PUBLIC_COUNT}*2); if(v<0)v=0; printf \"%.0f\", v}")
+          # -- Security Score: Salesforce native Health Check (Option A) ------
+          # Try Tooling API first; fall back to formula if not yet run in Setup UI
+          RAW_SF_SEC=$(sf data query \
+            --query "SELECT Score FROM SecurityHealthCheck WHERE CustomBaselineId = null LIMIT 1" \
+            --target-org "$USERNAME" --use-tooling-api --json 2>/dev/null)
+          SF_SEC_SCORE=$(echo "$RAW_SF_SEC" | jq -r '.result.records[0].Score // empty' 2>/dev/null || echo '')
+
+          if [[ -n "$SF_SEC_SCORE" && "$SF_SEC_SCORE" =~ ^[0-9]+(\.?[0-9]*)$ && $(awk "BEGIN {print ($SF_SEC_SCORE > 0)}") == "1" ]]; then
+            SEC_RAW=$(awk "BEGIN {printf \"%.0f\", $SF_SEC_SCORE}")
+            SEC_SOURCE="Salesforce Health Check API"
+            echo "🔒 Security score from Salesforce Health Check API: ${SEC_RAW}/100"
+          else
+            SEC_RAW=$(awk "BEGIN {v=100-(${PRIV_COUNT}*10)-(${INACTIVE_COUNT}*2)-(${NO_MFA_COUNT}*1)-(${GUEST_COUNT}*5)-(${CONN_APP_COUNT}*3)-(${OWD_PUBLIC_COUNT}*2); if(v<0)v=0; printf \"%.0f\", v}")
+            SEC_SOURCE="Fallback formula (Health Check not run in Setup UI)"
+            echo "⚠️ SecurityHealthCheck API returned no data — using fallback formula: ${SEC_RAW}/100"
+          fi
 
 
           # -- Apex Coverage --------------------------------------------------
@@ -775,6 +790,7 @@ jobs:
             --argjson failed_batch_count "$FAILED_BATCH_COUNT" \
             --argjson critical_limits    "$CRITICAL_LIMITS" \
             --arg    sec_raw             "$SEC_RAW" \
+            --arg    sec_source          "$SEC_SOURCE" \
             --arg    priv_count          "$PRIV_COUNT" \
             --arg    inactive_count      "$INACTIVE_COUNT" \
             --arg    no_mfa_count        "$NO_MFA_COUNT" \
@@ -818,6 +834,7 @@ jobs:
                 failed_batch_count: $failed_batch_count,
                 critical_limits:    $critical_limits,
                 sec_raw:            $sec_raw,
+                sec_source:         $sec_source,
                 priv_count:         $priv_count,
                 inactive_count:     $inactive_count,
                 no_mfa_count:       $no_mfa_count,
@@ -886,6 +903,7 @@ jobs:
           BATCHES=$(jq -r  '.scores.failed_batch_count // 0' "$FILE")
           CRIT_LIM=$(jq -r '.scores.critical_limits    // 0' "$FILE")
           SEC_RAW=$(jq -r  '.scores.sec_raw            // "0"' "$FILE")
+          SEC_SRC=$(jq -r  '.scores.sec_source         // "Fallback formula"' "$FILE")
           PRIV_C=$(jq -r   '.scores.priv_count         // "0"' "$FILE")
           INACT_C=$(jq -r  '.scores.inactive_count     // "0"' "$FILE")
           NOMFA_C=$(jq -r  '.scores.no_mfa_count       // "0"' "$FILE")
@@ -904,7 +922,6 @@ jobs:
           BATCH_COUNT=$(jq '.failed_batches | length'        "$FILE")
           TEST_COUNT=$(jq  '.test_failures  | length'        "$FILE")
 
-          SEC_RAW=$(jq -r '.scores.sec_raw       // "0"' "$FILE")
           PRIV_C=$(jq -r  '.scores.priv_count     // "0"' "$FILE")
           INACT_C=$(jq -r '.scores.inactive_count // "0"' "$FILE")
           NOMFA_C=$(jq -r '.scores.no_mfa_count   // "0"' "$FILE")
@@ -940,7 +957,7 @@ jobs:
             echo "### 📊 Score Breakdown"
             echo "| Category | Weight | Raw Value | Points |"
             echo "|---|---|---|---|"
-            echo "| 🔒 Security Health Check | 25% | ${SEC_RAW}/100 (Priv:${PRIV_C} Inactive:${INACT_C} NoMFA:${NOMFA_C} Guest:${GUEST_C} ConnApps:${CONN_C} OWD:${OWD_C}) | ${P_SEC2} |"
+            echo "| 🔒 Security Health Check | 25% | ${SEC_RAW}/100 — _${SEC_SRC}_ (Priv:${PRIV_C} Inactive:${INACT_C} NoMFA:${NOMFA_C} Guest:${GUEST_C} ConnApps:${CONN_C} OWD:${OWD_C}) | ${P_SEC2} |"
             echo "| 🧪 Apex Coverage | 20% | ${COV}% | ${P_COV2} |"
             echo "| ✅ Test Results | 15% | ${T_PASS}/${T_TOTAL} passed | ${P_TEST2} |"
             echo "| 🔍 Code Quality (PMD) | 15% | Critical:$PMD_C High:$PMD_H Med:$PMD_M DeprecatedAPI:${OLD_API_C} | ${P_PMD2} |"
@@ -1056,6 +1073,7 @@ jobs:
           BATCHES=$(jq -r  '.scores.failed_batch_count // 0'    "$FILE")
           CRIT_LIM=$(jq -r '.scores.critical_limits    // 0'    "$FILE")
           SEC_RAW=$(jq -r  '.scores.sec_raw            // "0"'  "$FILE")
+          SEC_SRC=$(jq -r  '.scores.sec_source         // "Fallback formula"' "$FILE")
           PRIV_C=$(jq -r   '.scores.priv_count         // "0"'  "$FILE")
           INACT_C=$(jq -r  '.scores.inactive_count     // "0"'  "$FILE")
           NOMFA_C=$(jq -r  '.scores.no_mfa_count       // "0"'  "$FILE")
@@ -1129,7 +1147,7 @@ jobs:
           EMAIL_BODY+="<h3>📊 Score Breakdown</h3>"
           EMAIL_BODY+="<table border='1' cellpadding='8' cellspacing='0' style='border-collapse:collapse;width:100%'>"
           EMAIL_BODY+="<tr style='background:#f5f5f5'><th>Category</th><th>Weight</th><th>Raw Value</th><th>Points</th></tr>"
-          EMAIL_BODY+="<tr><td>🔒 Security</td><td>25%</td><td>${SEC_RAW}/100 (Priv:${PRIV_C} Inactive:${INACT_C} NoMFA:${NOMFA_C} Guest:${GUEST_C} ConnApps:${CONN_C} OWD:${OWD_C})</td><td>${P_SEC}</td></tr>"
+          EMAIL_BODY+="<tr><td>🔒 Security</td><td>25%</td><td>${SEC_RAW}/100 <em>(${SEC_SRC})</em><br/>Priv:${PRIV_C} Inactive:${INACT_C} NoMFA:${NOMFA_C} Guest:${GUEST_C} ConnApps:${CONN_C} OWD:${OWD_C}</td><td>${P_SEC}</td></tr>"
           EMAIL_BODY+="<tr><td>🧪 Apex Coverage</td><td>20%</td><td>${COV}%</td><td>${P_COV}</td></tr>"
           EMAIL_BODY+="<tr><td>✅ Test Results</td><td>15%</td><td>${T_PASS}/${T_TOTAL} passed</td><td>${P_TEST}</td></tr>"
           EMAIL_BODY+="<tr><td>🔍 Code Quality (PMD)</td><td>15%</td><td>Critical:${PMD_C} High:${PMD_H} Med:${PMD_M} DeprecatedAPI:${OLD_API_C}</td><td>${P_PMD}</td></tr>"
