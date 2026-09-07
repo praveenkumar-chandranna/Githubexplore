@@ -1,34 +1,41 @@
 version: 2
 
 updates:
-  # GitHub Actions - keep workflow actions up to date
-  - package-ecosystem: "github-actions"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-    target-branch: "main"
-    open-pull-requests-limit: 10
-    labels:
-      - "dependencies"
-      - "github-actions"
-    commit-message:
-      prefix: "Updates"
 
-  # NPM dependencies (Salesforce CLI plugins, LWC test libs, etc.)
-  - package-ecosystem: "npm"
-    directory: "/"
+  - package-ecosystem: npm
+    directory: /
+    target-branch: main
     schedule:
-      interval: "weekly"
-      day: "monday"
-    target-branch: "main"
-    open-pull-requests-limit: 10
+      interval: weekly
+      day: monday
+      time: "14:30"
+      timezone: Asia/Kolkata
+    open-pull-requests-limit: 5
     labels:
-      - "dependencies"
-      - "npm"
+      - dependencies
+      - devops-admin
+    reviewers:
+      - devops-admin
     commit-message:
-      prefix: "Updates"
+      prefix: "SFDC-1234: "
     ignore:
-      # Avoid major bumps on Salesforce CLI packages to prevent breaking changes
-      - dependency-name: "@salesforce/*"
-        update-types: ["version-update:semver-major"]
+      - dependency-name: "*"
+        update-types:
+          - version-update:semver-major
+
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: main
+    schedule:
+      interval: weekly
+      day: monday
+      time: "14:30"
+      timezone: Asia/Kolkata
+    open-pull-requests-limit: 3
+    labels:
+      - dependencies
+      - devops-admin
+    reviewers:
+      - devops-admin
+    commit-message:
+      prefix: "SFDC-1234: "
