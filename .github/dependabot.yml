@@ -8,7 +8,7 @@ updates:
     schedule:
       interval: weekly
       day: monday
-      time: "14:30"
+      time: "16:30"
       timezone: Asia/Kolkata
     open-pull-requests-limit: 5
     labels:
@@ -29,7 +29,7 @@ updates:
     schedule:
       interval: weekly
       day: monday
-      time: "14:30"
+      time: "16:30"
       timezone: Asia/Kolkata
     open-pull-requests-limit: 3
     labels:
