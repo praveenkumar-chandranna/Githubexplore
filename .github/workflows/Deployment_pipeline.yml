@@ -639,8 +639,22 @@ jobs:
           FILE_STORAGE_USED=$(echo "$LIMITS_JSON" | jq -r '[.[] | select(.name == "FileStorageMB")] | if length > 0 then (.[0] | (.max - .remaining)) else 0 end' 2>/dev/null || echo '0')
           FILE_STORAGE_MAX=$(echo "$LIMITS_JSON" | jq -r '[.[] | select(.name == "FileStorageMB")] | if length > 0 then .[0].max else 0 end' 2>/dev/null || echo '0')
 
-          SEC_RAW=$(awk "BEGIN {v=100-(${PRIV_COUNT}*10)-(${INACTIVE_COUNT}*2)-(${NO_MFA_COUNT}*1)-(${GUEST_COUNT}*5)-(${CONN_APP_COUNT}*3)-(${OWD_PUBLIC_COUNT}*2); if(v<0)v=0; printf \"%.0f\", v}")
+          # -- Security Health Check (from org, fallback to manual calc) ------
+          RAW_SEC_HC=$(sf data query \
+            --query "SELECT Score FROM SecurityHealthCheck LIMIT 1" \
+            --target-org "$USERNAME" --use-tooling-api --json 2>/dev/null)
+          ORG_SEC_SCORE=$(echo "$RAW_SEC_HC" | jq -r '.result.records[0].Score // 0' 2>/dev/null || echo '0')
+          ORG_SEC_SCORE=$(printf '%.0f' "${ORG_SEC_SCORE}" 2>/dev/null || echo '0')
 
+          MANUAL_SEC_RAW=$(awk "BEGIN {v=100-(${PRIV_COUNT}*10)-(${INACTIVE_COUNT}*2)-(${NO_MFA_COUNT}*1)-(${GUEST_COUNT}*5)-(${CONN_APP_COUNT}*3)-(${OWD_PUBLIC_COUNT}*2); if(v<0)v=0; printf \"%.0f\", v}")
+
+          if [[ "$ORG_SEC_SCORE" -gt 0 ]]; then
+            echo "✅ Using Salesforce org Health Check score: $ORG_SEC_SCORE"
+            SEC_RAW="$ORG_SEC_SCORE"
+          else
+            echo "⚠️ Org Health Check returned 0 — using calculated score: $MANUAL_SEC_RAW"
+            SEC_RAW="$MANUAL_SEC_RAW"
+          fi
 
           # -- Apex Coverage --------------------------------------------------
           RAW_COV=$(sf data query \
