@@ -1632,3 +1632,57 @@ jobs:
             echo "$UPDATE_RESPONSE" | sed '$d'
             exit 1
           fi
+
+          echo "$RELEASE_HTML" > release_notes_email.html
+
+      - name: Build Release Notes Email
+        id: build-release-email
+        if: always()
+        shell: bash
+        env:
+          ENVIRONMENT: ${{ needs.Deployment_Build.outputs.environment }}
+          PACKAGE:     ${{ needs.Deployment_Build.outputs.deploy_package }}
+          ACTOR:       ${{ needs.Deployment_Build.outputs.actor }}
+          RUN_ID:      ${{ needs.Deployment_Build.outputs.run_id }}
+          REPO:        ${{ needs.Deployment_Build.outputs.repo }}
+          TAG_NAME:    ${{ needs.Deployment_Build.outputs.tag_name }}
+          CONFLUENCE_BASE_URL: ${{ secrets.CONFLUENCE_BASE_URL }}
+          CONFLUENCE_PAGE_ID:  ${{ secrets.CONFLUENCE_PAGE_ID }}
+        run: |
+          [[ ! -f release_notes_email.html ]] && echo "⚠️ No release notes data — skipping email" && exit 0
+
+          RELEASE_DATE=$(TZ='Asia/Kolkata' date +'%d-%m-%Y %H:%M IST')
+          RUN_URL="https://github.com/${REPO}/actions/runs/${RUN_ID}"
+          CONFLUENCE_URL="${CONFLUENCE_BASE_URL}/pages/viewpage.action?pageId=${CONFLUENCE_PAGE_ID}"
+          RELEASE_NOTES_BODY=$(cat release_notes_email.html)
+
+          EMAIL_BODY="<html><body style='font-family:Arial,sans-serif;max-width:800px;margin:auto'>"
+          EMAIL_BODY+="<div style='background:#0366d6;color:#fff;padding:20px;border-radius:8px 8px 0 0'>"
+          EMAIL_BODY+="<h1 style='margin:0'>🚀 Release Notes — ${ENVIRONMENT}</h1>"
+          EMAIL_BODY+="<p style='margin:4px 0 0'>Package: <strong>${PACKAGE}</strong> | Deployed by: <strong>${ACTOR}</strong></p>"
+          EMAIL_BODY+="<p style='margin:4px 0 0'>Date: ${RELEASE_DATE}"
+          [[ -n "$TAG_NAME" ]] && EMAIL_BODY+=" | Tag: <strong>${TAG_NAME}</strong>"
+          EMAIL_BODY+="</p></div>"
+          EMAIL_BODY+="<div style='border:1px solid #ddd;padding:20px'>"
+          EMAIL_BODY+="${RELEASE_NOTES_BODY}"
+          EMAIL_BODY+="<p style='margin-top:20px'>"
+          EMAIL_BODY+="<a href='${RUN_URL}' style='background:#0366d6;color:#fff;padding:8px 16px;border-radius:4px;text-decoration:none;margin-right:8px'>View Workflow Run →</a>"
+          [[ -n "$CONFLUENCE_BASE_URL" ]] && EMAIL_BODY+="<a href='${CONFLUENCE_URL}' style='background:#0052cc;color:#fff;padding:8px 16px;border-radius:4px;text-decoration:none'>View Confluence Page →</a>"
+          EMAIL_BODY+="</p></div></body></html>"
+
+          echo "$EMAIL_BODY" > release_notes_email_final.html
+
+      - name: Send Release Notes Email
+        if: always()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_SERVER }}
+          server_port:    587
+          secure:         false
+          username:       ${{ secrets.SMTP_USERNAME }}
+          password:       ${{ secrets.SMTP_PASSWORD }}
+          subject:        "🚀 Release Notes: ${{ needs.Deployment_Build.outputs.environment }} | ${{ needs.Deployment_Build.outputs.deploy_package }}"
+          to:             ${{ secrets.NOTIFY_EMAILS }}
+          from:           "Do not Reply <${{ secrets.SMTP_USERNAME }}>"
+          html_body:      file://release_notes_email_final.html
+          convert_markdown: false
