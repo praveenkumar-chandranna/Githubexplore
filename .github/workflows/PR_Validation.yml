@@ -229,28 +229,20 @@ jobs:
             TEST_CLASSES="${TEST_CLASSES%"${TEST_CLASSES##*[![:space:]]}"}"
 
             if [[ -z "$TEST_CLASSES" ]]; then
-              echo "❌ Test class file is empty"
-              echo "Expected location: $TEST_CLASS_FILE"
-              echo ""
-              echo "Please ensure the test class file contains test class names"
-              echo "Format: One test class per line or space-separated"
-              echo ""
-              exit 1
+              echo "⚠️ Test class file is empty — falling back to RunLocalTests"
+              echo "test_classes=" >> "$GITHUB_OUTPUT"
+              echo "test_level=RunLocalTests" >> "$GITHUB_OUTPUT"
+            else
+              echo "✅ Test class file found"
+              echo "✅ Test classes detected: $TEST_CLASSES"
+              echo "test_classes=$TEST_CLASSES" >> "$GITHUB_OUTPUT"
+              echo "test_level=RunSpecifiedTests" >> "$GITHUB_OUTPUT"
             fi
-
-            echo "✅ Test class file found"
-            echo "✅ Test classes detected: $TEST_CLASSES"
-            echo "test_classes=$TEST_CLASSES" >> "$GITHUB_OUTPUT"
-            echo "test_level=RunSpecifiedTests" >> "$GITHUB_OUTPUT"
           else
-            echo "❌ Test class file not found"
-            echo "Expected location: $TEST_CLASS_FILE"
-            echo ""
-            echo "Please ensure the following file exists in your repository:"
-            echo "  manifest/${SOURCE_BRANCH}_TestClass.txt"
-            echo ""
-            echo "Validation requires a test class file with explicit test classes"
-            exit 1
+            echo "⚠️ Test class file not found at: $TEST_CLASS_FILE"
+            echo "⚠️ Falling back to RunLocalTests"
+            echo "test_classes=" >> "$GITHUB_OUTPUT"
+            echo "test_level=RunLocalTests" >> "$GITHUB_OUTPUT"
           fi
           
           echo "manifest_path=$MANIFEST_PATH" >> "$GITHUB_OUTPUT"
