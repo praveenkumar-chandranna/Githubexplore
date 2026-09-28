@@ -97,6 +97,7 @@ jobs:
           sf --version
 
       - name: Install Salesforce Code Analyzer Plugin
+        if: vars.CODE_ANALYZER_ENABLED != 'false'
         run: sf plugins install code-analyzer@latest
 
       - name: Generate JWT Key File
@@ -229,44 +230,40 @@ jobs:
             TEST_CLASSES="${TEST_CLASSES%"${TEST_CLASSES##*[![:space:]]}"}"
 
             if [[ -z "$TEST_CLASSES" ]]; then
-              echo "❌ Test class file is empty"
-              echo "Expected location: $TEST_CLASS_FILE"
-              echo ""
-              echo "Please ensure the test class file contains test class names"
-              echo "Format: One test class per line or space-separated"
-              echo ""
-              exit 1
+              echo "⚠️ Test class file is empty — falling back to RunLocalTests"
+              echo "test_classes=" >> "$GITHUB_OUTPUT"
+              echo "test_level=RunLocalTests" >> "$GITHUB_OUTPUT"
+            else
+              echo "✅ Test class file found"
+              echo "✅ Test classes detected: $TEST_CLASSES"
+              echo "test_classes=$TEST_CLASSES" >> "$GITHUB_OUTPUT"
+              echo "test_level=RunSpecifiedTests" >> "$GITHUB_OUTPUT"
             fi
-
-            echo "✅ Test class file found"
-            echo "✅ Test classes detected: $TEST_CLASSES"
-            echo "test_classes=$TEST_CLASSES" >> "$GITHUB_OUTPUT"
-            echo "test_level=RunSpecifiedTests" >> "$GITHUB_OUTPUT"
           else
-            echo "❌ Test class file not found"
-            echo "Expected location: $TEST_CLASS_FILE"
-            echo ""
-            echo "Please ensure the following file exists in your repository:"
-            echo "  manifest/${SOURCE_BRANCH}_TestClass.txt"
-            echo ""
-            echo "Validation requires a test class file with explicit test classes"
-            exit 1
+            echo "⚠️ Test class file not found at: $TEST_CLASS_FILE"
+            echo "⚠️ Falling back to RunLocalTests"
+            echo "test_classes=" >> "$GITHUB_OUTPUT"
+            echo "test_level=RunLocalTests" >> "$GITHUB_OUTPUT"
           fi
           
           echo "manifest_path=$MANIFEST_PATH" >> "$GITHUB_OUTPUT"
 
       - name: Check API Version in Metadata Files
+        if: vars.API_VERSION_CHECK_ENABLED != 'false'
         shell: bash
         env:
-          MIN: ${{ secrets.API_VERSION_MIN }}
+          MIN: ${{ vars.API_VERSION_MIN }}
+          MAX_FALLBACK: ${{ vars.API_VERSION_MAX_FALLBACK }}
+          BLOCKING: ${{ vars.API_VERSION_BLOCKING }}
         run: |
           FAILED=0
           MIN=${MIN:-60}
+          MAX_FALLBACK=${MAX_FALLBACK:-67}
 
           MAX=$(curl -s https://www.salesforce.com/services/data/ | grep -oP '(?<=v)[0-9]+(?=\.0)' | sort -n | tail -1 2>/dev/null || echo "")
           if [[ -z "$MAX" || "$MAX" == "null" ]]; then
-            echo "⚠️  Could not fetch latest Salesforce API version — falling back to 67"
-            MAX=67
+            echo "⚠️  Could not fetch latest Salesforce API version — falling back to $MAX_FALLBACK"
+            MAX=$MAX_FALLBACK
           fi
           echo "📌 API version range: $MIN.0 - $MAX.0"
 
@@ -283,8 +280,10 @@ jobs:
 
           if [[ $FAILED -eq 1 ]]; then
             echo ""
-            echo "❌ One or more files have apiVersion outside accepted range ($MIN.0–$MAX.0). Fix and push again."
-            exit 0
+            echo "❌ One or more files have apiVersion outside accepted range ($MIN.0–$MAX.0)."
+            if [[ "${BLOCKING:-false}" == "true" ]]; then
+              exit 1
+            fi
           fi
 
           echo "✅ All metadata files have apiVersion within accepted range ($MIN.0–$MAX.0)"
@@ -385,9 +384,10 @@ jobs:
 
       - name: Run Salesforce Code Analyzer
         id: run-scanner
+        if: vars.CODE_ANALYZER_ENABLED != 'false'
         uses: forcedotcom/run-code-analyzer@v2
         with:
-          run-arguments: --target force-app --output-file code-analyzer-results.csv
+          run-arguments: --target ${{ vars.CODE_ANALYZER_TARGET || 'force-app' }} --output-file code-analyzer-results.csv
           results-artifact-name: salesforce-code-analyzer-results
 
       - name: Upload Code Analyzer CSV
@@ -398,14 +398,35 @@ jobs:
           path: code-analyzer-results.csv
           retention-days: 30
 
-      - name: Fail if critical violations found
-        if: |
-          steps.run-scanner.outputs.exit-code > 0 ||
-          steps.run-scanner.outputs.num-sev1-violations > 0 ||
-          steps.run-scanner.outputs.num-violations > 10
-        run: exit 0
+      - name: Check Code Analyzer Violations
+        if: vars.CODE_ANALYZER_ENABLED != 'false' && steps.run-scanner.conclusion == 'success'
+        shell: bash
+        env:
+          MAX_SEV1: ${{ vars.CODE_ANALYZER_MAX_SEV1 }}
+          MAX_VIOLATIONS: ${{ vars.CODE_ANALYZER_MAX_VIOLATIONS }}
+          BLOCKING: ${{ vars.CODE_ANALYZER_BLOCKING }}
+          NUM_SEV1: ${{ steps.run-scanner.outputs.num-sev1-violations }}
+          NUM_TOTAL: ${{ steps.run-scanner.outputs.num-violations }}
+        run: |
+          MAX_SEV1=${MAX_SEV1:-0}
+          MAX_VIOLATIONS=${MAX_VIOLATIONS:-10}
+          BLOCKING=${BLOCKING:-false}
+
+          echo "📊 Sev1 violations : $NUM_SEV1 (max allowed: $MAX_SEV1)"
+          echo "📊 Total violations: $NUM_TOTAL (max allowed: $MAX_VIOLATIONS)"
+
+          FAILED=0
+          [[ "$NUM_SEV1" -gt "$MAX_SEV1" ]] && echo "❌ Sev1 violations exceed threshold" && FAILED=1
+          [[ "$NUM_TOTAL" -gt "$MAX_VIOLATIONS" ]] && echo "❌ Total violations exceed threshold" && FAILED=1
+
+          if [[ $FAILED -eq 1 && "$BLOCKING" == "true" ]]; then
+            exit 1
+          elif [[ $FAILED -eq 1 ]]; then
+            echo "⚠️ Violations found but CODE_ANALYZER_BLOCKING=false — continuing"
+          fi
                   
       - name: Install Gitleaks
+        if: vars.GITLEAKS_ENABLED != 'false'
         run: |
           GITLEAKS_VERSION=$(curl -s -H "Accept: application/vnd.github+json" \
             https://api.github.com/repos/gitleaks/gitleaks/releases/latest | jq -r '.tag_name // empty' | sed 's/v//')
@@ -423,10 +444,21 @@ jobs:
 
       - name: Run Gitleaks PII and Secret Scan
         id: gitleaks
+        if: vars.GITLEAKS_ENABLED != 'false'
         shell: bash
+        env:
+          GITLEAKS_CONFIG: ${{ vars.GITLEAKS_CONFIG_FILE }}
+          SCAN_PII: ${{ vars.GITLEAKS_SCAN_PII }}
+          SCAN_SECRETS: ${{ vars.GITLEAKS_SCAN_SECRETS }}
+          SCAN_PROFANITY: ${{ vars.GITLEAKS_SCAN_PROFANITY }}
         run: |
+          GITLEAKS_CONFIG=${GITLEAKS_CONFIG:-.gitleaks.toml}
+          SCAN_PII=${SCAN_PII:-true}
+          SCAN_SECRETS=${SCAN_SECRETS:-true}
+          SCAN_PROFANITY=${SCAN_PROFANITY:-true}
+
           set +e
-          gitleaks detect --source . --no-git --config .gitleaks.toml \
+          gitleaks detect --source . --no-git --config "$GITLEAKS_CONFIG" \
             --report-format json \
             --report-path gitleaks-report.json \
             --verbose
@@ -436,9 +468,12 @@ jobs:
           HAS_PII=0; HAS_SECRET=0; HAS_PROFANITY=0; FINDING_SUMMARY=""
 
           if [[ -f gitleaks-report.json ]]; then
-            HAS_PII=$(jq '[.[] | select(.Tags[]? | test("pii|aadhaar|pan|mobile|passport|bank"))] | length' gitleaks-report.json 2>/dev/null || echo 0)
-            HAS_SECRET=$(jq '[.[] | select(.Tags[]? | test("salesforce|aws|key|secret|token|password"))] | length' gitleaks-report.json 2>/dev/null || echo 0)
-            HAS_PROFANITY=$(jq '[.[] | select(.Tags[]? | test("profanity"))] | length' gitleaks-report.json 2>/dev/null || echo 0)
+            [[ "$SCAN_PII" == "true" ]] && \
+              HAS_PII=$(jq '[.[] | select(.Tags[]? | test("pii|aadhaar|pan|mobile|passport|bank"))] | length' gitleaks-report.json 2>/dev/null || echo 0)
+            [[ "$SCAN_SECRETS" == "true" ]] && \
+              HAS_SECRET=$(jq '[.[] | select(.Tags[]? | test("salesforce|aws|key|secret|token|password"))] | length' gitleaks-report.json 2>/dev/null || echo 0)
+            [[ "$SCAN_PROFANITY" == "true" ]] && \
+              HAS_PROFANITY=$(jq '[.[] | select(.Tags[]? | test("profanity"))] | length' gitleaks-report.json 2>/dev/null || echo 0)
             FINDING_SUMMARY=$(jq -r '.[] | "  \(.RuleID) | \(.File):\(.StartLine) | \(.Description)"' gitleaks-report.json 2>/dev/null || echo "")
           fi
 
@@ -700,6 +735,9 @@ jobs:
 
       - name: Block PR — Fail on PII, Secret, or Profanity
         if: steps.gitleaks.outputs.has_findings == 'true'
+        shell: bash
+        env:
+          BLOCKING: ${{ vars.GITLEAKS_BLOCKING }}
         run: |
           echo ""
           echo "=========================================="
@@ -712,7 +750,9 @@ jobs:
           echo "  Remove all flagged content and push again."
           echo "  PR author and DevOps Admin have been notified."
           echo "=========================================="
-          exit 0
+          if [[ "${BLOCKING:-true}" == "true" ]]; then
+            exit 1
+          fi
 
       - name: Upload Gitleaks Report
         if: always() && hashFiles('gitleaks-report.json') != ''
