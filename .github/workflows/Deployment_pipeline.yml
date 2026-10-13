@@ -1406,35 +1406,48 @@ jobs:
         if: steps.extract_tickets.outputs.has_tickets == 'true'
         shell: bash
         env:
-          TICKETS:             ${{ steps.extract_tickets.outputs.tickets }}
-          ENVIRONMENT:         ${{ needs.Deployment_Build.outputs.environment }}
-          JIRA_BASE_URL:       ${{ secrets.JIRA_BASE_URL }}
-          JIRA_USER_EMAIL:     ${{ secrets.JIRA_USER_EMAIL }}
-          ATLASSIAN_API_TOKEN: ${{ secrets.ATLASSIAN_API_TOKEN }}
-          TRANSITION_ID_QA:    ${{ secrets.JIRA_QA_TRANSITION_ID }}
-          TRANSITION_ID_UAT:   ${{ secrets.JIRA_UAT_TRANSITION_ID }}
-          TRANSITION_ID_PROD:  ${{ secrets.JIRA_PROD_TRANSITION_ID }}
+          TICKETS:                      ${{ steps.extract_tickets.outputs.tickets }}
+          ENVIRONMENT:                  ${{ needs.Deployment_Build.outputs.environment }}
+          JIRA_BASE_URL:                ${{ secrets.JIRA_BASE_URL }}
+          JIRA_USER_EMAIL:              ${{ secrets.JIRA_USER_EMAIL }}
+          ATLASSIAN_API_TOKEN:          ${{ secrets.ATLASSIAN_API_TOKEN }}
+          TRANSITION_ID_QA_STORY:       ${{ secrets.JIRA_QA_TRANSITION_ID_STORY }}
+          TRANSITION_ID_QA_BUG:         ${{ secrets.JIRA_QA_TRANSITION_ID_BUG }}
+          TRANSITION_ID_UAT_STORY:      ${{ secrets.JIRA_UAT_TRANSITION_ID_STORY }}
+          TRANSITION_ID_UAT_BUG:        ${{ secrets.JIRA_UAT_TRANSITION_ID_BUG }}
+          TRANSITION_ID_PROD_STORY:     ${{ secrets.JIRA_PROD_TRANSITION_ID_STORY }}
+          TRANSITION_ID_PROD_BUG:       ${{ secrets.JIRA_PROD_TRANSITION_ID_BUG }}
         run: |
-          case "$ENVIRONMENT" in
-            QA)         TRANSITION_ID="$TRANSITION_ID_QA" ;;
-            UAT)        TRANSITION_ID="$TRANSITION_ID_UAT" ;;
-            PRODUCTION) TRANSITION_ID="$TRANSITION_ID_PROD" ;;
-          esac
-
-          if [[ -z "$TRANSITION_ID" ]]; then
-            echo "⚠️ Transition ID not set for $ENVIRONMENT — skipping"
-            exit 0
-          fi
-
           echo "🔄 Transitioning tickets to $ENVIRONMENT status..."
           IFS=',' read -ra TICKET_ARRAY <<< "$TICKETS"
           for TICKET in "${TICKET_ARRAY[@]}"; do
             TICKET=$(echo "$TICKET" | xargs)
+
+            # Fetch issue type and current status
             ISSUE_RESP=$(curl -s \
               -u "${JIRA_USER_EMAIL}:${ATLASSIAN_API_TOKEN}" \
               -H "Content-Type: application/json" \
-              "${JIRA_BASE_URL}/rest/api/3/issue/${TICKET}?fields=status")
+              "${JIRA_BASE_URL}/rest/api/3/issue/${TICKET}?fields=status,issuetype")
             CURRENT_STATUS=$(echo "$ISSUE_RESP" | jq -r '.fields.status.name // "Unknown"')
+            ISSUE_TYPE=$(echo "$ISSUE_RESP" | jq -r '.fields.issuetype.name // "Unknown"')
+
+            # Select transition ID based on environment + issue type
+            case "$ENVIRONMENT" in
+              QA)
+                [[ "$ISSUE_TYPE" == "Bug" ]] && TRANSITION_ID="$TRANSITION_ID_QA_BUG" || TRANSITION_ID="$TRANSITION_ID_QA_STORY" ;;
+              UAT)
+                [[ "$ISSUE_TYPE" == "Bug" ]] && TRANSITION_ID="$TRANSITION_ID_UAT_BUG" || TRANSITION_ID="$TRANSITION_ID_UAT_STORY" ;;
+              PRODUCTION)
+                [[ "$ISSUE_TYPE" == "Bug" ]] && TRANSITION_ID="$TRANSITION_ID_PROD_BUG" || TRANSITION_ID="$TRANSITION_ID_PROD_STORY" ;;
+              *)
+                echo "  ⚠️ No transition configured for $ENVIRONMENT — skipping $TICKET"
+                continue ;;
+            esac
+
+            if [[ -z "$TRANSITION_ID" ]]; then
+              echo "  ⚠️ Transition ID not set for $ENVIRONMENT/$ISSUE_TYPE — skipping $TICKET"
+              continue
+            fi
 
             TRANS_HTTP=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
               -u "${JIRA_USER_EMAIL}:${ATLASSIAN_API_TOKEN}" \
@@ -1443,9 +1456,9 @@ jobs:
               "${JIRA_BASE_URL}/rest/api/3/issue/${TICKET}/transitions")
 
             if [[ "$TRANS_HTTP" == "204" ]]; then
-              echo "  ✅ $TICKET → $ENVIRONMENT (was: $CURRENT_STATUS)"
+              echo "  ✅ $TICKET [$ISSUE_TYPE] → $ENVIRONMENT (was: $CURRENT_STATUS)"
             else
-              echo "  ⚠️ $TICKET transition failed (HTTP $TRANS_HTTP) — was: $CURRENT_STATUS"
+              echo "  ⚠️ $TICKET [$ISSUE_TYPE] transition failed (HTTP $TRANS_HTTP) — was: $CURRENT_STATUS"
             fi
           done
 
