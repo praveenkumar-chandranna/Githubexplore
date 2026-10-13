@@ -262,14 +262,44 @@ jobs:
           TYPE_MAP["roles"]="Role"
           TYPE_MAP["groups"]="Group"
 
+          # Sub-folder types nested under objects/
+          declare -A SUBFOLDER_MAP
+          SUBFOLDER_MAP["fields"]="CustomField"
+          SUBFOLDER_MAP["validationRules"]="ValidationRule"
+          SUBFOLDER_MAP["recordTypes"]="RecordType"
+          SUBFOLDER_MAP["listViews"]="ListView"
+          SUBFOLDER_MAP["webLinks"]="WebLink"
+          SUBFOLDER_MAP["compactLayouts"]="CompactLayout"
+          SUBFOLDER_MAP["businessProcesses"]="BusinessProcess"
+          SUBFOLDER_MAP["fieldSets"]="FieldSet"
+          SUBFOLDER_MAP["sharingReasons"]="SharingReason"
+
           declare -A TYPE_MEMBERS
           while IFS= read -r FPATH; do
             [[ -z "$FPATH" ]] && continue
             [[ ! "$FPATH" =~ ^force-app/ ]] && continue
             FOLDER=$(echo "$FPATH" | grep -oP 'force-app/main/default/\K[^/]+')
-            META_TYPE="${TYPE_MAP[$FOLDER]:-$FOLDER}"
-            MEMBER=$(basename "$FPATH" | sed 's/\..*$//' | sed 's/-meta$//')
-            [[ -z "$FOLDER" || -z "$MEMBER" ]] && continue
+            [[ -z "$FOLDER" ]] && continue
+
+            # Check if this is a sub-type nested under objects/ (e.g. objects/Obj__c/fields/Field__c)
+            if [[ "$FOLDER" == "objects" ]]; then
+              SUBFOLDER=$(echo "$FPATH" | grep -oP 'force-app/main/default/objects/[^/]+/\K[^/]+')
+              if [[ -n "$SUBFOLDER" && -n "${SUBFOLDER_MAP[$SUBFOLDER]:-}" ]]; then
+                META_TYPE="${SUBFOLDER_MAP[$SUBFOLDER]}"
+                OBJ_NAME=$(echo "$FPATH" | grep -oP 'force-app/main/default/objects/\K[^/]+')
+                MEMBER_NAME=$(basename "$FPATH" | sed 's/\..*$//' | sed 's/-meta$//')
+                MEMBER="${OBJ_NAME}.${MEMBER_NAME}"
+              else
+                META_TYPE="CustomObject"
+                MEMBER=$(echo "$FPATH" | grep -oP 'force-app/main/default/objects/\K[^/]+')
+                MEMBER=$(echo "$MEMBER" | sed 's/\..*$//')
+              fi
+            else
+              META_TYPE="${TYPE_MAP[$FOLDER]:-$FOLDER}"
+              MEMBER=$(basename "$FPATH" | sed 's/\..*$//' | sed 's/-meta$//')
+            fi
+
+            [[ -z "$MEMBER" ]] && continue
             TYPE_MEMBERS["$META_TYPE"]+="${MEMBER}"$'\n'
           done < <(git diff --cached --name-only)
 
@@ -309,13 +339,14 @@ jobs:
 
           TEST_CLASSES=""
           while IFS= read -r FPATH; do
+            [[ "$FPATH" =~ ^force-app/.*classes/.*\.cls$ ]] || continue
+            [[ "$FPATH" =~ -meta\.xml$ ]] && continue
             CLASSNAME=$(basename "$FPATH" .cls)
-            # Match: ends with Test/Tests/_Test or starts with Test
             if [[ "$CLASSNAME" =~ (Test|Tests|_Test|_test)$ ]] || \
                [[ "$CLASSNAME" =~ ^(Test|test) ]]; then
               TEST_CLASSES+="${CLASSNAME} "
             fi
-          done < <(find force-app -name "*.cls" ! -name "*-meta.xml" 2>/dev/null)
+          done < <(git diff --cached --name-only)
 
           TEST_CLASSES=$(echo "$TEST_CLASSES" | xargs)
 
