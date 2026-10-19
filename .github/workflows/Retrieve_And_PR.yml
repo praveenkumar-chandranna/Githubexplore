@@ -459,14 +459,13 @@ jobs:
           # Step A: collect all ApexClass members from the package.xml we just generated
           declare -a PKG_CLASSES
           if [[ -f "$GENERATED_PKG" ]]; then
-            # awk: capture members from the <types> block that contains <name>ApexClass</name>
             while IFS= read -r CNAME; do
               [[ -n "$CNAME" && "$CNAME" != "*" ]] && PKG_CLASSES+=("$CNAME")
             done < <(awk '
-              /<types>/        { block=""; in_block=1 }
-              in_block         { block = block "\n" $0 }
-              /<\/types>/      { in_block=0; if (block ~ /<name>ApexClass<\/name>/) print block }
-            ' "$GENERATED_PKG" | grep -oP '(?<=<members>)[^<]+')
+              /<types>/         { block=""; in_block=1 }
+              in_block          { block = block "\n" $0 }
+              /<[/]types>/      { in_block=0; if (block ~ "<name>ApexClass<[/]name>") print block }
+            ' "$GENERATED_PKG" | grep -oP "(?<=<members>)[^<]+")
           fi
 
           # Step B: build a map of ALL @isTest classes — from disk AND staged new files
