@@ -226,43 +226,141 @@ jobs:
           # ── Generate package.xml from staged changed files ────────────────
           echo "📦 Generating package.xml from changed files..."
 
+          # ── Folder → Metadata API type name ─────────────────────────────
+          # Source: Salesforce Metadata API Developer Guide (folder = DX source path segment)
           declare -A TYPE_MAP
+          # Bundles — member = component folder name
           TYPE_MAP["lwc"]="LightningComponentBundle"
           TYPE_MAP["aura"]="AuraDefinitionBundle"
+          TYPE_MAP["experiences"]="ExperienceBundle"
+          # Apex
           TYPE_MAP["classes"]="ApexClass"
           TYPE_MAP["triggers"]="ApexTrigger"
-          TYPE_MAP["objects"]="CustomObject"
-          TYPE_MAP["fields"]="CustomField"
-          TYPE_MAP["layouts"]="Layout"
-          TYPE_MAP["permissionsets"]="PermissionSet"
-          TYPE_MAP["profiles"]="Profile"
-          TYPE_MAP["flows"]="Flow"
-          TYPE_MAP["flexipages"]="FlexiPage"
-          TYPE_MAP["tabs"]="CustomTab"
-          TYPE_MAP["staticresources"]="StaticResource"
-          TYPE_MAP["contentassets"]="ContentAsset"
-          TYPE_MAP["applications"]="CustomApplication"
-          TYPE_MAP["labels"]="CustomLabels"
-          TYPE_MAP["email"]="EmailTemplate"
-          TYPE_MAP["reportTypes"]="ReportType"
-          TYPE_MAP["reports"]="Report"
-          TYPE_MAP["dashboards"]="Dashboard"
           TYPE_MAP["pages"]="ApexPage"
           TYPE_MAP["components"]="ApexComponent"
+          # Objects (top-level; sub-types handled via SUBFOLDER_MAP)
+          TYPE_MAP["objects"]="CustomObject"
+          # UI / App
+          TYPE_MAP["layouts"]="Layout"
+          TYPE_MAP["flexipages"]="FlexiPage"
+          TYPE_MAP["applications"]="CustomApplication"
+          TYPE_MAP["tabs"]="CustomTab"
+          TYPE_MAP["globalValueSets"]="GlobalValueSet"
+          TYPE_MAP["standardValueSets"]="StandardValueSet"
+          TYPE_MAP["pathAssistants"]="PathAssistant"
+          TYPE_MAP["quickActions"]="QuickAction"
+          TYPE_MAP["listViews"]="ListView"
+          TYPE_MAP["compactLayouts"]="CompactLayout"
+          # Automation
+          TYPE_MAP["flows"]="Flow"
+          TYPE_MAP["flowDefinitions"]="FlowDefinition"
           TYPE_MAP["workflows"]="Workflow"
+          TYPE_MAP["approvalProcesses"]="ApprovalProcess"
           TYPE_MAP["assignmentRules"]="AssignmentRules"
           TYPE_MAP["autoResponseRules"]="AutoResponseRules"
           TYPE_MAP["escalationRules"]="EscalationRules"
-          TYPE_MAP["sharingRules"]="SharingRules"
-          TYPE_MAP["validationRules"]="ValidationRule"
-          TYPE_MAP["customMetadata"]="CustomMetadata"
-          TYPE_MAP["namedCredentials"]="NamedCredential"
-          TYPE_MAP["remoteSiteSettings"]="RemoteSiteSetting"
-          TYPE_MAP["queues"]="Queue"
+          TYPE_MAP["matchingRules"]="MatchingRules"
+          # Security / Access
+          TYPE_MAP["permissionsets"]="PermissionSet"
+          TYPE_MAP["permissionsetgroups"]="PermissionSetGroup"
+          TYPE_MAP["profiles"]="Profile"
           TYPE_MAP["roles"]="Role"
           TYPE_MAP["groups"]="Group"
+          TYPE_MAP["queues"]="Queue"
+          TYPE_MAP["sharingRules"]="SharingRules"
+          TYPE_MAP["sharingCriteriaRules"]="SharingCriteriaRule"
+          TYPE_MAP["sharingOwnerRules"]="SharingOwnerRule"
+          TYPE_MAP["mutingPermissionSets"]="MutingPermissionSet"
+          # Data / Config
+          TYPE_MAP["customMetadata"]="CustomMetadata"
+          TYPE_MAP["customPermissions"]="CustomPermission"
+          TYPE_MAP["labels"]="CustomLabels"
+          TYPE_MAP["settings"]="Settings"
+          TYPE_MAP["namedCredentials"]="NamedCredential"
+          TYPE_MAP["externalCredentials"]="ExternalCredential"
+          TYPE_MAP["remoteSiteSettings"]="RemoteSiteSetting"
+          TYPE_MAP["cspTrustedSites"]="CspTrustedSite"
+          TYPE_MAP["connectedApps"]="ConnectedApp"
+          TYPE_MAP["authProviders"]="AuthProvider"
+          # Assets / Resources
+          TYPE_MAP["staticresources"]="StaticResource"
+          TYPE_MAP["contentassets"]="ContentAsset"
+          TYPE_MAP["documents"]="Document"
+          # Email
+          TYPE_MAP["emailTemplates"]="EmailTemplate"
+          TYPE_MAP["email"]="EmailTemplate"
+          # Reports / Dashboards (folder-based: FolderName/ItemName)
+          TYPE_MAP["reportTypes"]="ReportType"
+          TYPE_MAP["reports"]="Report"
+          TYPE_MAP["dashboards"]="Dashboard"
+          # Integrations / Platform Events
+          TYPE_MAP["platformEventChannels"]="PlatformEventChannel"
+          TYPE_MAP["platformEventChannelMembers"]="PlatformEventChannelMember"
+          TYPE_MAP["externalDataSources"]="ExternalDataSource"
+          TYPE_MAP["externalServices"]="ExternalService"
+          # Einstein / AI
+          TYPE_MAP["aiApplications"]="AIApplication"
+          TYPE_MAP["aiApplicationConfigs"]="AIApplicationConfig"
+          TYPE_MAP["botVersions"]="BotVersion"
+          TYPE_MAP["bots"]="Bot"
+          TYPE_MAP["mlDomains"]="MLDomain"
+          # Misc
+          TYPE_MAP["siteDotComSites"]="SiteDotCom"
+          TYPE_MAP["sites"]="CustomSite"
+          TYPE_MAP["networks"]="Network"
+          TYPE_MAP["networkBranding"]="NetworkBranding"
+          TYPE_MAP["territory2Models"]="Territory2Model"
+          TYPE_MAP["territory2Types"]="Territory2Type"
+          TYPE_MAP["territory2"]="Territory2"
+          TYPE_MAP["territory2Rules"]="Territory2Rule"
+          TYPE_MAP["dataSources"]="DataSource"
+          TYPE_MAP["duplicateRules"]="DuplicateRule"
+          TYPE_MAP["cleanDataServices"]="CleanDataService"
+          TYPE_MAP["corsWhitelistOrigins"]="CorsWhitelistOrigin"
+          TYPE_MAP["callCenters"]="CallCenter"
+          TYPE_MAP["caseSubjectParticles"]="CaseSubjectParticle"
+          TYPE_MAP["communities"]="Community"
+          TYPE_MAP["communityTemplateDefinitions"]="CommunityTemplateDefinition"
+          TYPE_MAP["communityThemeDefinitions"]="CommunityThemeDefinition"
+          TYPE_MAP["notificationTypeConfig"]="NotificationTypeConfig"
+          TYPE_MAP["notifTypes"]="NotificationTypeConfig"
+          TYPE_MAP["managedTopics"]="ManagedTopic"
+          TYPE_MAP["navigationMenus"]="NavigationMenu"
+          TYPE_MAP["recommendationStrategies"]="RecommendationStrategy"
+          TYPE_MAP["userCriteria"]="UserCriteria"
+          TYPE_MAP["moderation"]="ModerationRule"
+          TYPE_MAP["wave"]="WaveApplication"
+          TYPE_MAP["waveTemplates"]="WaveTemplateBundle"
+          TYPE_MAP["waveDashboards"]="WaveDashboard"
+          TYPE_MAP["waveDataflows"]="WaveDataflow"
+          TYPE_MAP["waveDatasets"]="WaveDataset"
+          TYPE_MAP["waveLenses"]="WaveLens"
+          TYPE_MAP["waveRecipes"]="WaveRecipe"
+          TYPE_MAP["waveXmds"]="WaveXmd"
+          TYPE_MAP["omniDataTransforms"]="OmniDataTransform"
+          TYPE_MAP["omniIntegrationProcedures"]="OmniIntegrationProcedure"
+          TYPE_MAP["omniScripts"]="OmniScript"
+          TYPE_MAP["omniUiCard"]="OmniUiCard"
+          TYPE_MAP["decisionMatrices"]="DecisionMatrix"
+          TYPE_MAP["decisionMatrixVersions"]="DecisionMatrixVersion"
+          TYPE_MAP["expressionSetDefinitions"]="ExpressionSetDefinition"
+          TYPE_MAP["expressionSetDefinitionVersions"]="ExpressionSetDefinitionVersion"
 
-          # Sub-folder types nested under objects/
+          # ── Bundle types: member = component folder, not individual file ──
+          declare -A BUNDLE_TYPES
+          BUNDLE_TYPES["LightningComponentBundle"]=1
+          BUNDLE_TYPES["AuraDefinitionBundle"]=1
+          BUNDLE_TYPES["ExperienceBundle"]=1
+          BUNDLE_TYPES["WaveTemplateBundle"]=1
+
+          # ── Folder-based types: member = FolderName/ItemName ─────────────
+          declare -A FOLDER_BASED_TYPES
+          FOLDER_BASED_TYPES["Report"]=1
+          FOLDER_BASED_TYPES["Dashboard"]=1
+          FOLDER_BASED_TYPES["EmailTemplate"]=1
+          FOLDER_BASED_TYPES["Document"]=1
+
+          # ── Sub-folder types nested under objects/ ────────────────────────
           declare -A SUBFOLDER_MAP
           SUBFOLDER_MAP["fields"]="CustomField"
           SUBFOLDER_MAP["validationRules"]="ValidationRule"
@@ -273,6 +371,16 @@ jobs:
           SUBFOLDER_MAP["businessProcesses"]="BusinessProcess"
           SUBFOLDER_MAP["fieldSets"]="FieldSet"
           SUBFOLDER_MAP["sharingReasons"]="SharingReason"
+          SUBFOLDER_MAP["indexes"]="Index"
+          SUBFOLDER_MAP["searchLayouts"]="SearchLayouts"
+
+          # ── Strip -meta.xml suffix, preserving dots in the name itself ──
+          # e.g. MyClass.cls-meta.xml → MyClass
+          #      MyType__mdt.MyRecord.md-meta.xml → MyType__mdt.MyRecord
+          #      Account-My Layout.layout-meta.xml → Account-My Layout
+          strip_ext() {
+            echo "$1" | sed 's/-meta\.xml$//' | sed 's/\.[a-zA-Z0-9_-]*$//'
+          }
 
           declare -A TYPE_MEMBERS
           while IFS= read -r FPATH; do
@@ -281,22 +389,41 @@ jobs:
             FOLDER=$(echo "$FPATH" | grep -oP 'force-app/main/default/\K[^/]+')
             [[ -z "$FOLDER" ]] && continue
 
-            # Check if this is a sub-type nested under objects/ (e.g. objects/Obj__c/fields/Field__c)
+            META_TYPE="${TYPE_MAP[$FOLDER]:-}"
+
+            # For bundle types: any file inside the bundle folder → member = bundle folder name
+            if [[ -n "${BUNDLE_TYPES[$META_TYPE]:-}" ]]; then
+              MEMBER=$(echo "$FPATH" | grep -oP "force-app/main/default/${FOLDER}/\K[^/]+")
+              [[ -z "$MEMBER" ]] && continue
+              TYPE_MEMBERS["$META_TYPE"]+="${MEMBER}"$'\n'
+              continue
+            fi
+
+            # For all non-bundle types: only process -meta.xml files
+            [[ ! "$FPATH" =~ -meta\.xml$ ]] && continue
+
             if [[ "$FOLDER" == "objects" ]]; then
               SUBFOLDER=$(echo "$FPATH" | grep -oP 'force-app/main/default/objects/[^/]+/\K[^/]+')
+              OBJ_NAME=$(echo "$FPATH" | grep -oP 'force-app/main/default/objects/\K[^/]+')
               if [[ -n "$SUBFOLDER" && -n "${SUBFOLDER_MAP[$SUBFOLDER]:-}" ]]; then
                 META_TYPE="${SUBFOLDER_MAP[$SUBFOLDER]}"
-                OBJ_NAME=$(echo "$FPATH" | grep -oP 'force-app/main/default/objects/\K[^/]+')
-                MEMBER_NAME=$(basename "$FPATH" | sed 's/\..*$//' | sed 's/-meta$//')
-                MEMBER="${OBJ_NAME}.${MEMBER_NAME}"
+                MEMBER="${OBJ_NAME}.$(strip_ext "$(basename "$FPATH")")"
               else
                 META_TYPE="CustomObject"
-                MEMBER=$(echo "$FPATH" | grep -oP 'force-app/main/default/objects/\K[^/]+')
-                MEMBER=$(echo "$MEMBER" | sed 's/\..*$//')
+                MEMBER="$(strip_ext "$OBJ_NAME")"
               fi
+
             else
-              META_TYPE="${TYPE_MAP[$FOLDER]:-$FOLDER}"
-              MEMBER=$(basename "$FPATH" | sed 's/\..*$//' | sed 's/-meta$//')
+              [[ -z "$META_TYPE" ]] && continue
+
+              if [[ -n "${FOLDER_BASED_TYPES[$META_TYPE]:-}" ]]; then
+                MEMBER=$(echo "$FPATH" | grep -oP "force-app/main/default/${FOLDER}/\K[^/]+/[^/]+")
+                MEMBER=$(strip_ext "$MEMBER")
+              elif [[ "$META_TYPE" == "CustomLabels" ]]; then
+                MEMBER="CustomLabels"
+              else
+                MEMBER=$(strip_ext "$(basename "$FPATH")")
+              fi
             fi
 
             [[ -z "$MEMBER" ]] && continue
