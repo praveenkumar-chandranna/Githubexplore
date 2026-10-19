@@ -493,24 +493,40 @@ jobs:
             PKG_CLASSES+=("$(basename "$FPATH" .cls)")
           done < <(git diff --cached --name-only)
 
-          # Step B: build a map of ALL @isTest classes on disk (class name → file path)
+          # Step B: build a map of ALL @isTest classes — from disk AND staged new files
           declare -A ALL_TEST_CLASSES
+          scan_for_istest() {
+            local CLSFILE="$1"
+            [[ "$CLSFILE" =~ -meta\.xml$ ]] && return
+            if grep -qiE '^[[:space:]]*@isTest' "$CLSFILE" 2>/dev/null; then
+              CNAME=$(basename "$CLSFILE" .cls)
+              ALL_TEST_CLASSES["$CNAME"]="$CLSFILE"
+            fi
+          }
+
+          # Scan existing files on disk
           if [[ -d "$CLASSES_DIR" ]]; then
             while IFS= read -r CLSFILE; do
-              [[ "$CLSFILE" =~ -meta\.xml$ ]] && continue
-              if grep -qiE '^[[:space:]]*@isTest' "$CLSFILE" 2>/dev/null; then
-                CNAME=$(basename "$CLSFILE" .cls)
-                ALL_TEST_CLASSES["$CNAME"]="$CLSFILE"
-              fi
+              scan_for_istest "$CLSFILE"
             done < <(find "$CLASSES_DIR" -maxdepth 1 -name '*.cls')
           fi
+
+          # Also scan staged (newly retrieved) .cls files not yet on disk
+          while IFS= read -r FPATH; do
+            [[ "$FPATH" =~ ^force-app/.*classes/.*\.cls$ ]] || continue
+            [[ "$FPATH" =~ -meta\.xml$ ]] && continue
+            # git show reads the staged content without needing the file on disk
+            if git show ":${FPATH}" 2>/dev/null | grep -qiE '^[[:space:]]*@isTest'; then
+              CNAME=$(basename "$FPATH" .cls)
+              ALL_TEST_CLASSES["$CNAME"]="$FPATH"
+            fi
+          done < <(git diff --cached --name-only)
 
           echo "  📋 @isTest classes found on disk: ${#ALL_TEST_CLASSES[@]}"
 
           # Step C: for each class in the package, resolve its test class(es)
           for CNAME in "${PKG_CLASSES[@]}"; do
             [[ -z "$CNAME" ]] && continue
-            CLSFILE="${CLASSES_DIR}/${CNAME}.cls"
 
             # If the class itself is @isTest → add it directly
             if [[ -n "${ALL_TEST_CLASSES[$CNAME]:-}" ]]; then
@@ -519,10 +535,16 @@ jobs:
               continue
             fi
 
-            # Otherwise scan all @isTest classes on disk for a reference to this class
+            # Otherwise scan all @isTest classes for a reference to this class
             for TC in "${!ALL_TEST_CLASSES[@]}"; do
-              TCFILE="${ALL_TEST_CLASSES[$TC]}"
-              if grep -qw "$CNAME" "$TCFILE" 2>/dev/null; then
+              TCPATH="${ALL_TEST_CLASSES[$TC]}"
+              # Read from disk if exists, otherwise from git staging area
+              if [[ -f "$TCPATH" ]]; then
+                CONTENT=$(cat "$TCPATH" 2>/dev/null)
+              else
+                CONTENT=$(git show ":${TCPATH}" 2>/dev/null)
+              fi
+              if echo "$CONTENT" | grep -qw "$CNAME"; then
                 TEST_CLASS_SET["$TC"]=1
                 echo "  ✅ Test class for $CNAME → $TC"
               fi
