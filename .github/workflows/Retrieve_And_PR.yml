@@ -458,29 +458,83 @@ jobs:
             echo "=========================================="
           fi
 
-          # ── Generate TestClass.txt ───────────────────────────────────────
-          # Scan retrieved Apex classes — any class ending in Test or starting
-          # with Test is a test class
+          # ── Generate TestClass.txt ────────────────────────────────────────
+          # Strategy:
+          # 1. Collect all ApexClass members from the generated package.xml
+          # 2. For each class, check if its .cls file on disk has @isTest → it IS a test class
+          # 3. For each non-test class, check if a corresponding test class exists on disk
+          #    by scanning all @isTest classes whose file content references the class name
+          # Result: complete, accurate test class list regardless of naming convention
           echo ""
           echo "🧪 Scanning for test classes..."
 
-          TEST_CLASSES=""
+          CLASSES_DIR="force-app/main/default/classes"
+          declare -A TEST_CLASS_SET
+
+          # Step A: collect all ApexClass members from the package.xml we just generated
+          declare -a PKG_CLASSES
+          if [[ -f "$GENERATED_PKG" ]]; then
+            # Parse package.xml: extract members only from the ApexClass <types> block
+            IN_APEX_BLOCK=0
+            while IFS= read -r line; do
+              [[ "$line" =~ \<types\> ]]           && IN_APEX_BLOCK=0
+              [[ "$line" =~ \<name\>ApexClass\</name\> ]] && IN_APEX_BLOCK=1
+              if [[ $IN_APEX_BLOCK -eq 1 && "$line" =~ \<members\> ]]; then
+                CNAME=$(echo "$line" | sed 's/.*<members>//;s/<\/members>.*//' | xargs)
+                [[ -n "$CNAME" && "$CNAME" != "*" ]] && PKG_CLASSES+=("$CNAME")
+              fi
+            done < "$GENERATED_PKG"
+          fi
+
+          # Also collect from staged changed .cls files (covers case where pkg xml was skipped)
           while IFS= read -r FPATH; do
             [[ "$FPATH" =~ ^force-app/.*classes/.*\.cls$ ]] || continue
             [[ "$FPATH" =~ -meta\.xml$ ]] && continue
-            CLASSNAME=$(basename "$FPATH" .cls)
-            if [[ "$CLASSNAME" =~ (Test|Tests|_Test|_test)$ ]] || \
-               [[ "$CLASSNAME" =~ ^(Test|test) ]]; then
-              TEST_CLASSES+="${CLASSNAME} "
-            fi
+            PKG_CLASSES+=("$(basename "$FPATH" .cls)")
           done < <(git diff --cached --name-only)
 
-          TEST_CLASSES=$(echo "$TEST_CLASSES" | xargs)
+          # Step B: build a map of ALL @isTest classes on disk (class name → file path)
+          declare -A ALL_TEST_CLASSES
+          if [[ -d "$CLASSES_DIR" ]]; then
+            while IFS= read -r CLSFILE; do
+              [[ "$CLSFILE" =~ -meta\.xml$ ]] && continue
+              if grep -qiE '^[[:space:]]*@isTest' "$CLSFILE" 2>/dev/null; then
+                CNAME=$(basename "$CLSFILE" .cls)
+                ALL_TEST_CLASSES["$CNAME"]="$CLSFILE"
+              fi
+            done < <(find "$CLASSES_DIR" -maxdepth 1 -name '*.cls')
+          fi
+
+          echo "  📋 @isTest classes found on disk: ${#ALL_TEST_CLASSES[@]}"
+
+          # Step C: for each class in the package, resolve its test class(es)
+          for CNAME in "${PKG_CLASSES[@]}"; do
+            [[ -z "$CNAME" ]] && continue
+            CLSFILE="${CLASSES_DIR}/${CNAME}.cls"
+
+            # If the class itself is @isTest → add it directly
+            if [[ -n "${ALL_TEST_CLASSES[$CNAME]:-}" ]]; then
+              TEST_CLASS_SET["$CNAME"]=1
+              echo "  ✅ Direct test class: $CNAME"
+              continue
+            fi
+
+            # Otherwise scan all @isTest classes on disk for a reference to this class
+            for TC in "${!ALL_TEST_CLASSES[@]}"; do
+              TCFILE="${ALL_TEST_CLASSES[$TC]}"
+              if grep -qw "$CNAME" "$TCFILE" 2>/dev/null; then
+                TEST_CLASS_SET["$TC"]=1
+                echo "  ✅ Test class for $CNAME → $TC"
+              fi
+            done
+          done
+
+          TEST_CLASSES=$(echo "${!TEST_CLASS_SET[@]}" | tr ' ' '\n' | sort | tr '\n' ' ' | xargs)
 
           if [[ -n "$TEST_CLASSES" ]]; then
             echo "$TEST_CLASSES" > "$GENERATED_TEST"
-            echo "✅ TestClass.txt generated: $GENERATED_TEST"
             echo ""
+            echo "✅ TestClass.txt generated: $GENERATED_TEST"
             echo "=========================================="
             echo "🧪 GENERATED TESTCLASS.TXT"
             echo "=========================================="
@@ -488,7 +542,7 @@ jobs:
             echo "=========================================="
             echo "test_file_created=true" >> $GITHUB_OUTPUT
           else
-            echo "⚠️  No test classes found in retrieved metadata"
+            echo "⚠️  No test classes found for retrieved metadata"
             echo "test_file_created=false" >> $GITHUB_OUTPUT
           fi
 
