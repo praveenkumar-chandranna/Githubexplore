@@ -456,8 +456,9 @@ jobs:
           CLASSES_DIR="force-app/main/default/classes"
           declare -A TEST_CLASS_SET
 
-          # Step A: collect all ApexClass members from the package.xml we just generated
+          # Step A: collect ApexClass AND ApexTrigger members from the package.xml
           declare -a PKG_CLASSES
+          declare -a PKG_TRIGGERS
           if [[ -f "$GENERATED_PKG" ]]; then
             while IFS= read -r CNAME; do
               [[ -n "$CNAME" && "$CNAME" != "*" ]] && PKG_CLASSES+=("$CNAME")
@@ -465,6 +466,13 @@ jobs:
               /<types>/         { block=""; in_block=1 }
               in_block          { block = block "\n" $0 }
               /<[/]types>/      { in_block=0; if (block ~ "<name>ApexClass<[/]name>") print block }
+            ' "$GENERATED_PKG" | grep -oP "(?<=<members>)[^<]+")
+            while IFS= read -r TNAME; do
+              [[ -n "$TNAME" && "$TNAME" != "*" ]] && PKG_TRIGGERS+=("$TNAME")
+            done < <(awk '
+              /<types>/         { block=""; in_block=1 }
+              in_block          { block = block "\n" $0 }
+              /<[/]types>/      { in_block=0; if (block ~ "<name>ApexTrigger<[/]name>") print block }
             ' "$GENERATED_PKG" | grep -oP "(?<=<members>)[^<]+")
           fi
 
@@ -523,7 +531,6 @@ jobs:
             # Otherwise scan all @isTest classes for a reference to this class
             for TC in "${!ALL_TEST_CLASSES[@]}"; do
               TCPATH="${ALL_TEST_CLASSES[$TC]}"
-              # Read from disk if exists, otherwise from git staging area
               if [[ -f "$TCPATH" ]]; then
                 CONTENT=$(cat "$TCPATH" 2>/dev/null)
               else
@@ -533,6 +540,70 @@ jobs:
                 TEST_CLASS_SET["$TC"]=1
                 echo "  ✅ Test class for $CNAME → $TC"
               fi
+            done
+          done
+
+          # Step D: for each trigger, find test classes using all Salesforce coverage patterns
+          # Salesforce standard: triggers are covered by test classes that do DML on the trigger's SObject.
+          # Detection chain:
+          #   1. Extract SObject from trigger definition: "trigger Foo on Account (...)" → Account
+          #   2. Find test classes that reference that SObject (DML coverage)
+          #   3. Find test classes that reference any handler class called by the trigger
+          #   4. Find test classes that directly mention the trigger name
+          for TNAME in "${PKG_TRIGGERS[@]}"; do
+            [[ -z "$TNAME" ]] && continue
+            echo "  🔍 Resolving test classes for trigger: $TNAME"
+
+            # Read trigger file from disk or staging area
+            TRIGGER_FILE="force-app/main/default/triggers/${TNAME}.trigger"
+            if [[ -f "$TRIGGER_FILE" ]]; then
+              TRIGGER_CONTENT=$(cat "$TRIGGER_FILE" 2>/dev/null)
+            else
+              TRIGGER_CONTENT=$(git show ":${TRIGGER_FILE}" 2>/dev/null)
+            fi
+
+            # Extract SObject name: "trigger FooTrigger on Account (before insert)" → Account
+            SOBJECT=$(echo "$TRIGGER_CONTENT" | grep -oiP '(?<=\bon\b\s{0,10})[A-Za-z][A-Za-z0-9_]+' | head -1)
+
+            # Extract all handler/class references from trigger body: ClassName.method() → ClassName
+            HANDLER_CLASSES=$(echo "$TRIGGER_CONTENT" | grep -oP '\b[A-Z][a-zA-Z0-9_]+(?=\s*\.)' | sort -u)
+
+            for TC in "${!ALL_TEST_CLASSES[@]}"; do
+              TCPATH="${ALL_TEST_CLASSES[$TC]}"
+              if [[ -f "$TCPATH" ]]; then
+                CONTENT=$(cat "$TCPATH" 2>/dev/null)
+              else
+                CONTENT=$(git show ":${TCPATH}" 2>/dev/null)
+              fi
+              [[ -z "$CONTENT" ]] && continue
+
+              MATCHED=0
+
+              # 1. Test class does DML on the trigger SObject → covers trigger implicitly
+              if [[ -n "$SOBJECT" ]] && echo "$CONTENT" | grep -qiP "(insert|update|delete|upsert)\s+.*\b${SOBJECT}\b|new\s+${SOBJECT}\s*\("; then
+                MATCHED=1
+                echo "  ✅ Test class for trigger $TNAME → $TC (DML on $SOBJECT)"
+              fi
+
+              # 2. Test class references a handler class that the trigger calls
+              if [[ $MATCHED -eq 0 && -n "$HANDLER_CLASSES" ]]; then
+                while IFS= read -r HANDLER; do
+                  [[ -z "$HANDLER" ]] && continue
+                  if echo "$CONTENT" | grep -qw "$HANDLER"; then
+                    MATCHED=1
+                    echo "  ✅ Test class for trigger $TNAME → $TC (via handler $HANDLER)"
+                    break
+                  fi
+                done <<< "$HANDLER_CLASSES"
+              fi
+
+              # 3. Test class directly mentions the trigger name
+              if [[ $MATCHED -eq 0 ]] && echo "$CONTENT" | grep -qw "$TNAME"; then
+                MATCHED=1
+                echo "  ✅ Test class for trigger $TNAME → $TC (direct reference)"
+              fi
+
+              [[ $MATCHED -eq 1 ]] && TEST_CLASS_SET["$TC"]=1
             done
           done
 
