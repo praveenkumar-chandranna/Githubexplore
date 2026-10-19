@@ -563,7 +563,7 @@ jobs:
             fi
 
             # Extract SObject name: "trigger FooTrigger on Account (before insert)" → Account
-            SOBJECT=$(echo "$TRIGGER_CONTENT" | grep -oiP '(?<=\bon\b\s{0,10})[A-Za-z][A-Za-z0-9_]+' | head -1)
+            SOBJECT=$(echo "$TRIGGER_CONTENT" | grep -oiP '\btrigger\b[^(]+\bon\b\s+\K[A-Za-z][A-Za-z0-9_]+' | head -1)
 
             # Extract all handler/class references from trigger body: ClassName.method() → ClassName
             HANDLER_CLASSES=$(echo "$TRIGGER_CONTENT" | grep -oP '\b[A-Z][a-zA-Z0-9_]+(?=\s*\.)' | sort -u)
