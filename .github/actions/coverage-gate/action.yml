@@ -182,6 +182,7 @@ runs:
           echo "|---|---|"
           echo "| **Environment** | \`${ENVIRONMENT}\` |"
           echo "| **Package** | \`${FEATURE_BRANCH}\` |"
+          echo "| **Deployed by** | ${GITHUB_ACTOR} |"
           echo "| **Overall Coverage** | **${OVERALL}%** |"
           echo "| **Lines Covered** | ${COVERED_LINES} / ${TOTAL_LINES} |"
           echo "| **Minimum Required** | ${MIN_COVERAGE}% (Lodha standard) |"

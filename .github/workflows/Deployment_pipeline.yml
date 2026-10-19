@@ -1,4 +1,4 @@
-name: Lodha Deployment Pipeline
+﻿name: Lodha Deployment Pipeline
 
 on:
   workflow_dispatch:
@@ -66,14 +66,13 @@ jobs:
         env:
           INPUT_ENV: ${{ github.event.inputs.environment }}
           INPUT_FEATURE: ${{ github.event.inputs.Feature_Branch }}
-          ACTOR: ${{ github.actor }}
           RUN_ID: ${{ github.run_id }}
           REF_NAME: ${{ github.ref_name }}
           REPO: ${{ github.repository }}
         run: |
           echo "Manual run: Environment=${INPUT_ENV}, Package(s)=${INPUT_FEATURE}"
           echo "run_id=${RUN_ID}" >> $GITHUB_OUTPUT
-          echo "actor=${ACTOR}" >> $GITHUB_OUTPUT
+          echo "actor=${GITHUB_ACTOR}" >> $GITHUB_OUTPUT
           echo "ref_name=${REF_NAME}" >> $GITHUB_OUTPUT
           echo "repo=${REPO}" >> $GITHUB_OUTPUT
 
@@ -391,7 +390,7 @@ jobs:
           GIT_USER_EMAIL: ${{ secrets.GIT_USER_EMAIL }}
           REPO: ${{ github.repository }}
           REF_NAME: ${{ github.ref_name }}
-          ACTOR: ${{ github.actor }}
+          ACTOR: ${{ steps.set-run-meta.outputs.actor }}
           RUN_ID: ${{ github.run_id }}
           SOURCE_BRANCHES: ${{ steps.resolve-package.outputs.source_branches }}
         run: |
@@ -574,6 +573,7 @@ jobs:
           USERNAME: ${{ steps.set-org.outputs.USERNAME }}
           ENV:      ${{ needs.Deployment_Build.outputs.environment }}
           PACKAGE:  ${{ needs.Deployment_Build.outputs.deploy_package }}
+          ACTOR:    ${{ needs.Deployment_Build.outputs.actor }}
         run: |
           set +e
           SCAN_TIME=$(TZ='Asia/Kolkata' date +'%d-%m-%Y %H:%M IST')
@@ -728,12 +728,11 @@ jobs:
             sf scanner run \
               --target "force-app/**/*.cls,force-app/**/*.trigger" \
               --format json \
-              --severity-threshold 1 \
               --output-file pmd_results.json 2>/dev/null || true
             if [[ -f pmd_results.json ]]; then
-              PMD_CRITICAL=$(jq '[.[] | select(.severity == 1)] | length' pmd_results.json 2>/dev/null || echo 0)
-              PMD_HIGH=$(jq     '[.[] | select(.severity == 2)] | length' pmd_results.json 2>/dev/null || echo 0)
-              PMD_MEDIUM=$(jq   '[.[] | select(.severity == 3)] | length' pmd_results.json 2>/dev/null || echo 0)
+              PMD_CRITICAL=$(jq '[.[].violations[] | select(.severity == 1)] | length' pmd_results.json 2>/dev/null || echo 0)
+              PMD_HIGH=$(jq     '[.[].violations[] | select(.severity == 2)] | length' pmd_results.json 2>/dev/null || echo 0)
+              PMD_MEDIUM=$(jq   '[.[].violations[] | select(.severity == 3)] | length' pmd_results.json 2>/dev/null || echo 0)
             fi
           else
             echo "⚠️ force-app not found — skipping PMD scan"
@@ -746,7 +745,7 @@ jobs:
           if [[ $TEST_TOTAL -gt 0 ]]; then
             TEST_SCORE=$(awk "BEGIN {printf \"%.2f\", ($TEST_PASS / $TEST_TOTAL) * 100 * 0.15}")
           else
-            TEST_SCORE="15.00"
+            TEST_SCORE="0.00"
           fi
 
           PMD_SCORE=$(awk "BEGIN {v=100 - ($PMD_CRITICAL * 5) - ($PMD_HIGH * 2); if(v<0)v=0; printf \"%.2f\", v * 0.15}")
@@ -927,13 +926,13 @@ jobs:
 
           # Pre-compute all awk values
           P_COV=$(awk   "BEGIN {v=${COV}+0; if(v>100)v=100; printf \"%.1f\", v*0.20}")
-          P_TEST=$(awk  "BEGIN {t=${T_TOTAL}+0; p=${T_PASS}+0; if(t>0) printf \"%.1f\", (p/t)*100*0.15; else printf \"15.0\"}")
+          P_TEST=$(awk  "BEGIN {t=${T_TOTAL}+0; p=${T_PASS}+0; if(t>0) printf \"%.1f\", (p/t)*100*0.15; else printf \"0.0\"}")
           P_PMD=$(awk   "BEGIN {v=100-(${PMD_C}+0)*5-(${PMD_H}+0)*2; if(v<0)v=0; printf \"%.1f\", v*0.15}")
           P_DEP=$(awk   "BEGIN {printf \"%.1f\", (${D_RATE}+0)*0.10}")
           P_STAB=$(awk  "BEGIN {v=100-(${BATCHES}+0)*10-(${APEX_EX}+0)*5; if(v<0)v=0; printf \"%.1f\", v*0.05}")
           P_GOV=$(awk   "BEGIN {v=100-(${CRIT_LIM}+0)*10; if(v<0)v=0; printf \"%.1f\", v*0.10}")
           P_COV2=$(awk  "BEGIN {v=${COV}+0; if(v>100)v=100; printf \"%.2f\", v*0.20}")
-          P_TEST2=$(awk "BEGIN {t=${T_TOTAL}+0; p=${T_PASS}+0; if(t>0) printf \"%.2f\", (p/t)*100*0.15; else printf \"15.00\"}")
+          P_TEST2=$(awk "BEGIN {t=${T_TOTAL}+0; p=${T_PASS}+0; if(t>0) printf \"%.2f\", (p/t)*100*0.15; else printf \"0.00\"}")
           P_PMD2=$(awk  "BEGIN {v=100-(${PMD_C}+0)*5-(${PMD_H}+0)*2; if(v<0)v=0; printf \"%.2f\", v*0.15}")
           P_DEP2=$(awk  "BEGIN {printf \"%.2f\", (${D_RATE}+0)*0.10}")
           P_STAB2=$(awk "BEGIN {v=100-(${BATCHES}+0)*10-(${APEX_EX}+0)*5; if(v<0)v=0; printf \"%.2f\", v*0.05}")
@@ -945,7 +944,7 @@ jobs:
 
           {
             echo "## 🏥 Post-Deployment Health Check — ${ENV}"
-            echo "_Scanned at: ${SCAN_TIME} | Package: \`${PACKAGE}\` | Deployed by: ${ACTOR}_"
+            echo "_Scanned at: ${SCAN_TIME} | Package: \`${PACKAGE}\` | Org: \`${ENV}\` | Deployed by: ${ACTOR}_"
             echo ""
             echo "### 🏆 Overall Health Score: \`$SCORE / 100\` — $BAND"
             echo ""
@@ -956,7 +955,7 @@ jobs:
             echo "|---|---|---|---|"
             echo "| 🔒 Security Health Check | 25% | ${SEC_RAW}/100 (Priv:${PRIV_C} Inactive:${INACT_C} NoMFA:${NOMFA_C} Guest:${GUEST_C} ConnApps:${CONN_C} OWD:${OWD_C}) | ${P_SEC2} |"
             echo "| 🧪 Apex Coverage | 20% | ${COV}% | ${P_COV2} |"
-            echo "| ✅ Test Results | 15% | ${T_PASS}/${T_TOTAL} passed | ${P_TEST2} |"
+            echo "| ✅ Test Results | 15% | $([ "$T_TOTAL" -gt 0 ] && echo "${T_PASS}/${T_TOTAL} passed" || echo "N/A (no tests in last 7 days)") | ${P_TEST2} |"
             echo "| 🔍 Code Quality (PMD) | 15% | Critical:$PMD_C High:$PMD_H Med:$PMD_M DeprecatedAPI:${OLD_API_C} | ${P_PMD2} |"
             echo "| 🚀 Deployment Success | 10% | ${D_RATE}% (${D_OK}/${D_TOT}) | ${P_DEP2} |"
             echo "| ⚙️ Org Stability | 5% | Batches:$BATCHES Exceptions:$APEX_EX | ${P_STAB2} |"
@@ -1120,7 +1119,7 @@ jobs:
           NEW_ENTRY+="<table><tr><th>Category</th><th>Weight</th><th>Raw Value</th><th>Points</th></tr>"
           NEW_ENTRY+="<tr><td>🔒 Security</td><td>25%</td><td>${SEC_RAW}/100 (Priv:${PRIV_C} Inactive:${INACT_C} NoMFA:${NOMFA_C} Guest:${GUEST_C} ConnApps:${CONN_C} OWD:${OWD_C})</td><td>${P_SEC}</td></tr>"
           NEW_ENTRY+="<tr><td>🧪 Apex Coverage</td><td>20%</td><td>${COV}%</td><td>${P_COV}</td></tr>"
-          NEW_ENTRY+="<tr><td>✅ Test Results</td><td>15%</td><td>${T_PASS}/${T_TOTAL} passed</td><td>${P_TEST}</td></tr>"
+          NEW_ENTRY+="<tr><td>✅ Test Results</td><td>15%</td><td>$([ "$T_TOTAL" -gt 0 ] && echo "${T_PASS}/${T_TOTAL} passed" || echo "N/A (no tests in last 7 days)")</td><td>${P_TEST}</td></tr>"
           NEW_ENTRY+="<tr><td>🔍 Code Quality (PMD)</td><td>15%</td><td>Critical:${PMD_C} High:${PMD_H} Med:${PMD_M} DeprecatedAPI:${OLD_API_C}</td><td>${P_PMD}</td></tr>"
           NEW_ENTRY+="<tr><td>🚀 Deployment Success</td><td>10%</td><td>${D_RATE}% (${D_OK}/${D_TOT})</td><td>${P_DEP}</td></tr>"
           NEW_ENTRY+="<tr><td>⚙️ Org Stability</td><td>5%</td><td>Batches:${BATCHES} Exceptions:${APEX_EX}</td><td>${P_STAB}</td></tr>"
@@ -1241,7 +1240,7 @@ jobs:
 
           P_SEC=$(awk   "BEGIN {printf \"%.2f\", (${SEC_RAW}+0)*0.25}")
           P_COV=$(awk   "BEGIN {v=${COV}+0; if(v>100)v=100; printf \"%.2f\", v*0.20}")
-          P_TEST=$(awk  "BEGIN {t=${T_TOTAL}+0; p=${T_PASS}+0; if(t>0) printf \"%.2f\", (p/t)*100*0.15; else printf \"15.00\"}")
+          P_TEST=$(awk  "BEGIN {t=${T_TOTAL}+0; p=${T_PASS}+0; if(t>0) printf \"%.2f\", (p/t)*100*0.15; else printf \"0.00\"}")
           P_PMD=$(awk   "BEGIN {v=100-(${PMD_C}+0)*5-(${PMD_H}+0)*2; if(v<0)v=0; printf \"%.2f\", v*0.15}")
           P_DEP=$(awk   "BEGIN {printf \"%.2f\", (${D_RATE}+0)*0.10}")
           P_STAB=$(awk  "BEGIN {v=100-(${BATCHES}+0)*10-(${APEX_EX}+0)*5; if(v<0)v=0; printf \"%.2f\", v*0.05}")
@@ -1296,7 +1295,7 @@ jobs:
           EMAIL_BODY+="<tr style='background:#f5f5f5'><th>Category</th><th>Weight</th><th>Raw Value</th><th>Points</th></tr>"
           EMAIL_BODY+="<tr><td>🔒 Security</td><td>25%</td><td>${SEC_RAW}/100 (Priv:${PRIV_C} Inactive:${INACT_C} NoMFA:${NOMFA_C} Guest:${GUEST_C} ConnApps:${CONN_C} OWD:${OWD_C})</td><td>${P_SEC}</td></tr>"
           EMAIL_BODY+="<tr><td>🧪 Apex Coverage</td><td>20%</td><td>${COV}%</td><td>${P_COV}</td></tr>"
-          EMAIL_BODY+="<tr><td>✅ Test Results</td><td>15%</td><td>${T_PASS}/${T_TOTAL} passed</td><td>${P_TEST}</td></tr>"
+          EMAIL_BODY+="<tr><td>✅ Test Results</td><td>15%</td><td>$([ "$T_TOTAL" -gt 0 ] && echo "${T_PASS}/${T_TOTAL} passed" || echo "N/A (no tests in last 7 days)")</td><td>${P_TEST}</td></tr>"
           EMAIL_BODY+="<tr><td>🔍 Code Quality (PMD)</td><td>15%</td><td>Critical:${PMD_C} High:${PMD_H} Med:${PMD_M} DeprecatedAPI:${OLD_API_C}</td><td>${P_PMD}</td></tr>"
           EMAIL_BODY+="<tr><td>🚀 Deployment Success</td><td>10%</td><td>${D_RATE}%</td><td>${P_DEP}</td></tr>"
           EMAIL_BODY+="<tr><td>⚙️ Org Stability</td><td>5%</td><td>Batches:${BATCHES} Exceptions:${APEX_EX}</td><td>${P_STAB}</td></tr>"
@@ -1406,35 +1405,48 @@ jobs:
         if: steps.extract_tickets.outputs.has_tickets == 'true'
         shell: bash
         env:
-          TICKETS:             ${{ steps.extract_tickets.outputs.tickets }}
-          ENVIRONMENT:         ${{ needs.Deployment_Build.outputs.environment }}
-          JIRA_BASE_URL:       ${{ secrets.JIRA_BASE_URL }}
-          JIRA_USER_EMAIL:     ${{ secrets.JIRA_USER_EMAIL }}
-          ATLASSIAN_API_TOKEN: ${{ secrets.ATLASSIAN_API_TOKEN }}
-          TRANSITION_ID_QA:    ${{ secrets.JIRA_QA_TRANSITION_ID }}
-          TRANSITION_ID_UAT:   ${{ secrets.JIRA_UAT_TRANSITION_ID }}
-          TRANSITION_ID_PROD:  ${{ secrets.JIRA_PROD_TRANSITION_ID }}
+          TICKETS:                      ${{ steps.extract_tickets.outputs.tickets }}
+          ENVIRONMENT:                  ${{ needs.Deployment_Build.outputs.environment }}
+          JIRA_BASE_URL:                ${{ secrets.JIRA_BASE_URL }}
+          JIRA_USER_EMAIL:              ${{ secrets.JIRA_USER_EMAIL }}
+          ATLASSIAN_API_TOKEN:          ${{ secrets.ATLASSIAN_API_TOKEN }}
+          TRANSITION_ID_QA_STORY:       ${{ secrets.JIRA_QA_TRANSITION_ID_STORY }}
+          TRANSITION_ID_QA_BUG:         ${{ secrets.JIRA_QA_TRANSITION_ID_BUG }}
+          TRANSITION_ID_UAT_STORY:      ${{ secrets.JIRA_UAT_TRANSITION_ID_STORY }}
+          TRANSITION_ID_UAT_BUG:        ${{ secrets.JIRA_UAT_TRANSITION_ID_BUG }}
+          TRANSITION_ID_PROD_STORY:     ${{ secrets.JIRA_PROD_TRANSITION_ID_STORY }}
+          TRANSITION_ID_PROD_BUG:       ${{ secrets.JIRA_PROD_TRANSITION_ID_BUG }}
         run: |
-          case "$ENVIRONMENT" in
-            QA)         TRANSITION_ID="$TRANSITION_ID_QA" ;;
-            UAT)        TRANSITION_ID="$TRANSITION_ID_UAT" ;;
-            PRODUCTION) TRANSITION_ID="$TRANSITION_ID_PROD" ;;
-          esac
-
-          if [[ -z "$TRANSITION_ID" ]]; then
-            echo "⚠️ Transition ID not set for $ENVIRONMENT — skipping"
-            exit 0
-          fi
-
           echo "🔄 Transitioning tickets to $ENVIRONMENT status..."
           IFS=',' read -ra TICKET_ARRAY <<< "$TICKETS"
           for TICKET in "${TICKET_ARRAY[@]}"; do
             TICKET=$(echo "$TICKET" | xargs)
+
+            # Fetch issue type and current status
             ISSUE_RESP=$(curl -s \
               -u "${JIRA_USER_EMAIL}:${ATLASSIAN_API_TOKEN}" \
               -H "Content-Type: application/json" \
-              "${JIRA_BASE_URL}/rest/api/3/issue/${TICKET}?fields=status")
+              "${JIRA_BASE_URL}/rest/api/3/issue/${TICKET}?fields=status,issuetype")
             CURRENT_STATUS=$(echo "$ISSUE_RESP" | jq -r '.fields.status.name // "Unknown"')
+            ISSUE_TYPE=$(echo "$ISSUE_RESP" | jq -r '.fields.issuetype.name // "Unknown"')
+
+            # Select transition ID based on environment + issue type
+            case "$ENVIRONMENT" in
+              QA)
+                [[ "$ISSUE_TYPE" == "Bug" ]] && TRANSITION_ID="$TRANSITION_ID_QA_BUG" || TRANSITION_ID="$TRANSITION_ID_QA_STORY" ;;
+              UAT)
+                [[ "$ISSUE_TYPE" == "Bug" ]] && TRANSITION_ID="$TRANSITION_ID_UAT_BUG" || TRANSITION_ID="$TRANSITION_ID_UAT_STORY" ;;
+              PRODUCTION)
+                [[ "$ISSUE_TYPE" == "Bug" ]] && TRANSITION_ID="$TRANSITION_ID_PROD_BUG" || TRANSITION_ID="$TRANSITION_ID_PROD_STORY" ;;
+              *)
+                echo "  ⚠️ No transition configured for $ENVIRONMENT — skipping $TICKET"
+                continue ;;
+            esac
+
+            if [[ -z "$TRANSITION_ID" ]]; then
+              echo "  ⚠️ Transition ID not set for $ENVIRONMENT/$ISSUE_TYPE — skipping $TICKET"
+              continue
+            fi
 
             TRANS_HTTP=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
               -u "${JIRA_USER_EMAIL}:${ATLASSIAN_API_TOKEN}" \
@@ -1443,9 +1455,9 @@ jobs:
               "${JIRA_BASE_URL}/rest/api/3/issue/${TICKET}/transitions")
 
             if [[ "$TRANS_HTTP" == "204" ]]; then
-              echo "  ✅ $TICKET → $ENVIRONMENT (was: $CURRENT_STATUS)"
+              echo "  ✅ $TICKET [$ISSUE_TYPE] → $ENVIRONMENT (was: $CURRENT_STATUS)"
             else
-              echo "  ⚠️ $TICKET transition failed (HTTP $TRANS_HTTP) — was: $CURRENT_STATUS"
+              echo "  ⚠️ $TICKET [$ISSUE_TYPE] transition failed (HTTP $TRANS_HTTP) — was: $CURRENT_STATUS"
             fi
           done
 
@@ -1587,6 +1599,8 @@ jobs:
           RELEASE_HTML+="<hr/>"
           echo "✅ Built release notes for ${TICKET_COUNT} tickets"
 
+          echo "$RELEASE_HTML" > release_notes_email.html
+
           if [[ -z "$CONFLUENCE_BASE_URL" || -z "$PAGE_ID" ]]; then
             echo "⚠️ Confluence secrets not configured — skipping page update"
             exit 0
@@ -1632,8 +1646,6 @@ jobs:
             echo "$UPDATE_RESPONSE" | sed '$d'
             exit 1
           fi
-
-          echo "$RELEASE_HTML" > release_notes_email.html
 
       - name: Build Release Notes Email
         id: build-release-email
