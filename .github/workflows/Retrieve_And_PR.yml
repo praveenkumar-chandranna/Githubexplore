@@ -224,40 +224,148 @@ jobs:
 
           API_VERSION=$(grep -oP '(?<=sourceApiVersion": ")[^"]+' sfdx-project.json 2>/dev/null || echo "67.0")
 
-          # ── Generate package.xml from the retrieval input package ──────────
-          echo "📦 Generating package.xml from retrieval package: $PACKAGE_PATH"
+          # ── TYPE_MAP: folder name → Salesforce Metadata API type ─────────────
+          declare -A TYPE_MAP
+          TYPE_MAP["classes"]="ApexClass"                TYPE_MAP["triggers"]="ApexTrigger"
+          TYPE_MAP["lwc"]="LightningComponentBundle"     TYPE_MAP["aura"]="AuraDefinitionBundle"
+          TYPE_MAP["pages"]="ApexPage"                   TYPE_MAP["components"]="ApexComponent"
+          TYPE_MAP["staticresources"]="StaticResource"   TYPE_MAP["flows"]="Flow"
+          TYPE_MAP["objects"]="CustomObject"             TYPE_MAP["layouts"]="Layout"
+          TYPE_MAP["permissionsets"]="PermissionSet"     TYPE_MAP["profiles"]="Profile"
+          TYPE_MAP["labels"]="CustomLabels"              TYPE_MAP["tabs"]="CustomTab"
+          TYPE_MAP["applications"]="CustomApplication"   TYPE_MAP["roles"]="Role"
+          TYPE_MAP["groups"]="Group"                     TYPE_MAP["queues"]="Queue"
+          TYPE_MAP["reportTypes"]="ReportType"           TYPE_MAP["reports"]="Report"
+          TYPE_MAP["dashboards"]="Dashboard"             TYPE_MAP["documents"]="Document"
+          TYPE_MAP["email"]="EmailTemplate"              TYPE_MAP["emailservices"]="EmailServicesFunction"
+          TYPE_MAP["workflows"]="Workflow"               TYPE_MAP["approvalProcesses"]="ApprovalProcess"
+          TYPE_MAP["assignmentRules"]="AssignmentRules"  TYPE_MAP["autoResponseRules"]="AutoResponseRules"
+          TYPE_MAP["escalationRules"]="EscalationRules"  TYPE_MAP["sharingRules"]="SharingRules"
+          TYPE_MAP["territory2Models"]="Territory2Model" TYPE_MAP["territory2Types"]="Territory2Type"
+          TYPE_MAP["territory2"]="Territory2"            TYPE_MAP["territory2Rules"]="Territory2Rule"
+          TYPE_MAP["customMetadata"]="CustomMetadata"    TYPE_MAP["settings"]="Settings"
+          TYPE_MAP["namedCredentials"]="NamedCredential" TYPE_MAP["remoteSiteSettings"]="RemoteSiteSetting"
+          TYPE_MAP["cspTrustedSites"]="CspTrustedSite"  TYPE_MAP["connectedApps"]="ConnectedApp"
+          TYPE_MAP["authproviders"]="AuthProvider"       TYPE_MAP["samlssoconfigs"]="SamlSsoConfig"
+          TYPE_MAP["sites"]="CustomSite"                 TYPE_MAP["networks"]="Network"
+          TYPE_MAP["communities"]="Community"            TYPE_MAP["experiences"]="ExperienceBundle"
+          TYPE_MAP["contentassets"]="ContentAsset"       TYPE_MAP["brandingSets"]="BrandingSet"
+          TYPE_MAP["navigationMenus"]="NavigationMenu"   TYPE_MAP["managedTopics"]="ManagedTopic"
+          TYPE_MAP["topics"]="TopicsForObjects"          TYPE_MAP["globalValueSets"]="GlobalValueSet"
+          TYPE_MAP["standardValueSets"]="StandardValueSet" TYPE_MAP["globalValueSetTranslations"]="GlobalValueSetTranslation"
+          TYPE_MAP["translations"]="Translations"        TYPE_MAP["objectTranslations"]="CustomObjectTranslation"
+          TYPE_MAP["pathAssistants"]="PathAssistant"     TYPE_MAP["compactLayouts"]="CompactLayout"
+          TYPE_MAP["flexipages"]="FlexiPage"             TYPE_MAP["quickActions"]="QuickAction"
+          TYPE_MAP["listViews"]="ListView"               TYPE_MAP["webLinks"]="WebLink"
+          TYPE_MAP["validationRules"]="ValidationRule"   TYPE_MAP["businessProcesses"]="BusinessProcess"
+          TYPE_MAP["recordTypes"]="RecordType"           TYPE_MAP["fieldSets"]="FieldSet"
+          TYPE_MAP["fields"]="CustomField"               TYPE_MAP["sharingReasons"]="SharingReason"
+          TYPE_MAP["sharingRecalculations"]="SharingRecalculation" TYPE_MAP["index"]="Index"
+          TYPE_MAP["letterhead"]="Letterhead"            TYPE_MAP["postTemplates"]="PostTemplate"
+          TYPE_MAP["callCenters"]="CallCenter"           TYPE_MAP["dataCategoryGroups"]="DataCategoryGroup"
+          TYPE_MAP["matchingRules"]="MatchingRule"       TYPE_MAP["duplicateRules"]="DuplicateRule"
+          TYPE_MAP["cleanDataServices"]="CleanDataService" TYPE_MAP["feedFilters"]="FeedFilter"
+          TYPE_MAP["homePageComponents"]="HomePageComponent" TYPE_MAP["homePageLayouts"]="HomePageLayout"
+          TYPE_MAP["installedPackages"]="InstalledPackage" TYPE_MAP["notificationtypes"]="CustomNotificationType"
+          TYPE_MAP["bots"]="Bot"                         TYPE_MAP["botVersions"]="BotVersion"
+          TYPE_MAP["mlDomains"]="MLDomain"               TYPE_MAP["mlPredictionDefinitions"]="MLPredictionDefinition"
+          TYPE_MAP["decisionMatrixDefinitions"]="DecisionMatrixDefinition"
+          TYPE_MAP["expressionSetDefinitions"]="ExpressionSetDefinition"
+          TYPE_MAP["omniIntegrationProcedures"]="OmniIntegrationProcedure"
+          TYPE_MAP["omniScripts"]="OmniScript"           TYPE_MAP["omniUiCard"]="OmniUiCard"
+          TYPE_MAP["omniDataTransforms"]="OmniDataTransform"
 
-          # ── Build TYPE_MEMBERS directly from the retrieval package.xml ──────
-          # Parse with awk: buffer each <types> block, extract name + all members.
-          # Output format per line: TYPE_NAME<TAB>MEMBER
+          # ── SUBFOLDER_MAP: object sub-folder → Metadata API type ─────────────
+          declare -A SUBFOLDER_MAP
+          SUBFOLDER_MAP["fields"]="CustomField"          SUBFOLDER_MAP["validationRules"]="ValidationRule"
+          SUBFOLDER_MAP["recordTypes"]="RecordType"      SUBFOLDER_MAP["layouts"]="Layout"
+          SUBFOLDER_MAP["listViews"]="ListView"          SUBFOLDER_MAP["webLinks"]="WebLink"
+          SUBFOLDER_MAP["fieldSets"]="FieldSet"          SUBFOLDER_MAP["compactLayouts"]="CompactLayout"
+          SUBFOLDER_MAP["businessProcesses"]="BusinessProcess" SUBFOLDER_MAP["sharingReasons"]="SharingReason"
+          SUBFOLDER_MAP["index"]="Index"
+
+          # ── strip_ext: remove all known Salesforce file extensions ────────────
+          strip_ext() {
+            local f="$1"
+            f="${f%.cls}"    ; f="${f%.trigger}" ; f="${f%.page}"
+            f="${f%.component}"; f="${f%.resource}"; f="${f%.flow-meta.xml}"
+            f="${f%.object-meta.xml}"; f="${f%.layout-meta.xml}"
+            f="${f%.permissionset-meta.xml}"; f="${f%.profile-meta.xml}"
+            f="${f%.labels-meta.xml}"; f="${f%.tab-meta.xml}"
+            f="${f%.app-meta.xml}"; f="${f%.role-meta.xml}"
+            f="${f%.email-meta.xml}"; f="${f%.workflow-meta.xml}"
+            f="${f%.approvalProcess-meta.xml}"; f="${f%.assignmentRules-meta.xml}"
+            f="${f%.autoResponseRules-meta.xml}"; f="${f%.escalationRules-meta.xml}"
+            f="${f%.sharingRules-meta.xml}"; f="${f%.territory2Model-meta.xml}"
+            f="${f%.territory2Type-meta.xml}"; f="${f%.territory2-meta.xml}"
+            f="${f%.territory2Rule-meta.xml}"; f="${f%.customMetadata-meta.xml}"
+            f="${f%.settings-meta.xml}"; f="${f%.namedCredential-meta.xml}"
+            f="${f%.remoteSite-meta.xml}"; f="${f%.cspTrustedSite-meta.xml}"
+            f="${f%.connectedApp-meta.xml}"; f="${f%.authprovider-meta.xml}"
+            f="${f%.samlssoconfig-meta.xml}"; f="${f%.site-meta.xml}"
+            f="${f%.network-meta.xml}"; f="${f%.community-meta.xml}"
+            f="${f%.contentasset-meta.xml}"; f="${f%.brandingSet-meta.xml}"
+            f="${f%.navigationMenu-meta.xml}"; f="${f%.managedTopic-meta.xml}"
+            f="${f%.globalValueSet-meta.xml}"; f="${f%.standardValueSet-meta.xml}"
+            f="${f%.translation-meta.xml}"; f="${f%.objectTranslation-meta.xml}"
+            f="${f%.pathAssistant-meta.xml}"; f="${f%.flexipage-meta.xml}"
+            f="${f%.quickAction-meta.xml}"; f="${f%.reportType-meta.xml}"
+            f="${f%.report-meta.xml}"; f="${f%.dashboard-meta.xml}"
+            f="${f%.document-meta.xml}"; f="${f%.letterhead-meta.xml}"
+            f="${f%.postTemplate-meta.xml}"; f="${f%.callCenter-meta.xml}"
+            f="${f%.dataCategoryGroup-meta.xml}"; f="${f%.matchingRule-meta.xml}"
+            f="${f%.duplicateRule-meta.xml}"; f="${f%.feedFilter-meta.xml}"
+            f="${f%.homePageComponent-meta.xml}"; f="${f%.homePageLayout-meta.xml}"
+            f="${f%.installedPackage-meta.xml}"; f="${f%.notiftype-meta.xml}"
+            f="${f%.bot-meta.xml}"; f="${f%.botVersion-meta.xml}"
+            f="${f%-meta.xml}"; f="${f%.xml}"
+            echo "$f"
+          }
+
+          # ── Build TYPE_MEMBERS from git diff --cached (new + modified only) ───
+          echo "📦 Building package.xml from git diff --cached..."
           declare -A TYPE_MEMBERS
-          while IFS=$'\t' read -r T M; do
-            [[ -z "$T" || -z "$M" || "$M" == "*" ]] && continue
-            TYPE_MEMBERS["$T"]+="${M}"$'\n'
-          done < <(gawk '
-            /<types>/    { block=""; in_block=1 }
-            in_block     { block = block "\n" $0 }
-            /<\/types>/ {
-              in_block=0
-              n=""
-              tmp=block
-              if (match(tmp, /<name>[^<]+<\/name>/)) {
-                n=substr(tmp, RSTART+6, RLENGTH-13)
-              }
-              if (n == "") next
-              s=block
-              while (match(s, /<members>[^<]+<\/members>/)) {
-                m=substr(s, RSTART+9, RLENGTH-19)
-                print n "\t" m
-                s=substr(s, RSTART+RLENGTH)
-              }
-            }
-          ' "$PACKAGE_PATH")
-          echo "  📋 Types found in retrieval package: ${!TYPE_MEMBERS[*]}"
-          echo "  📋 ApexClass count: $(echo "${TYPE_MEMBERS[ApexClass]:-}" | grep -c '[^[:space:]]')"
+
+          while IFS= read -r FPATH; do
+            [[ -z "$FPATH" ]] && continue
+            # Strip leading force-app/main/default/
+            REL="${FPATH#force-app/main/default/}"
+            [[ "$REL" == "$FPATH" ]] && continue  # not under force-app
+
+            FOLDER=$(echo "$REL" | cut -d'/' -f1)
+            REST=$(echo "$REL" | cut -d'/' -f2-)
+            FNAME=$(basename "$REST")
+
+            # Objects sub-folder: objects/Account/fields/MyField__c.field-meta.xml
+            if [[ "$FOLDER" == "objects" ]]; then
+              OBJECT=$(echo "$REST" | cut -d'/' -f1)
+              SUBFOLDER=$(echo "$REST" | cut -d'/' -f2)
+              if [[ -n "${SUBFOLDER_MAP[$SUBFOLDER]:-}" ]]; then
+                MTYPE="${SUBFOLDER_MAP[$SUBFOLDER]}"
+                MNAME="${OBJECT}.$(strip_ext "$FNAME")"
+              else
+                MTYPE="CustomObject"
+                MNAME=$(strip_ext "$OBJECT")
+              fi
+            # LWC / Aura bundles: member = bundle folder name
+            elif [[ "$FOLDER" == "lwc" || "$FOLDER" == "aura" ]]; then
+              MTYPE="${TYPE_MAP[$FOLDER]}"
+              MNAME=$(echo "$REST" | cut -d'/' -f1)
+            else
+              MTYPE="${TYPE_MAP[$FOLDER]:-}"
+              [[ -z "$MTYPE" ]] && continue
+              MNAME=$(strip_ext "$FNAME")
+            fi
+
+            [[ -z "$MNAME" || "$MNAME" == "*" ]] && continue
+            TYPE_MEMBERS["$MTYPE"]+="${MNAME}"$'\n'
+          done < <(git diff --cached --name-only)
+
+          echo "  📋 Types from diff: ${!TYPE_MEMBERS[*]}"
+          echo "  📋 ApexClass count: $(echo "${TYPE_MEMBERS[ApexClass]:-}" | grep -c '[^[:space:]]' || echo 0)"
 
           if [[ ${#TYPE_MEMBERS[@]} -eq 0 ]]; then
-            echo "⚠️  No force-app metadata found — skipping package.xml"
+            echo "⚠️  No force-app metadata found in diff — skipping package.xml"
           else
             PKG_TMP=$(mktemp)
             printf '<?xml version="1.0" encoding="UTF-8"?>\n' >> "$PKG_TMP"
@@ -286,20 +394,13 @@ jobs:
           fi
 
           # ── Generate TestClass.txt ────────────────────────────────────────
-          # Strategy:
-          # 1. Collect all ApexClass members from the generated package.xml
-          # 2. For each class, check if its .cls file on disk has @isTest → it IS a test class
-          # 3. For each non-test class, check if a corresponding test class exists on disk
-          #    by scanning all @isTest classes whose file content references the class name
-          # Result: complete, accurate test class list regardless of naming convention
           echo ""
           echo "🧪 Scanning for test classes..."
 
           CLASSES_DIR="force-app/main/default/classes"
           declare -A TEST_CLASS_SET
 
-          # Step A: get ApexClass and ApexTrigger members directly from TYPE_MEMBERS
-          # (already parsed from $PACKAGE_PATH above — no need to re-parse the generated file)
+          # Step A: get changed ApexClass and ApexTrigger members from TYPE_MEMBERS (git diff)
           declare -a PKG_CLASSES
           declare -a PKG_TRIGGERS
           while IFS= read -r CNAME; do
