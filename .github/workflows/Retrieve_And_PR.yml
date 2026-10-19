@@ -412,7 +412,7 @@ jobs:
 
             [[ -z "$MEMBER" ]] && continue
             TYPE_MEMBERS["$META_TYPE"]+="${MEMBER}"$'\n'
-          done < <(find force-app/main/default -type f 2>/dev/null | sort)
+          done < <(git diff --cached --name-only)
 
           if [[ ${#TYPE_MEMBERS[@]} -eq 0 ]]; then
             echo "⚠️  No force-app metadata found — skipping package.xml"
@@ -470,13 +470,6 @@ jobs:
               fi
             done < "$GENERATED_PKG"
           fi
-
-          # Also collect from all .cls files on disk (covers case where pkg xml was skipped)
-          while IFS= read -r FPATH; do
-            [[ "$FPATH" =~ ^force-app/.*classes/.*\.cls$ ]] || continue
-            [[ "$FPATH" =~ -meta\.xml$ ]] && continue
-            PKG_CLASSES+=("$(basename "$FPATH" .cls)")
-          done < <(find force-app/main/default/classes -maxdepth 1 -name '*.cls' 2>/dev/null | sed 's|\\|/|g')
 
           # Step B: build a map of ALL @isTest classes — from disk AND staged new files
           declare -A ALL_TEST_CLASSES
