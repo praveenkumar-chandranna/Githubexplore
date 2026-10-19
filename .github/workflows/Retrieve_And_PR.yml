@@ -85,7 +85,7 @@ jobs:
         with:
           ref: ${{ github.ref }}
           fetch-depth: 0
-          token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.GH_PAT != '' && secrets.GH_PAT || secrets.GITHUB_TOKEN }}
 
       - name: Ensure manifest/package_retive.xml exists
         shell: bash
@@ -112,10 +112,8 @@ jobs:
 
       # ── Step 4: JWT Auth ─────────────────────────────────────────────────────
       - name: Generate JWT private key file
-        env:
-          JWT_KEY: ${{ secrets.SALESFORCE_JWT_SECRET_KEY }}
         run: |
-          printf '%s' "$JWT_KEY" > server.key
+          echo "${{ secrets.SALESFORCE_JWT_SECRET_KEY }}" > server.key
           chmod 600 server.key
 
       - name: Set org credentials
@@ -137,17 +135,12 @@ jobs:
           USER_HOTFIX: ${{ secrets.SFDX_AUTH_HOTFIX_USERNAME }}
         run: |
           case "$ENVIRONMENT" in
-            DEV)        CID="$KEY_DEV"    ; UNAME="$USER_DEV"    ; LURL="$SF_LOGIN_URL_TEST_VAL" ;;
-            QA)         CID="$KEY_QA"     ; UNAME="$USER_QA"     ; LURL="$SF_LOGIN_URL_TEST_VAL" ;;
-            UAT)        CID="$KEY_UAT"    ; UNAME="$USER_UAT"    ; LURL="$SF_LOGIN_URL_TEST_VAL" ;;
-            PRODUCTION) CID="$KEY_PROD"   ; UNAME="$USER_PROD"   ; LURL="$SF_LOGIN_URL_PROD_VAL" ;;
-            HOTFIX)     CID="$KEY_HOTFIX" ; UNAME="$USER_HOTFIX" ; LURL="$SF_LOGIN_URL_TEST_VAL" ;;
+            DEV)        echo "CLIENT_ID=$KEY_DEV"    >> $GITHUB_OUTPUT; echo "USERNAME=$USER_DEV"    >> $GITHUB_OUTPUT; echo "LOGIN_URL=$SF_LOGIN_URL_TEST_VAL" >> $GITHUB_OUTPUT ;;
+            QA)         echo "CLIENT_ID=$KEY_QA"     >> $GITHUB_OUTPUT; echo "USERNAME=$USER_QA"     >> $GITHUB_OUTPUT; echo "LOGIN_URL=$SF_LOGIN_URL_TEST_VAL" >> $GITHUB_OUTPUT ;;
+            UAT)        echo "CLIENT_ID=$KEY_UAT"    >> $GITHUB_OUTPUT; echo "USERNAME=$USER_UAT"    >> $GITHUB_OUTPUT; echo "LOGIN_URL=$SF_LOGIN_URL_TEST_VAL" >> $GITHUB_OUTPUT ;;
+            PRODUCTION) echo "CLIENT_ID=$KEY_PROD"   >> $GITHUB_OUTPUT; echo "USERNAME=$USER_PROD"   >> $GITHUB_OUTPUT; echo "LOGIN_URL=$SF_LOGIN_URL_PROD_VAL" >> $GITHUB_OUTPUT ;;
+            HOTFIX)     echo "CLIENT_ID=$KEY_HOTFIX" >> $GITHUB_OUTPUT; echo "USERNAME=$USER_HOTFIX" >> $GITHUB_OUTPUT; echo "LOGIN_URL=$SF_LOGIN_URL_TEST_VAL" >> $GITHUB_OUTPUT ;;
           esac
-          echo "::add-mask::$CID"
-          echo "::add-mask::$UNAME"
-          echo "CLIENT_ID=$CID"   >> $GITHUB_OUTPUT
-          echo "USERNAME=$UNAME"  >> $GITHUB_OUTPUT
-          echo "LOGIN_URL=$LURL"  >> $GITHUB_OUTPUT
 
       - name: Clear Prior Salesforce Sessions
         run: sf org logout --all --no-prompt || true
@@ -164,10 +157,6 @@ jobs:
             --username     "$USERNAME" \
             --instance-url "$LOGIN_URL" \
             --set-default
-
-      - name: Cleanup JWT key
-        if: always()
-        run: rm -f server.key
 
       # ── Step 5: Validate retrieval package.xml ───────────────────────────────
       - name: Validate retrieval package.xml exists
@@ -196,13 +185,17 @@ jobs:
             --wait 30
           echo "✅ Retrieval complete"
 
+      - name: Cleanup JWT key
+        if: always()
+        run: rm -f server.key
+
       # ── Step 7: Detect changes ───────────────────────────────────────────────
       - name: Check for changes
         id: check-changes
         shell: bash
         run: |
           git add force-app
-          CHANGED=$(git -c core.quotepath=false diff --cached --name-only --diff-filter=ACMR | grep -c . || true)
+          CHANGED=$(git diff --cached --name-only | wc -l | xargs)
           echo "changed_count=${CHANGED}" >> $GITHUB_OUTPUT
 
           if [[ "$CHANGED" -eq 0 ]]; then
@@ -212,7 +205,7 @@ jobs:
             echo "has_changes=true" >> $GITHUB_OUTPUT
             echo "✅ ${CHANGED} file(s) staged:"
             echo "=========================================="
-            git -c core.quotepath=false diff --cached --name-status --diff-filter=ACMR
+            git diff --cached --name-status
             echo "=========================================="
           fi
 
@@ -224,10 +217,11 @@ jobs:
         env:
           GENERATED_PKG:  ${{ steps.resolve.outputs.GENERATED_PKG }}
           GENERATED_TEST: ${{ steps.resolve.outputs.GENERATED_TEST }}
+          ORG_USERNAME:   ${{ steps.set-org.outputs.USERNAME }}
         run: |
           mkdir -p "$(dirname "$GENERATED_PKG")"
 
-          API_VERSION=$(python3 -c "import json; print(json.load(open('sfdx-project.json'))['sourceApiVersion'])" 2>/dev/null || echo "67.0")
+          API_VERSION=$(grep -oP '(?<=sourceApiVersion": ")[^"]+' sfdx-project.json 2>/dev/null || echo "67.0")
 
           # ── Generate package.xml from staged changed files ────────────────
           echo "📦 Generating package.xml from changed files..."
@@ -414,18 +408,16 @@ jobs:
           #      Account-My Layout.layout-meta.xml → Account-My Layout
           #      Folder/Sub/Report.report-meta.xml → Folder/Sub/Report
           strip_ext() {
-            local f="${1%-meta.xml}"   # remove -meta.xml suffix first
-            f="${f%.*}"                # remove the single remaining extension (e.g. .cls, .layout)
-            echo "$f"
+            echo "$1" | sed 's/-meta\.xml$//' | sed 's/\.[a-zA-Z0-9_-]*$//'
           }
 
           # File names are URL-encoded by the CLI (Force%2Ecom - Free User, %26 = &, %28 = ( ...).
-          # package.xml needs the REAL name, XML-escaped.
+          # Keep them ENCODED in package.xml: that is what the deploy matches against the source files.
+          # Decoding them (Force.com - Free User) makes validation fail with
+          # "An object '...' of type Profile was named in package.xml, but was not found in zipped directory".
+          # Only XML-escape here.
           xml_member() {
             local M="$1"
-            if [[ "$M" == *%* ]]; then
-              M=$(printf '%b' "$(printf '%s' "$M" | sed 's/%/\\x/g')")
-            fi
             M="${M//&/&amp;}"; M="${M//</&lt;}"; M="${M//>/&gt;}"
             printf '%s' "$M"
           }
@@ -493,7 +485,7 @@ jobs:
                 MEMBER="${OBJ_NAME}.$(strip_ext "$BASE")"
               else
                 META_TYPE="CustomObject"
-                MEMBER="$OBJ_NAME"   # OBJ_NAME is already the bare folder name e.g. Account__c
+                MEMBER="$(strip_ext "$OBJ_NAME")"
               fi
             elif [[ "$META_TYPE" == "StaticResource" || "$META_TYPE" == "ContentAsset" ]]; then
               MEMBER="${INNER%%/*}"; MEMBER="${MEMBER%%.*}"      # foo.resource-meta.xml / foo.js / foo/ → foo
@@ -565,21 +557,30 @@ jobs:
           CLASSES_DIR="force-app/main/default/classes"
           declare -A TEST_CLASS_SET
 
-          # Step A: collect ApexClass AND ApexTrigger members directly from TYPE_MEMBERS
-          # (already built from git diff above — no need to re-parse the generated XML)
+          # Step A: collect ApexClass AND ApexTrigger members from the package.xml
           declare -a PKG_CLASSES
           declare -a PKG_TRIGGERS
-          while IFS= read -r CNAME; do
-            [[ -n "$CNAME" && "$CNAME" != "*" ]] && PKG_CLASSES+=("$CNAME")
-          done <<< "${TYPE_MEMBERS[ApexClass]:-}"
-          while IFS= read -r TNAME; do
-            [[ -n "$TNAME" && "$TNAME" != "*" ]] && PKG_TRIGGERS+=("$TNAME")
-          done <<< "${TYPE_MEMBERS[ApexTrigger]:-}"
+          if [[ -f "$GENERATED_PKG" ]]; then
+            while IFS= read -r CNAME; do
+              [[ -n "$CNAME" && "$CNAME" != "*" ]] && PKG_CLASSES+=("$CNAME")
+            done < <(awk '
+              /<types>/         { block=""; in_block=1 }
+              in_block          { block = block "\n" $0 }
+              /<[/]types>/      { in_block=0; if (block ~ "<name>ApexClass<[/]name>") print block }
+            ' "$GENERATED_PKG" | grep -oP "(?<=<members>)[^<]+")
+            while IFS= read -r TNAME; do
+              [[ -n "$TNAME" && "$TNAME" != "*" ]] && PKG_TRIGGERS+=("$TNAME")
+            done < <(awk '
+              /<types>/         { block=""; in_block=1 }
+              in_block          { block = block "\n" $0 }
+              /<[/]types>/      { in_block=0; if (block ~ "<name>ApexTrigger<[/]name>") print block }
+            ' "$GENERATED_PKG" | grep -oP "(?<=<members>)[^<]+")
+          fi
 
           # Step B: build a map of ALL @isTest classes — from disk AND staged new files
           declare -A ALL_TEST_CLASSES
           scan_for_istest() {
-            local CLSFILE="$1" CNAME
+            local CLSFILE="$1"
             [[ "$CLSFILE" =~ -meta\.xml$ ]] && return
             if grep -qiE '^[[:space:]]*@isTest' "$CLSFILE" 2>/dev/null; then
               CNAME=$(basename "$CLSFILE" .cls)
@@ -608,10 +609,9 @@ jobs:
           echo "  📋 @isTest classes found in repo: ${#ALL_TEST_CLASSES[@]}"
 
           # Paths of every test class file (used for one-shot grep per main class)
-          # Include both on-disk and staged-only paths so newly retrieved test classes are covered
           declare -a TEST_PATHS
           for _TC in "${!ALL_TEST_CLASSES[@]}"; do
-            TEST_PATHS+=("${ALL_TEST_CLASSES[$_TC]}")
+            [[ -f "${ALL_TEST_CLASSES[$_TC]}" ]] && TEST_PATHS+=("${ALL_TEST_CLASSES[$_TC]}")
           done
 
           # Deduplicate PKG_CLASSES
@@ -687,19 +687,14 @@ jobs:
             done
 
             #   (b) fallback – test classes in the repo that reference the main class
-            #       For staged-only files (not yet on disk), read via git show
-            if [[ $FOUND -eq 0 ]]; then
-              for _TP in "${!ALL_TEST_CLASSES[@]}"; do
-                _TPPATH="${ALL_TEST_CLASSES[$_TP]}"
-                if [[ -f "$_TPPATH" ]]; then
-                  grep -qiwF -- "$MAIN" "$_TPPATH" 2>/dev/null || continue
-                else
-                  git show ":${_TPPATH}" 2>/dev/null | grep -qiwF -- "$MAIN" || continue
-                fi
-                TEST_CLASS_SET["$_TP"]=1
+            if [[ $FOUND -eq 0 && ${#TEST_PATHS[@]} -gt 0 ]]; then
+              while IFS= read -r HIT; do
+                [[ -z "$HIT" ]] && continue
+                TC=$(basename "$HIT" .cls)
+                TEST_CLASS_SET["$TC"]=1
                 FOUND=1
-                echo "  ✅ $MAIN → $_TP (repo, references class)"
-              done
+                echo "  ✅ $MAIN → $TC (repo, references class)"
+              done < <(grep -liwF -- "$MAIN" "${TEST_PATHS[@]}" 2>/dev/null || true)
             fi
 
             [[ $FOUND -eq 0 ]] && echo "  ⚠️  No test class found for: $MAIN"
@@ -725,11 +720,10 @@ jobs:
             fi
 
             # Extract SObject name: "trigger FooTrigger on Account (before insert)" → Account
-            SOBJECT=$(echo "$TRIGGER_CONTENT" | grep -oi 'trigger[[:space:]][^(]*[[:space:]]on[[:space:]]*[A-Za-z][A-Za-z0-9_]*' \
-              | grep -oi '[A-Za-z][A-Za-z0-9_]*$' | head -1 || true)
+            SOBJECT=$(echo "$TRIGGER_CONTENT" | grep -oiP '\btrigger\b[^(]+\bon\b\s+\K[A-Za-z][A-Za-z0-9_]+' | head -1 || true)
 
             # Extract all handler/class references from trigger body: ClassName.method() → ClassName
-            HANDLER_CLASSES=$(echo "$TRIGGER_CONTENT" | grep -o '[A-Z][a-zA-Z0-9_]*\.' | sed 's/\.$//' | sort -u || true)
+            HANDLER_CLASSES=$(echo "$TRIGGER_CONTENT" | grep -oP '\b[A-Z][a-zA-Z0-9_]+(?=\s*\.)' | sort -u || true)
 
             for TC in "${!ALL_TEST_CLASSES[@]}"; do
               TCPATH="${ALL_TEST_CLASSES[$TC]}"
@@ -799,7 +793,7 @@ jobs:
             exit 1
           fi
           mkdir -p ~/.ssh
-          printf '%s' "$SSH_SIGNING_KEY" | sed 's/\\n/\n/g' > ~/.ssh/signing_key
+          echo "$SSH_SIGNING_KEY" | sed 's/\\n/\n/g' > ~/.ssh/signing_key
           chmod 600 ~/.ssh/signing_key
           ssh-keygen -y -f ~/.ssh/signing_key > ~/.ssh/signing_key.pub
           chmod 644 ~/.ssh/signing_key.pub
@@ -832,7 +826,7 @@ jobs:
           TRIGGER="scheduled"
           [[ "$EVENT_NAME" == "workflow_dispatch" ]] && TRIGGER="manual by ${ACTOR}"
 
-          git commit -S -m "retrieve(${ENVIRONMENT}): org sync ${RETRIEVE_DATE} [${TRIGGER}]"
+          git commit -S -m "SSB-4: retrieve(${ENVIRONMENT}): org sync ${RETRIEVE_DATE} [${TRIGGER}]"
           git push origin "$FEATURE_BRANCH"
 
           echo "✅ SSH-signed commit pushed: $FEATURE_BRANCH"
@@ -894,8 +888,8 @@ jobs:
           printf '| **Workflow Run** | [%s](%s) |\n\n' "$RUN_ID" "$RUN_URL" >> "$PR_BODY_FILE"
           echo '### Review Checklist' >> "$PR_BODY_FILE"
           echo 'Verify retrieved metadata matches expected org changes' >> "$PR_BODY_FILE"
-          echo 'Review generated package.xml in `manifest/retrieve/`' >> "$PR_BODY_FILE"
-          echo 'Review generated TestClass.txt in `manifest/retrieve/`' >> "$PR_BODY_FILE"
+          echo 'Review generated package.xml in `manifest/retrive/`' >> "$PR_BODY_FILE"
+          echo 'Review generated TestClass.txt in `manifest/retrive/`' >> "$PR_BODY_FILE"
           echo 'Confirm no unintended config or sensitive data was pulled' >> "$PR_BODY_FILE"
           echo "Approve and merge to keep \`${TARGET_BRANCH}\` in sync with \`${ENVIRONMENT}\` org" >> "$PR_BODY_FILE"
 
