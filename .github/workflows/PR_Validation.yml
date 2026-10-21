@@ -311,16 +311,29 @@ jobs:
           
           read -ra tests_array <<< "$TEST_CLASSES"
 
-          CMD=(sf project deploy validate --target-org "$SF_USERNAME" --manifest "$MANIFEST_PATH" --wait 60 --ignore-warnings --test-level "$TEST_LEVEL")
+          # Only branches created by the Lodha Code Retrieval pipeline qualify: retrieve/<ENV>Code_<ddMMyyyy>_<HHmm>
+          # e.g. retrieve/QACode_19102026_2315. Any other name (feature branches, hand-made retrieve/xyz) gets full tests + coverage gate.
+          RETRIEVE_BRANCH_REGEX='^retrieve/(DEV|QA|UAT|PRODUCTION)Code_[0-9]{8}_[0-9]{4}$'
+          if [[ "$SOURCE_BRANCH" =~ $RETRIEVE_BRANCH_REGEX ]]; then
+            # Retrieve / org-sync PRs only record code that is ALREADY live in the org, so no tests and no coverage gate.
+            # 'validate' does not accept NoTestRun, so use a dry-run deploy (components are still fully checked).
+            echo "ℹ️  Retrieve/sync PR ($SOURCE_BRANCH): dry-run deploy with NoTestRun (no Apex tests, no coverage gate)"
+            # No tests run, so no coverage file is produced. The Apex Coverage Gate step still looks in this folder and crashes
+            # (set -e) if it does not exist; an empty folder makes it skip itself cleanly.
+            mkdir -p coverage-results
+            CMD=(sf project deploy start --dry-run --target-org "$SF_USERNAME" --manifest "$MANIFEST_PATH" --wait 60 --ignore-warnings --test-level NoTestRun --verbose)
+          else
+            CMD=(sf project deploy validate --target-org "$SF_USERNAME" --manifest "$MANIFEST_PATH" --wait 60 --ignore-warnings --test-level "$TEST_LEVEL")
 
-          if [[ "$TEST_LEVEL" == "RunSpecifiedTests" && ${#tests_array[@]} -gt 0 ]]; then
-            CMD+=(--tests)
-            for test in "${tests_array[@]}"; do
-              CMD+=("$test")
-            done
+            if [[ "$TEST_LEVEL" == "RunSpecifiedTests" && ${#tests_array[@]} -gt 0 ]]; then
+              CMD+=(--tests)
+              for test in "${tests_array[@]}"; do
+                CMD+=("$test")
+              done
+            fi
+
+            CMD+=(--verbose --coverage-formatters json --results-dir coverage-results)
           fi
-
-          CMD+=(--verbose --coverage-formatters json --results-dir coverage-results)
 
           echo "Executing command:"
           echo "${CMD[@]}"

@@ -1,16 +1,22 @@
 name: Apex Coverage Gate
 description: >
-  Enforces 75% minimum Apex test coverage (Lodha standard).
-  Hard-fails the pipeline, posts per-class breakdown as a Jira comment,
-  and writes a coverage trending summary to GitHub Actions.
+  Enforces a minimum Apex test coverage PER CLASS (every class and trigger in the
+  deployment must individually reach the minimum). The minimum is an input, so it can
+  be raised from 75 to 80 or 85 without touching this file. Hard-fails the pipeline,
+  lists the failing classes, writes a summary to GitHub Actions and, on failure,
+  posts the breakdown as a Jira comment.
+  The gate is NOT enforced when the test level is NoTestRun (no tests ran, so there is
+  no coverage to judge) and, in report-only mode, for retrieval branches (retrieve/...).
 
 inputs:
   coverage-results-dir:
-    description: Path to the coverage-results directory from sf deploy
+    description: Path to the coverage-results directory written by sf project deploy validate
     required: false
     default: coverage-results
   minimum-coverage:
-    description: Minimum coverage percentage (Lodha standard = 75)
+    description: >
+      Minimum coverage percentage that EACH class must reach (whole number 1-100).
+      Default 75 (Lodha standard). Pass 80 or 85 to raise the bar.
     required: false
     default: '75'
   environment:
@@ -19,8 +25,21 @@ inputs:
   feature-branch:
     description: Feature branch / package name for context
     required: true
+  test-level:
+    description: >
+      The Apex test level used for the deployment (NoTestRun, RunSpecifiedTests, RunLocalTests, ...).
+      When this is NoTestRun the gate is not enforced. Leave blank if unknown (the gate is then enforced).
+    required: false
+    default: ''
+  non-blocking-branch-prefixes:
+    description: >
+      Comma-separated branch prefixes for which coverage is reported but never blocks
+      (case-insensitive). Default retrieve/ covers the branches created by the retrieval pipeline.
+      Set to an empty string to enforce on every branch.
+    required: false
+    default: 'retrieve/'
   jira-base-url:
-    description: Jira base URL (e.g. https://yourorg.atlassian.net)
+    description: Jira base URL (for example https://yourorg.atlassian.net)
     required: false
     default: ''
   jira-user-email:
@@ -32,7 +51,7 @@ inputs:
     required: false
     default: ''
   jira-ticket:
-    description: Jira ticket key to post coverage comment (e.g. LODHA-123). Auto-extracted from branch if blank.
+    description: Jira ticket key to comment on (for example LODHA-123). Auto-extracted from the branch name if blank.
     required: false
     default: ''
   run-id:
@@ -46,18 +65,30 @@ inputs:
 
 outputs:
   coverage-pct:
-    description: Overall coverage percentage
+    description: Overall coverage percentage (informational - the gate is per class)
     value: ${{ steps.gate.outputs.coverage_pct }}
   passed:
-    description: 'true if coverage >= minimum, false otherwise'
+    description: 'true when every class meets the minimum, false when one or more do not, error when the coverage file could not be read'
     value: ${{ steps.gate.outputs.passed }}
+  failed-count:
+    description: Number of classes below the minimum
+    value: ${{ steps.gate.outputs.failed_count }}
+  failed-classes:
+    description: Comma-separated names of the classes below the minimum
+    value: ${{ steps.gate.outputs.failed_classes }}
+  enforced:
+    description: 'true when the gate could block the run, false when it was skipped or report-only'
+    value: ${{ steps.gate.outputs.enforced }}
+  skip-reason:
+    description: Why the gate was not enforced (empty when it was)
+    value: ${{ steps.gate.outputs.skip_reason }}
 
 runs:
   using: composite
   steps:
 
-    # ── Step 1: Parse coverage JSON, enforce gate, build report ───────────────
-    - name: Evaluate coverage and enforce 75% gate
+    # ── Step 1: Parse coverage JSON, enforce the PER-CLASS gate, build report ──
+    - name: Evaluate per-class coverage (minimum ${{ inputs.minimum-coverage }}% each)
       id: gate
       shell: bash
       env:
@@ -65,177 +96,278 @@ runs:
         MIN_COVERAGE:     ${{ inputs.minimum-coverage }}
         ENVIRONMENT:      ${{ inputs.environment }}
         FEATURE_BRANCH:   ${{ inputs.feature-branch }}
+        TEST_LEVEL:       ${{ inputs.test-level }}
+        NON_BLOCKING_PREFIXES: ${{ inputs.non-blocking-branch-prefixes }}
         RUN_ID:           ${{ inputs.run-id }}
         REPO:             ${{ inputs.repo }}
       run: |
+        # ── Case 1: NoTestRun → no Apex tests ran, so there is no coverage to judge ──
+        TL="${TEST_LEVEL//[[:space:]]/}"
+        if [[ "${TL,,}" == "notestrun" ]]; then
+          echo "ℹ️  Test level is NoTestRun — no Apex tests were run, so coverage is not enforced."
+          {
+            echo "coverage_pct=not-run"
+            echo "passed=true"
+            echo "failed_count=0"
+            echo "failed_classes="
+            echo "enforced=false"
+            echo "skip_reason=Test level is NoTestRun"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "## 📊 Apex Test Coverage Report"
+            echo ""
+            echo "ℹ️ **Coverage gate not enforced** — test level is \`NoTestRun\` (environment: \`${ENVIRONMENT}\`)."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+        fi
+
+        # ── Case 2: retrieval branches (retrieve/...) → report coverage, never block ──
+        ENFORCE=true
+        REASON=""
+        IFS=',' read -ra _PREFIXES <<< "$NON_BLOCKING_PREFIXES"
+        for _P in "${_PREFIXES[@]}"; do
+          _P="${_P//[[:space:]]/}"
+          [[ -z "$_P" ]] && continue
+          if [[ "${FEATURE_BRANCH,,}" == "${_P,,}"* ]]; then
+            ENFORCE=false
+            REASON="Branch '${FEATURE_BRANCH}' matches non-blocking prefix '${_P}'"
+            break
+          fi
+        done
+        export ENFORCE REASON
+        [[ "$ENFORCE" == "false" ]] && echo "ℹ️  ${REASON} — coverage will be REPORTED but will not block."
+
+        # ── Validate the threshold ───────────────────────────────────────────
+        MIN_COVERAGE="${MIN_COVERAGE//[[:space:]]/}"
+        if ! [[ "$MIN_COVERAGE" =~ ^[0-9]+$ ]] || (( 10#$MIN_COVERAGE < 1 || 10#$MIN_COVERAGE > 100 )); then
+          echo "::error title=Coverage gate::minimum-coverage must be a whole number between 1 and 100 (got '${MIN_COVERAGE}')"
+          echo "passed=error" >> "$GITHUB_OUTPUT"
+          echo "enforced=$ENFORCE" >> "$GITHUB_OUTPUT"
+          exit 1
+        fi
+        MIN_COVERAGE=$((10#$MIN_COVERAGE))
+        export MIN_COVERAGE
+
+        # ── Locate the coverage JSON (prefer coverage*.json; never abort if the folder is missing)
         echo "🔍 Locating coverage file in: $COVERAGE_DIR"
-        COVERAGE_FILE=$(find "$COVERAGE_DIR" -name "*.json" 2>/dev/null | head -1)
-        [[ -z "$COVERAGE_FILE" ]] && COVERAGE_FILE=$(find . -name "coverage*.json" 2>/dev/null | head -1)
+        COVERAGE_FILE=$(find "$COVERAGE_DIR" -name "coverage*.json" 2>/dev/null | sort | head -1 || true)
+        [[ -z "$COVERAGE_FILE" ]] && COVERAGE_FILE=$(find "$COVERAGE_DIR" -name "*.json" 2>/dev/null | sort | head -1 || true)
+        [[ -z "$COVERAGE_FILE" ]] && COVERAGE_FILE=$(find . -name "coverage*.json" -not -path "./node_modules/*" 2>/dev/null | sort | head -1 || true)
 
         if [[ -z "$COVERAGE_FILE" ]]; then
-          echo "⚠️  No coverage JSON found — skipping gate"
-          echo "coverage_pct=unknown" >> $GITHUB_OUTPUT
-          echo "passed=true"         >> $GITHUB_OUTPUT
-          echo "class_table="        >> $GITHUB_OUTPUT
+          echo "⚠️  No coverage JSON found — nothing to check, gate skipped"
+          {
+            echo "coverage_pct=unknown"
+            echo "passed=true"
+            echo "failed_count=0"
+            echo "failed_classes="
+            echo "enforced=$ENFORCE"
+            echo "skip_reason=$REASON"
+          } >> "$GITHUB_OUTPUT"
           exit 0
         fi
-
         echo "📄 Coverage file: $COVERAGE_FILE"
+        export COVERAGE_FILE
 
-        # ── Debug: show structure ─────────────────────────────────────────────
-        echo "🔎 Coverage file preview (first 500 chars):"
-        head -c 500 "$COVERAGE_FILE"
-        echo ""
+        # ── Evaluate every class against the minimum ────────────────────────
+        python3 - <<'PY'
+        import json, os, sys, uuid
 
-        KEY_COUNT=$(jq 'keys | length' "$COVERAGE_FILE" 2>/dev/null || echo 0)
-        echo "🔎 Coverage entries found: $KEY_COUNT"
-        if [[ "$KEY_COUNT" -eq 0 ]]; then
-          echo "⚠️  Coverage JSON is empty — no Apex classes in this deployment."
-          echo "   Coverage gate skipped."
-          echo "coverage_pct=skipped" >> $GITHUB_OUTPUT
-          echo "passed=true"          >> $GITHUB_OUTPUT
-          echo "class_table="         >> $GITHUB_OUTPUT
-          exit 0
-        fi
+        path     = os.environ["COVERAGE_FILE"]
+        min_cov  = int(os.environ["MIN_COVERAGE"])
+        env_name = os.environ.get("ENVIRONMENT", "")
+        branch   = os.environ.get("FEATURE_BRANCH", "")
+        run_id   = os.environ.get("RUN_ID", "")
+        repo     = os.environ.get("REPO", "")
+        actor    = os.environ.get("GITHUB_ACTOR", "")
+        out_file = os.environ.get("GITHUB_OUTPUT")
+        sum_file = os.environ.get("GITHUB_STEP_SUMMARY")
+        enforce  = os.environ.get("ENFORCE", "true") == "true"
+        reason   = os.environ.get("REASON", "")
 
-        # ── Detect format: Istanbul (.s) vs Salesforce native (.lines) ─────────
-        HAS_S_KEY=$(jq '[to_entries[] | select(.value.s != null)] | length' "$COVERAGE_FILE" 2>/dev/null || echo 0)
-        HAS_LINES_KEY=$(jq '[to_entries[] | select(.value.lines != null)] | length' "$COVERAGE_FILE" 2>/dev/null || echo 0)
-        echo "🔎 Istanbul(.s) entries: $HAS_S_KEY  |  Salesforce(.lines) entries: $HAS_LINES_KEY"
 
-        # ── Per-class breakdown ───────────────────────────────────────────────
-        CLASS_TABLE=""
-        TOTAL_LINES=0
-        COVERED_LINES=0
+        def set_output(name, value):
+            if not out_file:
+                return
+            value = str(value)
+            with open(out_file, "a", encoding="utf-8") as fh:
+                if "\n" in value:
+                    delim = "EOF_" + uuid.uuid4().hex
+                    fh.write(name + "<<" + delim + "\n" + value + "\n" + delim + "\n")
+                else:
+                    fh.write(name + "=" + value + "\n")
 
-        if [[ "$HAS_S_KEY" -gt 0 ]]; then
-          # Istanbul format: { "path/ClassName": { "s": { "0": 1, "1": 0 } } }
-          JQ_FILTER='
-            to_entries[] |
-            .key as $class |
-            (.value.s // {} | to_entries) as $stmts |
-            {
-              class:   $class,
-              total:   ($stmts | length),
-              covered: ([$stmts[] | select(.value > 0)] | length),
-              pct:     (if ($stmts | length) > 0
-                        then ([$stmts[] | select(.value > 0)] | length) * 100 / ($stmts | length) | floor
-                        else 0 end)
-            } | select(.total > 0)
-          '
-        elif [[ "$HAS_LINES_KEY" -gt 0 ]]; then
-          # Salesforce native format: { "ClassName": { "lines": { "covered": 10, "total": 12 } } }
-          JQ_FILTER='
-            to_entries[] |
-            .key as $class |
-            (.value.lines) as $l |
-            {
-              class:   $class,
-              total:   ($l.total // 0),
-              covered: ($l.covered // 0),
-              pct:     (if ($l.total // 0) > 0
-                        then ($l.covered // 0) * 100 / $l.total | floor
-                        else 0 end)
-            } | select(.total > 0)
-          '
-        else
-          echo "⚠️  Unrecognised coverage JSON format — dumping keys for diagnosis:"
-          jq 'to_entries[0]' "$COVERAGE_FILE" 2>/dev/null || true
-          echo "coverage_pct=0" >> $GITHUB_OUTPUT
-          echo "passed=false"   >> $GITHUB_OUTPUT
-          echo "class_table="   >> $GITHUB_OUTPUT
-          exit 1
-        fi
 
-        while IFS= read -r ROW; do
-          CLASS=$(echo "$ROW" | jq -r '.class' | sed 's|^no-map/||' | sed 's|.*/||')
-          TOTAL=$(echo "$ROW" | jq -r '.total')
-          COVERED=$(echo "$ROW" | jq -r '.covered')
-          PCT=$(echo "$ROW" | jq -r '.pct')
+        set_output("enforced", "true" if enforce else "false")
+        set_output("skip_reason", reason)
 
-          TOTAL_LINES=$((TOTAL_LINES + TOTAL))
-          COVERED_LINES=$((COVERED_LINES + COVERED))
 
-          if   [[ "$PCT" -ge 90 ]]; then BADGE="🟢"
-          elif [[ "$PCT" -ge 75 ]]; then BADGE="🟡"
-          else                           BADGE="🔴"
-          fi
+        def class_name(key):
+            n = key.replace("\\", "/")
+            if n.startswith("no-map/"):
+                n = n[len("no-map/"):]
+            n = n.rsplit("/", 1)[-1]
+            for ext in (".cls", ".trigger"):
+                if n.endswith(ext):
+                    n = n[: -len(ext)]
+            return n
 
-          CLASS_TABLE+="| ${BADGE} ${CLASS} | ${COVERED}/${TOTAL} | ${PCT}% |\n"
-        done < <(jq -c "$JQ_FILTER" "$COVERAGE_FILE" 2>/dev/null)
 
-        # ── Overall percentage ────────────────────────────────────────────────
-        if [[ $TOTAL_LINES -gt 0 ]]; then
-          OVERALL=$(( COVERED_LINES * 100 / TOTAL_LINES ))
-        else
-          OVERALL=0
-        fi
+        def covered_total(entry):
+            """(covered, total) for a coverage entry, or None if the format is not recognised."""
+            if not isinstance(entry, dict):
+                return None
+            s = entry.get("s")                       # Istanbul: {"s": {"0": 1, "1": 0, ...}}
+            if isinstance(s, dict):
+                vals = [v for v in s.values() if isinstance(v, (int, float))]
+                return sum(1 for v in vals if v > 0), len(vals)
+            lines = entry.get("lines")               # Salesforce native: {"lines": {"covered": 10, "total": 12}}
+            if isinstance(lines, dict):
+                if "covered" in lines and "total" in lines:
+                    return int(lines["covered"] or 0), int(lines["total"] or 0)
+                vals = [v for v in lines.values() if isinstance(v, (int, float))]
+                if vals:
+                    return sum(1 for v in vals if v > 0), len(vals)
+            return None
 
-        RUN_URL="https://github.com/${REPO}/actions/runs/${RUN_ID}"
-        REPORT_DATE=$(TZ='Asia/Kolkata' date +'%d-%m-%Y %H:%M IST')
 
-        # ── GitHub Actions Step Summary (trending dashboard) ──────────────────
-        {
-          echo "## 📊 Apex Test Coverage Report"
-          echo ""
-          echo "| Field | Value |"
-          echo "|---|---|"
-          echo "| **Environment** | \`${ENVIRONMENT}\` |"
-          echo "| **Package** | \`${FEATURE_BRANCH}\` |"
-          echo "| **Deployed by** | ${GITHUB_ACTOR} |"
-          echo "| **Overall Coverage** | **${OVERALL}%** |"
-          echo "| **Lines Covered** | ${COVERED_LINES} / ${TOTAL_LINES} |"
-          echo "| **Minimum Required** | ${MIN_COVERAGE}% (Lodha standard) |"
-          echo "| **Reported at** | ${REPORT_DATE} |"
-          echo "| **Workflow Run** | [${RUN_ID}](${RUN_URL}) |"
-          echo ""
-          if [[ "$OVERALL" -ge "$MIN_COVERAGE" ]]; then
-            echo "### ✅ Coverage gate PASSED — ${OVERALL}% ≥ ${MIN_COVERAGE}%"
-          else
-            echo "### ❌ Coverage gate FAILED — ${OVERALL}% < ${MIN_COVERAGE}%"
-          fi
-          echo ""
-          echo "### Per-Class Breakdown"
-          echo ""
-          echo "| Class | Lines Covered | Coverage |"
-          echo "|---|---|---|"
-          printf '%b' "$CLASS_TABLE"
-          echo ""
-          echo "> 🟢 ≥ 90%  🟡 75–89%  🔴 < 75%"
-        } >> "$GITHUB_STEP_SUMMARY"
+        def fail_format(msg):
+            set_output("coverage_pct", "unknown")
+            set_output("failed_count", "0")
+            set_output("failed_classes", "")
+            if not enforce:
+                print("::warning title=Coverage gate (report only)::" + msg)
+                set_output("passed", "true")
+                sys.exit(0)
+            print("::error title=Coverage gate::" + msg)
+            set_output("passed", "error")
+            sys.exit(1)
 
-        # ── Console output ────────────────────────────────────────────────────
-        echo ""
-        echo "=========================================="
-        echo "APEX COVERAGE GATE — ${ENVIRONMENT}"
-        echo "=========================================="
-        echo "  Overall   : ${OVERALL}%"
-        echo "  Covered   : ${COVERED_LINES} / ${TOTAL_LINES} lines"
-        echo "  Minimum   : ${MIN_COVERAGE}%"
-        echo "=========================================="
-        printf '%b' "$CLASS_TABLE" | sed 's/|//g' | awk '{print "  "$0}'
-        echo "=========================================="
 
-        # ── Outputs ──────────────────────────────────────────────────────────
-        echo "coverage_pct=${OVERALL}"   >> $GITHUB_OUTPUT
-        echo "class_table<<EOF"          >> $GITHUB_OUTPUT
-        printf '%b' "$CLASS_TABLE"       >> $GITHUB_OUTPUT
-        echo "EOF"                       >> $GITHUB_OUTPUT
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except Exception as exc:
+            fail_format("Cannot read coverage file " + path + ": " + str(exc))
 
-        if [[ "$OVERALL" -lt "$MIN_COVERAGE" ]]; then
-          echo "passed=false" >> $GITHUB_OUTPUT
-          echo ""
-          echo "❌ HARD GATE: Coverage ${OVERALL}% is below Lodha minimum of ${MIN_COVERAGE}%"
-          echo "   Pipeline will fail fast."
-          exit 1
-        else
-          echo "passed=true" >> $GITHUB_OUTPUT
-          echo "✅ Coverage gate passed: ${OVERALL}% ≥ ${MIN_COVERAGE}%"
-        fi
+        if not isinstance(data, dict):
+            fail_format("Unrecognised coverage JSON (top level is not an object): " + path)
 
-    # ── Step 2: Post per-class breakdown as Jira comment ─────────────────────
+        rows, unrecognised = [], 0
+        for key, entry in data.items():
+            ct = covered_total(entry)
+            if ct is None:
+                unrecognised += 1
+                continue
+            covered, total = ct
+            if total <= 0:
+                continue
+            rows.append({"name": class_name(key), "covered": covered, "total": total,
+                         "pct": covered * 100 // total})          # floor: 74.9% counts as 74%
+
+        if not rows:
+            if unrecognised:
+                first = next(iter(data))
+                keys = ", ".join(sorted(data[first].keys())) if isinstance(data[first], dict) else type(data[first]).__name__
+                fail_format("Unrecognised coverage JSON format. First entry '" + str(first) + "' has keys: " + keys)
+            print("⚠️  Coverage file has no Apex classes with executable lines — gate skipped")
+            set_output("coverage_pct", "skipped")
+            set_output("passed", "true")
+            set_output("failed_count", "0")
+            set_output("failed_classes", "")
+            sys.exit(0)
+
+        rows.sort(key=lambda r: (r["pct"], r["name"]))            # weakest first
+        failed = [r for r in rows if r["pct"] < min_cov]
+        tot_cov = sum(r["covered"] for r in rows)
+        tot_all = sum(r["total"] for r in rows)
+        overall = tot_cov * 100 // tot_all
+
+        # ── Console report ──────────────────────────────────────────────────
+        print("")
+        print("=" * 62)
+        print("APEX COVERAGE GATE — " + env_name + "  (each class must reach " + str(min_cov) + "%)"
+              + ("" if enforce else "  [REPORT ONLY]"))
+        print("=" * 62)
+        for r in rows:
+            icon = "❌" if r["pct"] < min_cov else "✅"
+            print("  %s %-42s %5d/%-5d %3d%%" % (icon, r["name"], r["covered"], r["total"], r["pct"]))
+        print("=" * 62)
+        print("  Classes checked : %d" % len(rows))
+        print("  Below %d%%       : %d" % (min_cov, len(failed)))
+        print("  Overall (info)  : %d%%  (%d/%d lines)" % (overall, tot_cov, tot_all))
+        print("=" * 62)
+
+        # ── GitHub step summary ─────────────────────────────────────────────
+        run_url = "https://github.com/" + repo + "/actions/runs/" + run_id
+        md_rows = "\n".join(
+            "| %s %s | %d/%d | %d%% | %s |" % ("❌" if r["pct"] < min_cov else "✅", r["name"], r["covered"], r["total"], r["pct"],
+                                                "Below " + str(min_cov) + "%" if r["pct"] < min_cov else "OK")
+            for r in rows)
+        summary = [
+            "## 📊 Apex Test Coverage Report",
+            "",
+            "| Field | Value |",
+            "|---|---|",
+            "| **Environment** | `" + env_name + "` |",
+            "| **Package** | `" + branch + "` |",
+            "| **Deployed by** | " + actor + " |",
+            "| **Minimum per class** | **" + str(min_cov) + "%** (repo variable `APEX_COVERAGE_MIN`) |",
+            "| **Mode** | " + ("Enforced" if enforce else "ℹ️ Report only — " + reason) + " |",
+            "| **Classes checked** | " + str(len(rows)) + " |",
+            "| **Classes below minimum** | **" + str(len(failed)) + "** |",
+            "| **Overall (informational)** | " + str(overall) + "% (" + str(tot_cov) + "/" + str(tot_all) + " lines) |",
+            "| **Workflow Run** | [" + run_id + "](" + run_url + ") |",
+            "",
+        ]
+        if failed and not enforce:
+            summary.append("### ℹ️ Coverage NOT enforced — %d class(es) are below %d%%" % (len(failed), min_cov))
+            summary.append("")
+            summary.append("Failing: " + ", ".join("`%s` (%d%%)" % (r["name"], r["pct"]) for r in failed))
+        elif failed:
+            summary.append("### ❌ Coverage gate FAILED — %d class(es) below %d%%" % (len(failed), min_cov))
+            summary.append("")
+            summary.append("Failing: " + ", ".join("`%s` (%d%%)" % (r["name"], r["pct"]) for r in failed))
+        else:
+            summary.append("### ✅ Coverage gate PASSED — every class is at or above %d%%" % min_cov)
+        summary += ["", "### Per-Class Breakdown (weakest first)", "",
+                    "| Class | Lines Covered | Coverage | Status |", "|---|---|---|---|", md_rows, ""]
+        if sum_file:
+            with open(sum_file, "a", encoding="utf-8") as fh:
+                fh.write("\n".join(summary) + "\n")
+
+        # ── Outputs ─────────────────────────────────────────────────────────
+        jira_src = failed + [r for r in rows if r["pct"] >= min_cov] if len(rows) <= 150 else failed
+        jira_rows = "\n".join(
+            "|%s|%d/%d|%d%%|%s|" % (r["name"], r["covered"], r["total"], r["pct"], "FAIL" if r["pct"] < min_cov else "PASS")
+            for r in jira_src)
+        set_output("coverage_pct", overall)
+        set_output("failed_count", len(failed))
+        set_output("failed_classes", ",".join(r["name"] for r in failed))
+        set_output("class_table", md_rows)
+        set_output("jira_table", jira_rows)
+        set_output("passed", "false" if (failed and enforce) else "true")
+
+        if failed and not enforce:
+            print("::warning title=Apex coverage (report only)::%d class(es) below %d%% — not blocking: %s"
+                  % (len(failed), min_cov, ", ".join("%s (%d%%)" % (r["name"], r["pct"]) for r in failed)))
+            print("")
+            print("ℹ️  REPORT ONLY: %d class(es) are below %d%% but the gate is not enforced (%s)." % (len(failed), min_cov, reason))
+            sys.exit(0)
+        if failed:
+            print("::error title=Apex coverage gate::%d class(es) below %d%%: %s"
+                  % (len(failed), min_cov, ", ".join("%s (%d%%)" % (r["name"], r["pct"]) for r in failed)))
+            print("")
+            print("❌ HARD GATE: every class must reach %d%% — %d class(es) are below it." % (min_cov, len(failed)))
+            sys.exit(1)
+        print("✅ Coverage gate passed: all %d classes are at or above %d%%" % (len(rows), min_cov))
+        PY
+
+    # ── Step 2: Post the failing-class breakdown to Jira ─────────────────────
+    # always() is required: the gate step exits 1 on failure, and without a status
+    # function GitHub adds an implicit success() that would skip this step.
     - name: Post coverage breakdown to Jira
-      if: inputs.jira-base-url != '' && inputs.jira-api-token != '' && steps.gate.outputs.passed == 'false'
+      if: always() && inputs.jira-base-url != '' && inputs.jira-api-token != '' && steps.gate.outputs.passed == 'false'
       shell: bash
       env:
         JIRA_BASE_URL:   ${{ inputs.jira-base-url }}
@@ -245,17 +377,18 @@ runs:
         FEATURE_BRANCH:  ${{ inputs.feature-branch }}
         ENVIRONMENT:     ${{ inputs.environment }}
         COVERAGE_PCT:    ${{ steps.gate.outputs.coverage_pct }}
-        CLASS_TABLE:     ${{ steps.gate.outputs.class_table }}
+        FAILED_COUNT:    ${{ steps.gate.outputs.failed_count }}
+        FAILED_CLASSES:  ${{ steps.gate.outputs.failed_classes }}
+        JIRA_TABLE:      ${{ steps.gate.outputs.jira_table }}
         MIN_COVERAGE:    ${{ inputs.minimum-coverage }}
         RUN_ID:          ${{ inputs.run-id }}
         REPO:            ${{ inputs.repo }}
       run: |
-        # Auto-extract ticket from branch name if not provided
+        # Auto-extract the ticket from the branch name if not provided
         TICKET="$JIRA_TICKET"
         if [[ -z "$TICKET" ]]; then
-          TICKET=$(echo "$FEATURE_BRANCH" | grep -oP '[A-Z]+-\d+' | head -1 || echo "")
+          TICKET=$(echo "$FEATURE_BRANCH" | grep -oP '[A-Z]+-\d+' | head -1 || true)
         fi
-
         if [[ -z "$TICKET" ]]; then
           echo "⚠️  No Jira ticket found — skipping Jira comment"
           exit 0
@@ -264,54 +397,34 @@ runs:
         RUN_URL="https://github.com/${REPO}/actions/runs/${RUN_ID}"
         REPORT_DATE=$(TZ='Asia/Kolkata' date +'%d-%m-%Y %H:%M IST')
 
-        if [[ "$COVERAGE_PCT" -ge "$MIN_COVERAGE" ]]; then
-          STATUS_ICON="✅"
-          STATUS_TEXT="PASSED"
-        else
-          STATUS_ICON="❌"
-          STATUS_TEXT="FAILED"
-        fi
-
-        # Build Jira comment using printf to avoid YAML indentation issues
-        COMMENT_BODY=$(printf '%s' \
-          "*📊 Apex Coverage Report — ${ENVIRONMENT}* ${STATUS_ICON} ${STATUS_TEXT}" $'\n' \
-          $'\n' \
-          "|| Field || Value ||" $'\n' \
-          "| Environment | ${ENVIRONMENT} |" $'\n' \
-          "| Package | ${FEATURE_BRANCH} |" $'\n' \
-          "| Overall Coverage | *${COVERAGE_PCT}%* |" $'\n' \
-          "| Minimum Required | ${MIN_COVERAGE}% (Lodha standard) |" $'\n' \
-          "| Gate Status | ${STATUS_ICON} ${STATUS_TEXT} |" $'\n' \
-          "| Reported at | ${REPORT_DATE} |" $'\n' \
-          "| Workflow Run | [${RUN_ID}|${RUN_URL}] |" $'\n' \
-          $'\n' \
-          "*Per-Class Breakdown*" $'\n' \
-          $'\n' \
-          "|| Class || Lines Covered || Coverage ||" \
-        )
-
-        # Append per-class rows using a temp file to avoid YAML indentation issues
         BODY_FILE=$(mktemp)
-        printf '%s' "$COMMENT_BODY" > "$BODY_FILE"
+        {
+          printf '*📊 Apex Coverage Gate — %s* ❌ FAILED\n\n' "$ENVIRONMENT"
+          printf '|| Field || Value ||\n'
+          printf '| Environment | %s |\n' "$ENVIRONMENT"
+          printf '| Package | %s |\n' "$FEATURE_BRANCH"
+          printf '| Minimum per class | *%s%%* |\n' "$MIN_COVERAGE"
+          printf '| Classes below minimum | *%s* |\n' "$FAILED_COUNT"
+          printf '| Failing classes | %s |\n' "${FAILED_CLASSES//,/, }"
+          printf '| Overall (informational) | %s%% |\n' "$COVERAGE_PCT"
+          printf '| Reported at | %s |\n' "$REPORT_DATE"
+          printf '| Workflow Run | [%s|%s] |\n\n' "$RUN_ID" "$RUN_URL"
+          printf '*Per-Class Breakdown (failing classes first)*\n\n'
+          printf '||Class||Lines Covered||Coverage||Status||\n'
+          printf '%s\n' "$JIRA_TABLE"
+        } > "$BODY_FILE"
 
-        while IFS= read -r LINE; do
-          [[ -z "$LINE" ]] && continue
-          JIRA_ROW=$(echo "$LINE" | sed 's/| [🟢🟡🔴] /| /g')
-          printf '\n%s' "$JIRA_ROW" >> "$BODY_FILE"
-        done <<< "$CLASS_TABLE"
-
-        printf '\n\n> 🟢 >= 90%%  🟡 75-89%%  🔴 < 75%% (Lodha minimum: %s%%)' "$MIN_COVERAGE" >> "$BODY_FILE"
-        COMMENT_BODY=$(cat "$BODY_FILE")
-        rm -f "$BODY_FILE"
+        PAYLOAD_FILE=$(mktemp)
+        python3 -c 'import json,sys; print(json.dumps({"body": sys.stdin.read()}))' < "$BODY_FILE" > "$PAYLOAD_FILE"
 
         echo "📝 Posting coverage comment to Jira ticket: $TICKET"
-
         HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
           -X POST \
           -u "${JIRA_EMAIL}:${JIRA_TOKEN}" \
           -H "Content-Type: application/json" \
           "${JIRA_BASE_URL}/rest/api/2/issue/${TICKET}/comment" \
-          -d "$(jq -n --arg body "$COMMENT_BODY" '{body: $body}')")
+          --data-binary @"$PAYLOAD_FILE" || echo "000")
+        rm -f "$BODY_FILE" "$PAYLOAD_FILE"
 
         if [[ "$HTTP_CODE" == "201" ]]; then
           echo "✅ Coverage comment posted to ${TICKET}"
