@@ -1,0 +1,28 @@
+# ── Reusable template: JWT auth to a Salesforce org ──────────────────────────
+parameters:
+  - name: sfUsername
+    type: string
+  - name: sfConsumerKey
+    type: string
+  - name: sfInstanceUrl
+    type: string
+  - name: serverKeyFile
+    type: string
+  - name: orgAlias
+    type: string
+    default: target-org
+
+steps:
+  - script: |
+      sf org logout --target-org "${{ parameters.sfUsername }}" --no-prompt || true
+    displayName: 'Clear prior Salesforce session'
+
+  - script: |
+      sf org login jwt \
+        --instance-url "${{ parameters.sfInstanceUrl }}" \
+        --client-id    "${{ parameters.sfConsumerKey }}" \
+        --username     "${{ parameters.sfUsername }}" \
+        --jwt-key-file "${{ parameters.serverKeyFile }}" \
+        --set-default \
+        --alias        "${{ parameters.orgAlias }}"
+    displayName: 'JWT Auth → ${{ parameters.orgAlias }}'

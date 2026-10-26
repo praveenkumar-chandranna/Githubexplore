@@ -1,0 +1,41 @@
+# ── Reusable template: Salesforce validate (checkonly) ───────────────────────
+parameters:
+  - name: packageFile
+    type: string
+  - name: testClasses
+    type: string
+    default: ''
+  - name: testLevel
+    type: string
+    default: RunLocalTests
+  - name: sfUsername
+    type: string
+
+steps:
+  - script: |
+      echo "📦 Package   : ${{ parameters.packageFile }}"
+      echo "🧪 Test Level: ${{ parameters.testLevel }}"
+      echo "── package.xml contents ──"
+      cat "${{ parameters.packageFile }}"
+    displayName: 'Show package.xml'
+
+  - ${{ if eq(parameters.testLevel, 'RunSpecifiedTests') }}:
+    - script: |
+        sf project deploy start \
+          --manifest   "${{ parameters.packageFile }}" \
+          --target-org "${{ parameters.sfUsername }}" \
+          --test-level RunSpecifiedTests \
+          --tests      "${{ parameters.testClasses }}" \
+          --dry-run \
+          --wait       120
+      displayName: 'Validate — RunSpecifiedTests'
+
+  - ${{ if ne(parameters.testLevel, 'RunSpecifiedTests') }}:
+    - script: |
+        sf project deploy start \
+          --manifest   "${{ parameters.packageFile }}" \
+          --target-org "${{ parameters.sfUsername }}" \
+          --test-level "${{ parameters.testLevel }}" \
+          --dry-run \
+          --wait       120
+      displayName: 'Validate — ${{ parameters.testLevel }}'

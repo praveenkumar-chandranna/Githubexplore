@@ -1,0 +1,32 @@
+# ── Reusable template: Salesforce deploy ─────────────────────────────────────
+parameters:
+  - name: packageFile
+    type: string
+  - name: testClasses
+    type: string
+    default: ''
+  - name: testLevel
+    type: string
+    default: RunLocalTests
+  - name: sfUsername
+    type: string
+
+steps:
+  - ${{ if eq(parameters.testLevel, 'RunSpecifiedTests') }}:
+    - script: |
+        sf project deploy start \
+          --manifest   "${{ parameters.packageFile }}" \
+          --target-org "${{ parameters.sfUsername }}" \
+          --test-level RunSpecifiedTests \
+          --tests      "${{ parameters.testClasses }}" \
+          --wait       120
+      displayName: 'Deploy — RunSpecifiedTests'
+
+  - ${{ if ne(parameters.testLevel, 'RunSpecifiedTests') }}:
+    - script: |
+        sf project deploy start \
+          --manifest   "${{ parameters.packageFile }}" \
+          --target-org "${{ parameters.sfUsername }}" \
+          --test-level "${{ parameters.testLevel }}" \
+          --wait       120
+      displayName: 'Deploy — ${{ parameters.testLevel }}'
