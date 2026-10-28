@@ -18,11 +18,6 @@ parameters:
       - RunAllTestsInOrg
       - RunSpecifiedTests
 
-  - name: TEST_CLASSES
-    displayName: 'Test Classes (comma-separated, required for RunSpecifiedTests)'
-    type: string
-    default: ''
-
 variables:
   - group: SF-SIT-Credentials
   # Variable group must contain:
@@ -32,7 +27,7 @@ variables:
   #   SF_JWT_KEY        → PEM content of JWT private key (mark as secret)
 
   - name: PACKAGE_FILE
-    value: 'manifest/feature/${{ parameters.FEATURE_BRANCHNAME }}_package.xml'
+    value: 'manifest/${{ parameters.FEATURE_BRANCHNAME }}_package.xml'
   - name: ORG_ALIAS
     value: 'SIT'
 
@@ -113,6 +108,5 @@ stages:
           - template: templates/sf-validate.yml
             parameters:
               packageFile: $(PACKAGE_FILE)
-              testClasses: ${{ parameters.TEST_CLASSES }}
               testLevel:   ${{ parameters.TEST_LEVEL }}
               sfUsername:  $(SF_USERNAME)

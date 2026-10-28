@@ -21,15 +21,10 @@ parameters:
       - RunAllTestsInOrg
       - RunSpecifiedTests
 
-  - name: TEST_CLASSES
-    displayName: 'Test Classes (comma-separated, required for RunSpecifiedTests)'
-    type: string
-    default: ''
-
 variables:
   - group: SF-PROD-Credentials
   - name: PACKAGE_FILE
-    value: 'manifest/feature/${{ parameters.FEATURE_BRANCHNAME }}_package.xml'
+    value: 'manifest/${{ parameters.FEATURE_BRANCHNAME }}_package.xml'
   - name: ORG_ALIAS
     value: 'PROD'
 
@@ -102,7 +97,6 @@ stages:
           - template: templates/sf-validate.yml
             parameters:
               packageFile: $(PACKAGE_FILE)
-              testClasses: ${{ parameters.TEST_CLASSES }}
               testLevel:   ${{ parameters.TEST_LEVEL }}
               sfUsername:  $(SF_USERNAME)
 
@@ -141,6 +135,5 @@ stages:
                 - template: templates/sf-deploy.yml
                   parameters:
                     packageFile: $(PACKAGE_FILE)
-                    testClasses: ${{ parameters.TEST_CLASSES }}
                     testLevel:   ${{ parameters.TEST_LEVEL }}
                     sfUsername:  $(SF_USERNAME)
