@@ -1,15 +1,15 @@
 # ══════════════════════════════════════════════════════════════════════════════
-# Salesforce QA — Deployment Pipeline (validate + deploy)
-# Always checks out from QA branch regardless of pipeline version selected
+# Salesforce Preprod — Validation Pipeline (checkonly)
 # ══════════════════════════════════════════════════════════════════════════════
 
 trigger: none
 
-parameters:
-  - name: FEATURE_BRANCHNAME
-    displayName: 'Feature branch name (used to locate package.xml)'
-    type: string
+pr:
+  branches:
+    include:
+      - Preprod
 
+parameters:
   - name: TEST_LEVEL
     displayName: 'Test Level'
     type: string
@@ -20,11 +20,13 @@ parameters:
       - RunSpecifiedTests
 
 variables:
-  - group: SF-QA-Credentials
+  - group: SF-Preprod-Credentials
+  - name: FEATURE_BRANCHNAME
+    value: $[ replace(variables['System.PullRequest.SourceBranch'], 'refs/heads/', '') ]
   - name: PACKAGE_FILE
-    value: 'manifest/${{ parameters.FEATURE_BRANCHNAME }}_package.xml'
+    value: 'manifest/$(FEATURE_BRANCHNAME)_package.xml'
   - name: ORG_ALIAS
-    value: 'QA'
+    value: 'PREPROD'
 
 pool:
   vmImage: ubuntu-latest
@@ -38,7 +40,6 @@ stages:
         displayName: 'Install SF CLI + JWT Auth'
         steps:
           - checkout: self
-            ref: refs/heads/QA
             fetchDepth: 0
           - script: |
               npm install -g @salesforce/cli@latest
@@ -48,7 +49,7 @@ stages:
               printf '%s' "$(SF_JWT_KEY)" > $(Agent.TempDirectory)/server.key
               chmod 600 $(Agent.TempDirectory)/server.key
             displayName: 'Write JWT key'
-          - template: templates/sf-auth.yml
+          - template: ../templates/sf-auth.yml
             parameters:
               sfUsername:    $(SF_USERNAME)
               sfConsumerKey: $(SF_CONSUMER_KEY)
@@ -74,23 +75,21 @@ stages:
         displayName: 'Run Code Analyzer'
         steps:
           - checkout: self
-            ref: refs/heads/QA
             fetchDepth: 0
           - script: npm install -g @salesforce/cli@latest
             displayName: 'Install Salesforce CLI'
-          - template: templates/code-analyzer.yml
+          - template: ../templates/code-analyzer.yml
             parameters:
               targetPath: '$(Build.SourcesDirectory)/force-app'
 
   - stage: Validate
-    displayName: 'Validate (checkonly) → QA'
+    displayName: 'Validate (checkonly) → Preprod'
     dependsOn: CodeAnalyzer
     jobs:
       - job: ValidateJob
         displayName: 'Salesforce Validate'
         steps:
           - checkout: self
-            ref: refs/heads/QA
             fetchDepth: 0
           - script: npm install -g @salesforce/cli@latest
             displayName: 'Install Salesforce CLI'
@@ -98,7 +97,7 @@ stages:
               printf '%s' "$(SF_JWT_KEY)" > $(Agent.TempDirectory)/server.key
               chmod 600 $(Agent.TempDirectory)/server.key
             displayName: 'Write JWT key'
-          - template: templates/sf-auth.yml
+          - template: ../templates/sf-auth.yml
             parameters:
               sfUsername:    $(SF_USERNAME)
               sfConsumerKey: $(SF_CONSUMER_KEY)
@@ -108,45 +107,8 @@ stages:
           - script: rm -f $(Agent.TempDirectory)/server.key
             displayName: 'Cleanup JWT key'
             condition: always()
-          - template: templates/sf-validate.yml
+          - template: ../templates/sf-validate.yml
             parameters:
               packageFile: $(PACKAGE_FILE)
               testLevel:   ${{ parameters.TEST_LEVEL }}
               sfUsername:  $(SF_USERNAME)
-
-  - stage: Deploy
-    displayName: 'Deploy → QA'
-    dependsOn: Validate
-    condition: succeeded()
-    jobs:
-      - deployment: DeployJob
-        displayName: 'Salesforce Deploy → QA'
-        environment: 'QA'
-        strategy:
-          runOnce:
-            deploy:
-              steps:
-                - checkout: self
-                  ref: refs/heads/QA
-                  fetchDepth: 0
-                - script: npm install -g @salesforce/cli@latest
-                  displayName: 'Install Salesforce CLI'
-                - script: |
-                    printf '%s' "$(SF_JWT_KEY)" > $(Agent.TempDirectory)/server.key
-                    chmod 600 $(Agent.TempDirectory)/server.key
-                  displayName: 'Write JWT key'
-                - template: templates/sf-auth.yml
-                  parameters:
-                    sfUsername:    $(SF_USERNAME)
-                    sfConsumerKey: $(SF_CONSUMER_KEY)
-                    sfInstanceUrl: $(SF_INSTANCE_URL)
-                    serverKeyFile: $(Agent.TempDirectory)/server.key
-                    orgAlias:      $(ORG_ALIAS)
-                - script: rm -f $(Agent.TempDirectory)/server.key
-                  displayName: 'Cleanup JWT key'
-                  condition: always()
-                - template: templates/sf-deploy.yml
-                  parameters:
-                    packageFile: $(PACKAGE_FILE)
-                    testLevel:   ${{ parameters.TEST_LEVEL }}
-                    sfUsername:  $(SF_USERNAME)

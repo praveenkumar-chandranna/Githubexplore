@@ -1,5 +1,5 @@
 # ══════════════════════════════════════════════════════════════════════════════
-# Salesforce UAT — Validation Pipeline (checkonly)
+# Salesforce SIT — Validation Pipeline (checkonly)
 # ══════════════════════════════════════════════════════════════════════════════
 
 trigger: none
@@ -7,7 +7,7 @@ trigger: none
 pr:
   branches:
     include:
-      - UAT
+      - SIT
 
 parameters:
   - name: TEST_LEVEL
@@ -20,13 +20,13 @@ parameters:
       - RunSpecifiedTests
 
 variables:
-  - group: SF-UAT-Credentials
+  - group: SF-SIT-Credentials
   - name: FEATURE_BRANCHNAME
     value: $[ replace(variables['System.PullRequest.SourceBranch'], 'refs/heads/', '') ]
   - name: PACKAGE_FILE
     value: 'manifest/$(FEATURE_BRANCHNAME)_package.xml'
   - name: ORG_ALIAS
-    value: 'UAT'
+    value: 'SIT'
 
 pool:
   vmImage: ubuntu-latest
@@ -41,24 +41,29 @@ stages:
         steps:
           - checkout: self
             fetchDepth: 0
+
           - script: |
               npm install -g @salesforce/cli@latest
               sf --version
             displayName: 'Install Salesforce CLI'
+
           - script: |
               printf '%s' "$(SF_JWT_KEY)" > $(Agent.TempDirectory)/server.key
               chmod 600 $(Agent.TempDirectory)/server.key
             displayName: 'Write JWT key'
-          - template: templates/sf-auth.yml
+
+          - template: ../templates/sf-auth.yml
             parameters:
               sfUsername:    $(SF_USERNAME)
               sfConsumerKey: $(SF_CONSUMER_KEY)
               sfInstanceUrl: $(SF_INSTANCE_URL)
               serverKeyFile: $(Agent.TempDirectory)/server.key
               orgAlias:      $(ORG_ALIAS)
+
           - script: rm -f $(Agent.TempDirectory)/server.key
             displayName: 'Cleanup JWT key'
             condition: always()
+
           - script: |
               if [[ ! -f "$(PACKAGE_FILE)" ]]; then
                 echo "❌ package.xml not found: $(PACKAGE_FILE)"; exit 1
@@ -78,12 +83,12 @@ stages:
             fetchDepth: 0
           - script: npm install -g @salesforce/cli@latest
             displayName: 'Install Salesforce CLI'
-          - template: templates/code-analyzer.yml
+          - template: ../templates/code-analyzer.yml
             parameters:
               targetPath: '$(Build.SourcesDirectory)/force-app'
 
   - stage: Validate
-    displayName: 'Validate (checkonly) → UAT'
+    displayName: 'Validate (checkonly) → SIT'
     dependsOn: CodeAnalyzer
     jobs:
       - job: ValidateJob
@@ -91,23 +96,28 @@ stages:
         steps:
           - checkout: self
             fetchDepth: 0
+
           - script: npm install -g @salesforce/cli@latest
             displayName: 'Install Salesforce CLI'
+
           - script: |
               printf '%s' "$(SF_JWT_KEY)" > $(Agent.TempDirectory)/server.key
               chmod 600 $(Agent.TempDirectory)/server.key
             displayName: 'Write JWT key'
-          - template: templates/sf-auth.yml
+
+          - template: ../templates/sf-auth.yml
             parameters:
               sfUsername:    $(SF_USERNAME)
               sfConsumerKey: $(SF_CONSUMER_KEY)
               sfInstanceUrl: $(SF_INSTANCE_URL)
               serverKeyFile: $(Agent.TempDirectory)/server.key
               orgAlias:      $(ORG_ALIAS)
+
           - script: rm -f $(Agent.TempDirectory)/server.key
             displayName: 'Cleanup JWT key'
             condition: always()
-          - template: templates/sf-validate.yml
+
+          - template: ../templates/sf-validate.yml
             parameters:
               packageFile: $(PACKAGE_FILE)
               testLevel:   ${{ parameters.TEST_LEVEL }}
