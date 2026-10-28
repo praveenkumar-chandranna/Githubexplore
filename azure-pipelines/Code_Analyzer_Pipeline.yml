@@ -1,0 +1,61 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# Salesforce — Code Analyzer Pipeline
+# Triggers on any feature/* or hotfix/* branch push, or run manually.
+# ══════════════════════════════════════════════════════════════════════════════
+
+trigger:
+  branches:
+    include:
+      - feature/*
+      - hotfix/*
+      - main
+      - develop
+
+pr:
+  branches:
+    include:
+      - main
+      - develop
+
+parameters:
+  - name: FEATURE_BRANCHNAME
+    displayName: 'Branch / folder name under force-app to scan (leave blank for full force-app)'
+    type: string
+    default: ''
+
+pool:
+  vmImage: ubuntu-latest
+
+stages:
+
+  - stage: CodeAnalyzer
+    displayName: 'Salesforce Code Analyzer'
+    jobs:
+      - job: CodeAnalyzerJob
+        displayName: 'Scan — ${{ coalesce(parameters.FEATURE_BRANCHNAME, Build.SourceBranchName) }}'
+        steps:
+          - checkout: self
+            fetchDepth: 0
+
+          - script: |
+              npm install -g @salesforce/cli@latest
+              sf --version
+            displayName: 'Install Salesforce CLI'
+
+          - script: |
+              if [[ -n "${{ parameters.FEATURE_BRANCHNAME }}" ]]; then
+                TARGET="$(Build.SourcesDirectory)/force-app/${{ parameters.FEATURE_BRANCHNAME }}"
+                if [[ ! -d "$TARGET" ]]; then
+                  echo "⚠️  Path not found: $TARGET — falling back to full force-app"
+                  TARGET="$(Build.SourcesDirectory)/force-app"
+                fi
+              else
+                TARGET="$(Build.SourcesDirectory)/force-app"
+              fi
+              echo "##vso[task.setvariable variable=SCAN_TARGET]$TARGET"
+              echo "✅ Scan target: $TARGET"
+            displayName: 'Resolve Scan Target'
+
+          - template: templates/code-analyzer.yml
+            parameters:
+              targetPath: '$(SCAN_TARGET)'

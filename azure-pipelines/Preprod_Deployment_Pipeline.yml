@@ -66,9 +66,25 @@ stages:
               cat "$(PACKAGE_FILE)"
             displayName: 'Validate package.xml exists'
 
+  - stage: CodeAnalyzer
+    displayName: 'Code Analyzer'
+    dependsOn: Setup
+    jobs:
+      - job: CodeAnalyzerJob
+        displayName: 'Run Code Analyzer'
+        steps:
+          - checkout: self
+            ref: refs/heads/Preprod
+            fetchDepth: 0
+          - script: npm install -g @salesforce/cli@latest
+            displayName: 'Install Salesforce CLI'
+          - template: templates/code-analyzer.yml
+            parameters:
+              targetPath: '$(Build.SourcesDirectory)/force-app'
+
   - stage: Validate
     displayName: 'Validate (checkonly) → Preprod'
-    dependsOn: Setup
+    dependsOn: CodeAnalyzer
     jobs:
       - job: ValidateJob
         displayName: 'Salesforce Validate'
