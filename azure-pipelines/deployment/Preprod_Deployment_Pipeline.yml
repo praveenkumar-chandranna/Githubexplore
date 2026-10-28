@@ -48,7 +48,7 @@ stages:
               printf '%s' "$(SF_JWT_KEY)" > $(Agent.TempDirectory)/server.key
               chmod 600 $(Agent.TempDirectory)/server.key
             displayName: 'Write JWT key'
-          - template: templates/sf-auth.yml
+          - template: ../templates/sf-auth.yml
             parameters:
               sfUsername:    $(SF_USERNAME)
               sfConsumerKey: $(SF_CONSUMER_KEY)
@@ -78,7 +78,7 @@ stages:
             fetchDepth: 0
           - script: npm install -g @salesforce/cli@latest
             displayName: 'Install Salesforce CLI'
-          - template: templates/code-analyzer.yml
+          - template: ../templates/code-analyzer.yml
             parameters:
               targetPath: '$(Build.SourcesDirectory)/force-app'
 
@@ -98,7 +98,7 @@ stages:
               printf '%s' "$(SF_JWT_KEY)" > $(Agent.TempDirectory)/server.key
               chmod 600 $(Agent.TempDirectory)/server.key
             displayName: 'Write JWT key'
-          - template: templates/sf-auth.yml
+          - template: ../templates/sf-auth.yml
             parameters:
               sfUsername:    $(SF_USERNAME)
               sfConsumerKey: $(SF_CONSUMER_KEY)
@@ -108,7 +108,7 @@ stages:
           - script: rm -f $(Agent.TempDirectory)/server.key
             displayName: 'Cleanup JWT key'
             condition: always()
-          - template: templates/sf-validate.yml
+          - template: ../templates/sf-validate.yml
             parameters:
               packageFile: $(PACKAGE_FILE)
               testLevel:   ${{ parameters.TEST_LEVEL }}
@@ -135,7 +135,7 @@ stages:
                     printf '%s' "$(SF_JWT_KEY)" > $(Agent.TempDirectory)/server.key
                     chmod 600 $(Agent.TempDirectory)/server.key
                   displayName: 'Write JWT key'
-                - template: templates/sf-auth.yml
+                - template: ../templates/sf-auth.yml
                   parameters:
                     sfUsername:    $(SF_USERNAME)
                     sfConsumerKey: $(SF_CONSUMER_KEY)
@@ -145,7 +145,7 @@ stages:
                 - script: rm -f $(Agent.TempDirectory)/server.key
                   displayName: 'Cleanup JWT key'
                   condition: always()
-                - template: templates/sf-deploy.yml
+                - template: ../templates/sf-deploy.yml
                   parameters:
                     packageFile: $(PACKAGE_FILE)
                     testLevel:   ${{ parameters.TEST_LEVEL }}
