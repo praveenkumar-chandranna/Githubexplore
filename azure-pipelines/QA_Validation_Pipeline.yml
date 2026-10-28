@@ -4,11 +4,12 @@
 
 trigger: none
 
-parameters:
-  - name: FEATURE_BRANCHNAME
-    displayName: 'Feature branch name (used to locate package.xml / TestClass.txt)'
-    type: string
+pr:
+  branches:
+    include:
+      - QA
 
+parameters:
   - name: TEST_LEVEL
     displayName: 'Test Level'
     type: string
@@ -20,11 +21,10 @@ parameters:
 
 variables:
   - group: SF-QA-Credentials
-  # Variable group must contain:
-  #   SF_USERNAME, SF_CONSUMER_KEY, SF_INSTANCE_URL, SF_JWT_KEY
-
+  - name: FEATURE_BRANCHNAME
+    value: $[ replace(variables['System.PullRequest.SourceBranch'], 'refs/heads/', '') ]
   - name: PACKAGE_FILE
-    value: 'manifest/${{ parameters.FEATURE_BRANCHNAME }}_package.xml'
+    value: 'manifest/$(FEATURE_BRANCHNAME)_package.xml'
   - name: ORG_ALIAS
     value: 'QA'
 

@@ -4,11 +4,12 @@
 
 trigger: none
 
-parameters:
-  - name: FEATURE_BRANCHNAME
-    displayName: 'Feature branch name (used to locate package.xml / TestClass.txt)'
-    type: string
+pr:
+  branches:
+    include:
+      - Preprod
 
+parameters:
   - name: TEST_LEVEL
     displayName: 'Test Level'
     type: string
@@ -20,8 +21,10 @@ parameters:
 
 variables:
   - group: SF-Preprod-Credentials
+  - name: FEATURE_BRANCHNAME
+    value: $[ replace(variables['System.PullRequest.SourceBranch'], 'refs/heads/', '') ]
   - name: PACKAGE_FILE
-    value: 'manifest/${{ parameters.FEATURE_BRANCHNAME }}_package.xml'
+    value: 'manifest/$(FEATURE_BRANCHNAME)_package.xml'
   - name: ORG_ALIAS
     value: 'PREPROD'
 
