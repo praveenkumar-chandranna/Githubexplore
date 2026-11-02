@@ -24,10 +24,11 @@ steps:
       IST_TIME=$(TZ='Asia/Kolkata' date +'%d-%m-%Y %H:%M:%S IST')
       JSON="$(Build.SourcesDirectory)/scanner-results.json"
 
-      printf '%s\n' '(if type=="array" then .[] else .violations[]? end) | . as $v | ($v.severity | numbers) as $s | (($v.locations[0].file // $v.fileName // $v.file // "unknown") | split("/") | last) as $f | ($v.locations[0].startLine // $v.line // "?") as $l | select($s <= 3) | "[SEV-"+($s|tostring)+"] "+$f+":"+($l|tostring)+" - "+($v.rule // $v.ruleName // "")+" | "+($v.message|gsub("\n";" ")|gsub("\r";" "))' > /tmp/jq_fail_log.jq
-      printf '%s\n' '(if type=="array" then .[] else .violations[]? end) | . as $v | ($v.severity | numbers) as $s | (($v.locations[0].file // $v.fileName // $v.file // "unknown") | split("/") | last) as $f | ($v.locations[0].startLine // $v.line // "?") as $l | select($s > 3) | "[SEV-"+($s|tostring)+"] "+$f+":"+($l|tostring)+" - "+($v.rule // $v.ruleName // "")+" | "+($v.message|gsub("\n";" ")|gsub("\r";" "))' > /tmp/jq_warn_log.jq
-      printf '%s\n' '(if type=="array" then .[] else .violations[]? end) | . as $v | ($v.severity | numbers) as $s | (($v.locations[0].file // $v.fileName // $v.file // "unknown") | split("/") | last) as $f | ($v.locations[0].startLine // $v.line // "?") as $l | select($s <= 3) | "| "+$f+" | "+($s|tostring)+" | "+($l|tostring)+" | "+($v.rule // $v.ruleName // "")+" | "+($v.message|gsub("\n";" ")|gsub("\r";" "))+" |"' > /tmp/jq_fail_table.jq
-      printf '%s\n' '(if type=="array" then .[] else .violations[]? end) | . as $v | ($v.severity | numbers) as $s | (($v.locations[0].file // $v.fileName // $v.file // "unknown") | split("/") | last) as $f | ($v.locations[0].startLine // $v.line // "?") as $l | select($s > 3) | "| "+$f+" | "+($s|tostring)+" | "+($l|tostring)+" | "+($v.rule // $v.ruleName // "")+" | "+($v.message|gsub("\n";" ")|gsub("\r";" "))+" |"' > /tmp/jq_warn_table.jq
+      JQ_DIR="$(Agent.TempDirectory)"
+      printf '%s\n' '(if type=="array" then .[] else .violations[]? end) | . as $v | ($v.severity | numbers) as $s | (($v.locations[0].file // $v.fileName // $v.file // "unknown") | split("/") | last) as $f | ($v.locations[0].startLine // $v.line // "?") as $l | select($s <= 3) | "[SEV-"+($s|tostring)+"] "+$f+":"+($l|tostring)+" - "+($v.rule // $v.ruleName // "")+" | "+($v.message|gsub("\n";" ")|gsub("\r";" "))' > "$JQ_DIR/jq_fail_log.jq"
+      printf '%s\n' '(if type=="array" then .[] else .violations[]? end) | . as $v | ($v.severity | numbers) as $s | (($v.locations[0].file // $v.fileName // $v.file // "unknown") | split("/") | last) as $f | ($v.locations[0].startLine // $v.line // "?") as $l | select($s > 3) | "[SEV-"+($s|tostring)+"] "+$f+":"+($l|tostring)+" - "+($v.rule // $v.ruleName // "")+" | "+($v.message|gsub("\n";" ")|gsub("\r";" "))' > "$JQ_DIR/jq_warn_log.jq"
+      printf '%s\n' '(if type=="array" then .[] else .violations[]? end) | . as $v | ($v.severity | numbers) as $s | (($v.locations[0].file // $v.fileName // $v.file // "unknown") | split("/") | last) as $f | ($v.locations[0].startLine // $v.line // "?") as $l | select($s <= 3) | "| "+$f+" | "+($s|tostring)+" | "+($l|tostring)+" | "+($v.rule // $v.ruleName // "")+" | "+($v.message|gsub("\n";" ")|gsub("\r";" "))+" |"' > "$JQ_DIR/jq_fail_table.jq"
+      printf '%s\n' '(if type=="array" then .[] else .violations[]? end) | . as $v | ($v.severity | numbers) as $s | (($v.locations[0].file // $v.fileName // $v.file // "unknown") | split("/") | last) as $f | ($v.locations[0].startLine // $v.line // "?") as $l | select($s > 3) | "| "+$f+" | "+($s|tostring)+" | "+($l|tostring)+" | "+($v.rule // $v.ruleName // "")+" | "+($v.message|gsub("\n";" ")|gsub("\r";" "))+" |"' > "$JQ_DIR/jq_warn_table.jq"
 
       SEV1=$(jq '[((if type=="array" then .[] else .violations[]? end) | .severity | numbers) | select(. == 1)] | length' "$JSON" 2>/dev/null || echo 0)
       SEV2=$(jq '[((if type=="array" then .[] else .violations[]? end) | .severity | numbers) | select(. == 2)] | length' "$JSON" 2>/dev/null || echo 0)
@@ -41,10 +42,10 @@ steps:
       echo "Severity 4-5 (Low/Info): $LOW_INFO violations (WARN only)"
       echo ""
       echo "===== Severity 1-3 Violations (FAIL) ====="
-      jq -rf /tmp/jq_fail_log.jq "$JSON" 2>/dev/null || true
+      jq -rf "$JQ_DIR/jq_fail_log.jq" "$JSON" 2>/dev/null || true
       echo ""
       echo "===== Severity 4-5 Violations (WARN) ====="
-      jq -rf /tmp/jq_warn_log.jq "$JSON" 2>/dev/null || true
+      jq -rf "$JQ_DIR/jq_warn_log.jq" "$JSON" 2>/dev/null || true
 
       SUMMARY="$(Build.SourcesDirectory)/scanner-summary.md"
       [[ "$SEV1" -gt 0  ]] && S1="FAIL" || S1="OK"
@@ -67,7 +68,7 @@ steps:
         if [[ "$FAIL_COUNT" -gt 0 ]]; then
           echo "| Class | Severity | Line | Rule | Message |"
           echo "|---|---|---|---|---|"
-          jq -rf /tmp/jq_fail_table.jq "$JSON" 2>/dev/null
+          jq -rf "$JQ_DIR/jq_fail_table.jq" "$JSON" 2>/dev/null
         else
           echo "_No violations found._"
         fi
@@ -76,7 +77,7 @@ steps:
         if [[ "$LOW_INFO" -gt 0 ]]; then
           echo "| Class | Severity | Line | Rule | Message |"
           echo "|---|---|---|---|---|"
-          jq -rf /tmp/jq_warn_table.jq "$JSON" 2>/dev/null
+          jq -rf "$JQ_DIR/jq_warn_table.jq" "$JSON" 2>/dev/null
         else
           echo "_No violations found._"
         fi
@@ -108,5 +109,9 @@ steps:
     displayName: 'Publish Code Analyzer Results'
     condition: always()
     inputs:
-      targetPath: '$(Build.SourcesDirectory)/scanner-results.html'
+      targetPath: '$(Build.SourcesDirectory)'
       artifact: 'code-analyzer-results_$(SCAN_TS)'
+      patterns: |
+        scanner-results.html
+        scanner-results.json
+        scanner-summary.md

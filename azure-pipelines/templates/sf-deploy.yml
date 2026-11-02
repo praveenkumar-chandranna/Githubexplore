@@ -13,7 +13,7 @@ steps:
     - script: |
         RESULTS_DIR="$(Build.SourcesDirectory)/test-results"
         mkdir -p "$RESULTS_DIR"
-        TEST_CLASS_FILE="$(echo '${{ parameters.packageFile }}' | sed 's/_package\.xml$/_TestClass.txt/')"
+        TEST_CLASS_FILE="$(echo "${{ parameters.packageFile }}" | sed 's/_package\.xml$/_TestClass.txt/')"
         if [[ ! -f "$TEST_CLASS_FILE" ]]; then
           echo "❌ Test class file not found: $TEST_CLASS_FILE"; exit 1
         fi
@@ -33,20 +33,25 @@ steps:
     - script: |
         RESULTS_DIR="$(Build.SourcesDirectory)/test-results"
         mkdir -p "$RESULTS_DIR"
-        EXTRA_ARGS=""
         if [[ "${{ parameters.testLevel }}" != "NoTestRun" ]]; then
-          EXTRA_ARGS="--coverage-formatters json --results-dir $RESULTS_DIR"
+          sf project deploy start \
+            --manifest   "${{ parameters.packageFile }}" \
+            --target-org "${{ parameters.sfUsername }}" \
+            --test-level "${{ parameters.testLevel }}" \
+            --coverage-formatters json \
+            --results-dir "$RESULTS_DIR" \
+            --wait       120
+        else
+          sf project deploy start \
+            --manifest   "${{ parameters.packageFile }}" \
+            --target-org "${{ parameters.sfUsername }}" \
+            --test-level "${{ parameters.testLevel }}" \
+            --wait       120
         fi
-        sf project deploy start \
-          --manifest   "${{ parameters.packageFile }}" \
-          --target-org "${{ parameters.sfUsername }}" \
-          --test-level "${{ parameters.testLevel }}" \
-          --wait       120 \
-          $EXTRA_ARGS
       displayName: 'Deploy — ${{ parameters.testLevel }}'
 
   - script: |
-      MC_FILE="$(echo '${{ parameters.packageFile }}' | sed 's/_package\.xml$/_MainClass.txt/')"
+      MC_FILE="$(echo "${{ parameters.packageFile }}" | sed 's/_package\.xml$/_MainClass.txt/')"
       if [[ ! -f "$MC_FILE" || ! -s "$MC_FILE" ]]; then
         echo "No MainClass.txt found - skipping coverage check"
         exit 0
