@@ -1,5 +1,5 @@
 # ══════════════════════════════════════════════════════════════════════════════
-# Salesforce QA — Deployment Pipeline (validate + deploy)
+# Salesforce QA — Deployment Pipeline (deploy only — validation + coverage done in validation pipeline)
 # Always checks out from QA branch regardless of pipeline version selected
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -13,7 +13,7 @@ parameters:
   - name: TEST_LEVEL
     displayName: 'Test Level'
     type: string
-    default: RunLocalTests
+    default: RunSpecifiedTests
     values:
       - RunLocalTests
       - RunAllTestsInOrg
@@ -82,41 +82,9 @@ stages:
             parameters:
               targetPath: '$(Build.SourcesDirectory)/force-app'
 
-  - stage: Validate
-    displayName: 'Validate (checkonly) → QA'
-    dependsOn: CodeAnalyzer
-    jobs:
-      - job: ValidateJob
-        displayName: 'Salesforce Validate'
-        steps:
-          - checkout: self
-            ref: refs/heads/QA
-            fetchDepth: 0
-          - script: npm install -g @salesforce/cli@latest
-            displayName: 'Install Salesforce CLI'
-          - script: |
-              printf '%s' "$(SF_JWT_KEY)" > $(Agent.TempDirectory)/server.key
-              chmod 600 $(Agent.TempDirectory)/server.key
-            displayName: 'Write JWT key'
-          - template: ../templates/sf-auth.yml
-            parameters:
-              sfUsername:    $(SF_USERNAME)
-              sfConsumerKey: $(SF_CONSUMER_KEY)
-              sfInstanceUrl: $(SF_INSTANCE_URL)
-              serverKeyFile: $(Agent.TempDirectory)/server.key
-              orgAlias:      $(ORG_ALIAS)
-          - script: rm -f $(Agent.TempDirectory)/server.key
-            displayName: 'Cleanup JWT key'
-            condition: always()
-          - template: ../templates/sf-validate.yml
-            parameters:
-              packageFile: $(PACKAGE_FILE)
-              testLevel:   ${{ parameters.TEST_LEVEL }}
-              sfUsername:  $(SF_USERNAME)
-
   - stage: Deploy
     displayName: 'Deploy → QA'
-    dependsOn: Validate
+    dependsOn: CodeAnalyzer
     condition: succeeded()
     jobs:
       - deployment: DeployJob
